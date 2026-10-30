@@ -25,3 +25,17 @@ Self-hosted web UI that drives the pi coding agent (`@earendil-works/pi-coding-a
 ## Checks
 - `cd server && npm test`: unit tests, plus GitHub flow against `test/mock-github.ts`, plus e2e against a real pi process and `test/mock-llm.ts`. The e2e tests skip when `pi` isn't on PATH; set `PI_BIN` to point at one.
 - `cd web && npm run build`: `tsc --noEmit` and the Vite build.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues for `kevin000001505/pi-workbench` (via the `gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix` (label strings equal the role names). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
