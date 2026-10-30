@@ -33,6 +33,26 @@ export type SessionSummary = {
   error: string | null;
   createdAt: number;
   updatedAt: number;
+  mode: "pipeline" | "direct";
+  phase: Phase;
+  attention: string | null;
+  grillSummary: string | null;
+  tickets: Ticket[];
+  activeRun: string;
+  runs: { id: string; label: string }[];
+};
+
+export type Phase = "setup" | "grill" | "tickets" | "implement" | "done" | "direct";
+
+export type Ticket = {
+  num: number;
+  title: string;
+  body: string;
+  blockedBy: number[];
+  trackerRef: string | null;
+  status: "ready" | "running" | "done" | "blocked";
+  note: string | null;
+  runId: string | null;
 };
 
 export type Repo = { id: string; owner: string; name: string; defaultBranch: string; private: boolean; needsSetup: boolean };

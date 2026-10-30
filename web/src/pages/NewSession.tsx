@@ -14,6 +14,7 @@ export function NewSession({ repoId }: { repoId?: string }) {
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [picker, setPicker] = useState(false);
+  const [mode, setMode] = useState<"pipeline" | "direct">("pipeline");
   const [creating, setCreating] = useState(false);
   const skills = useSkills();
 
@@ -32,7 +33,7 @@ export function NewSession({ repoId }: { repoId?: string }) {
   const create = async () => {
     setCreating(true);
     try {
-      const s = await api.post<SessionSummary>("/api/sessions", { repoId: repo, title, baseBranch: base || undefined, prompt });
+      const s = await api.post<SessionSummary>("/api/sessions", { repoId: repo, title, baseBranch: base || undefined, prompt, mode });
       upsert(s);
       go(`#/session/${s.id}`);
     } catch (e) {
@@ -76,6 +77,16 @@ export function NewSession({ repoId }: { repoId?: string }) {
               <input className="input mono" placeholder={selected?.defaultBranch ?? "main"} value={base} onChange={(e) => setBase(e.target.value)} />
             </label>
           </div>
+          <div className="mode-pick" role="radiogroup" aria-label="How to work">
+            <button type="button" role="radio" aria-checked={mode === "pipeline"} className={`mode ${mode === "pipeline" ? "on" : ""}`} onClick={() => setMode("pipeline")}>
+              <strong>Pipeline</strong>
+              <span className="muted small">grill-me → to-tickets → implement each ticket. You approve the plan and the tickets; the tickets then run on their own.</span>
+            </button>
+            <button type="button" role="radio" aria-checked={mode === "direct"} className={`mode ${mode === "direct" ? "on" : ""}`} onClick={() => setMode("direct")}>
+              <strong>Direct</strong>
+              <span className="muted small">Send the task straight to the agent. For small fixes.</span>
+            </button>
+          </div>
           {selected?.needsSetup && (
             <div className="alert alert-info">
               This repo hasn’t been set up for Matt Pocock’s skills yet. The session runs <code>/setup-matt-pocock-skills</code> first and
@@ -87,7 +98,7 @@ export function NewSession({ repoId }: { repoId?: string }) {
             <input className="input" placeholder="Taken from the first line of the task" value={title} onChange={(e) => setTitle(e.target.value)} />
           </label>
           <label className="rel">
-            Task
+            {mode === "pipeline" ? "What do you want built?" : "Task"}
             {picker && (
               <SkillPicker
                 skills={skills}
@@ -102,7 +113,7 @@ export function NewSession({ repoId }: { repoId?: string }) {
             <textarea
               className="input"
               rows={8}
-              placeholder="What should the agent do?"
+              placeholder={mode === "pipeline" ? "Describe the feature or change. grill-me will question you until the plan is clear." : "What should the agent do?"}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={(e) => {
@@ -111,10 +122,14 @@ export function NewSession({ repoId }: { repoId?: string }) {
             />
           </label>
           <div className="row gap between">
-            <button className="btn btn-ghost btn-sm" onClick={() => setPicker((p) => !p)}>
-              ✦ Start with a skill
-            </button>
-            <button className="btn btn-primary" disabled={!repo || creating} onClick={create}>
+            {mode === "direct" ? (
+              <button className="btn btn-ghost btn-sm" onClick={() => setPicker((p) => !p)}>
+                ✦ Start with a skill
+              </button>
+            ) : (
+              <span />
+            )}
+            <button className="btn btn-primary" disabled={!repo || creating || (mode === "pipeline" && !prompt.trim())} onClick={create}>
               {creating ? (
                 <>
                   <Spinner small /> Creating worktree…

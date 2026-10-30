@@ -8,6 +8,12 @@ Self-hosted web UI that drives the pi coding agent (`@earendil-works/pi-coding-a
 - `shared/transcript.ts`: the RPC-event → conversation reducer. **Both sides use it.** Change it in one place, never fork it.
 - `pi-extension/workbench.ts`: loaded into every pi process via the generated `settings.json`. Imports of pi packages and `typebox` resolve to pi's own copies.
 
+## Pipeline
+- Phase transitions happen in `SessionManager.afterSettled`, after a run settles, never mid-run. The extension's pipeline tools only validate and acknowledge. The server reads their arguments from `tool_execution_start` and applies them on a successful `tool_execution_end`.
+- Each ticket runs under its own pi session id (`<session>-t<num>-<stamp>`), stored on the ticket row. `sessions.active_run` says which run is live. A run switch emits `wb_run`, and the browser re-subscribes to get the new snapshot.
+- `server/test/mock-llm.ts` scripts the three phases by step. Keep `test/pipeline-e2e.test.ts` passing when you change prompts, tools, or transitions.
+- New columns go through `ADDED_COLUMNS` in `db.ts`, so older databases migrate on open.
+
 ## Rules
 - The extension and the server share a protocol: a dialog title that is a JSON `{"wb": "permission" | "decision", ...}` envelope. Change both together, and keep `server/test/e2e.test.ts` passing.
 - Never return secret values from the API, and never log them. `SecretStore.envFor` is the only decrypting path to pi. The master key must stay out of child environments: `processEnv` and `git()` strip it.

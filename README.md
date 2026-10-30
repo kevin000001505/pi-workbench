@@ -13,6 +13,7 @@ A self-hosted web UI for the [pi coding agent](https://github.com/earendil-works
 
 ## What you get
 
+- **Plan, then build, as the default.** A new session runs a pipeline (see [The pipeline](#the-pipeline)): `grill-me` questions you until the plan is clear, `to-tickets` splits it into small tickets, and `implement` builds them one at a time. Pick **Direct** on the New session form to skip the pipeline for small fixes.
 - **Live sessions.** Every session streams text, thinking, and tool calls as they happen. Sessions keep running when you close the tab, and several can run in parallel, each in its own git worktree and branch.
 - **Permissions.** Before a risky tool call runs, the session waits for **Allow / Allow for this session / Deny**. Risky calls include `git push`, `gh`, `rm -r`, `sudo`, `curl`/`wget`, package installs, destructive git commands, and writes outside the worktree. You can edit the rules under Settings.
 - **Decisions.** The agent has an `ask_user` tool. Its questions show up as decision cards with options, and you can always type your own answer. A waiting session never times out.
@@ -22,6 +23,24 @@ A self-hosted web UI for the [pi coding agent](https://github.com/earendil-works
 - **GitHub.** **Create repo** makes a new GitHub repo and clones it. **Create PR**: the model drafts a title and body from the diff, you edit them, then the server pushes the branch and opens the PR. After that, the session header shows the PR's state and CI.
 - **Secrets.** Environment variables for sessions, global or per repo. They are encrypted at rest (AES-256-GCM) and write-only from the browser.
 - **Model settings.** Base URL, model ID (listed from the endpoint's `/v1/models`), context window, and output limit. The default is `Qwen3.8-27B-radiance` with 256K (262144) tokens.
+
+## The pipeline
+
+| Phase | What runs | Ends when |
+|---|---|---|
+| Setup | `/setup-matt-pocock-skills`, only on a repo that hasn't run it | its files are committed |
+| Grill | `/skill:grill-me` on your task; questions arrive as decision cards | you confirm a shared understanding and the agent calls `save_grill_summary` |
+| Tickets | `/skill:to-tickets`, in the same conversation | you approve the breakdown, the agent publishes it to the repo's tracker and calls `record_tickets` |
+| Implement | `/skill:implement` per ticket, in dependency order | the agent calls `finish_ticket`; the next ticket starts |
+| Done | messages become plain follow-ups on the same branch | you press **Create PR** |
+
+- **Every ticket starts a fresh pi conversation** in the session's worktree and branch, so each one fits its own context window. It starts with the ticket, the agreed decisions saved by grilling, and a note from each finished ticket. That's the memory between tickets, kept in SQLite.
+- **Each ticket's conversation stays readable** from the run tabs above the transcript.
+- **The pipeline stops and notifies you** when a ticket reports itself blocked, stops without finishing, or is stopped by you. **Retry ticket** reruns it from scratch. **Mark done & continue** moves on. A reply in the chat continues the same ticket.
+- **When all tickets are done,** the session tells you, and **Create PR** drafts a PR whose body lists the tickets. GitHub issues become `Closes #n`.
+- **New feature, new session.** One session holds one feature.
+
+Matt Pocock's skills hand off to each other by "calling the Skill tool" (`grill-me` → `grilling`, `implement` → `tdd` and `code-review`). The workbench extension adds a `Skill` tool to pi so these hand-offs work.
 
 ## Deploy
 
@@ -84,7 +103,8 @@ Then enable notifications under **Settings → Notifications**.
 |---|---|
 | One `pi --mode rpc` process per session, JSONL over stdio, resumed by session ID from `/data/pi-sessions` | `server/src/rpc.ts`, `server/src/sessions.ts` |
 | Rebuilding the streamed conversation, shared by the server snapshot and the browser | `shared/transcript.ts` |
-| Approval gate and `ask_user` tool, both through pi's `extension_ui_request` dialogs | `pi-extension/workbench.ts` |
+| Approval gate, `ask_user`, `Skill`, and the pipeline tools (`save_grill_summary`, `record_tickets`, `finish_ticket`) | `pi-extension/workbench.ts` |
+| Pipeline phases, prompts, ticket order | `server/src/pipeline.ts`, `server/src/sessions.ts` |
 | pi config (`models.json`, `settings.json`, rules) generated from the db | `server/src/settings.ts` |
 | Clones, worktrees, setup detection (`docs/agents/issue-tracker.md`) | `server/src/repos.ts` |
 | PR drafting and opening | `server/src/prs.ts`, `server/src/github.ts` |
@@ -96,7 +116,9 @@ Then enable notifications under **Settings → Notifications**.
 
 ### Why the pi coding agent and not `pi-durable`
 
-`@earendil-works/pi-durable` is an experimental library: no coding tools, no skills, no approval flow, and an API that changes without notice. The pi coding agent's RPC mode already has all three. Resuming saved sessions covers keeping your work across restarts.
+`@earendil-works/pi-durable` is an experimental library: no coding tools, no skills, no approval flow, and an API that changes without notice. The pi coding agent's RPC mode already has all three.
+
+Orchestration and memory live in the workbench's own SQLite: phases, tickets, blocking edges, notes, and the grill summary. pi's session files keep each conversation, so a stopped run resumes where it left off.
 
 ## Development
 

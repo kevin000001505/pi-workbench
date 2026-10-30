@@ -1,6 +1,6 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { applyEvent, emptyTranscript, type RpcEvent, type Transcript } from "../../shared/transcript.ts";
-import type { SessionSummary, UiRequest } from "./types.ts";
+import type { SessionSummary } from "./types.ts";
 
 type Toast = { id: number; text: string; level: "info" | "warning" | "error" };
 
@@ -40,13 +40,9 @@ export function setNotifications(on: boolean) {
   } catch {}
 }
 
-function notify(session: SessionSummary, req: UiRequest) {
+function notify(session: SessionSummary, title: string, body: string, tag: string) {
   if (!notificationsEnabled() || !document.hidden) return;
-  const body = req.kind === "permission" ? `${req.subject ?? req.tool}` : req.title;
-  const n = new Notification(`${req.kind === "permission" ? "Permission needed" : "Decision needed"} · ${session.title}`, {
-    body: body.slice(0, 200),
-    tag: req.id,
-  });
+  const n = new Notification(`${title} · ${session.title}`, { body: body.slice(0, 200), tag });
   n.onclick = () => {
     window.focus();
     location.hash = `#/session/${session.id}`;
@@ -65,6 +61,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const ws = useRef<WebSocket | null>(null);
   const frame = useRef(0);
   const seenPending = useRef(new Set<string>());
+  /** Last known attention/phase per session, to notify on changes only. */
+  const lastState = useRef(new Map<string, string>());
 
   const bump = useCallback(() => {
     if (frame.current) return;
@@ -84,8 +82,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     for (const req of s.pending) {
       if (!seenPending.current.has(req.id)) {
         seenPending.current.add(req.id);
-        notify(s, req);
+        notify(
+          s,
+          req.kind === "permission" ? "Permission needed" : "Decision needed",
+          req.kind === "permission" ? `${req.subject ?? req.tool}` : req.title,
+          req.id,
+        );
       }
+    }
+    // The pipeline stopping for you, or finishing, is worth a notification too.
+    const key = `${s.attention ?? ""}|${s.phase}`;
+    const prev = lastState.current.get(s.id);
+    lastState.current.set(s.id, key);
+    if (prev !== undefined && prev !== key) {
+      if (s.attention) notify(s, "Pipeline needs you", s.attention, `${s.id}-attention`);
+      else if (s.phase === "done" && s.mode === "pipeline" && !prev.endsWith("|done")) notify(s, "All tickets done", "Review and create the PR.", `${s.id}-done`);
     }
     setSessions((prev) => ({ ...prev, [s.id]: s }));
   }, []);
@@ -113,6 +124,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             for (const s of msg.sessions as SessionSummary[]) {
               next[s.id] = s;
               for (const r of s.pending) seenPending.current.add(r.id);
+              lastState.current.set(s.id, `${s.attention ?? ""}|${s.phase}`);
             }
             setSessions(next);
             break;
@@ -137,6 +149,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             if (ev.type === "wb_notify") toast(String(ev.message), ev.level);
             else if (ev.type === "wb_exit" && ev.error) toast(ev.error, "error");
             else if (ev.type === "extension_error") toast(`Extension error: ${ev.error}`, "error");
+            else if (ev.type === "wb_run") {
+              // The session moved to another pi conversation (next ticket): reload it.
+              transcripts.current.set(msg.sessionId, emptyTranscript());
+              ws.current?.send(JSON.stringify({ type: "subscribe", sessionId: msg.sessionId }));
+              bump();
+              break;
+            }
             const t = transcripts.current.get(msg.sessionId) ?? emptyTranscript();
             transcripts.current.set(msg.sessionId, applyEvent(t, ev));
             bump();
@@ -167,7 +186,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   // Tab title shows how many sessions wait on you.
   useEffect(() => {
-    const waiting = Object.values(sessions).filter((s) => s.pending.length > 0).length;
+    const waiting = Object.values(sessions).filter((s) => s.pending.length > 0 || s.attention).length;
     document.title = waiting ? `(${waiting}) pi workbench` : "pi workbench";
   }, [sessions]);
 

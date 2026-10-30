@@ -2,11 +2,13 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { go } from "../App.tsx";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
+import type { Transcript as TranscriptT } from "../../../shared/transcript.ts";
 import type { PrStatus } from "../types.ts";
 import { Empty, kTokens, Spinner, StatusPill } from "../ui.tsx";
 import { ChangesModal } from "./ChangesModal.tsx";
 import { Composer } from "./Composer.tsx";
 import { PendingCard } from "./PendingCard.tsx";
+import { PipelinePanel } from "./PipelinePanel.tsx";
 import { PrModal } from "./PrModal.tsx";
 import { Transcript } from "./Transcript.tsx";
 
@@ -48,11 +50,25 @@ export function SessionView({ id }: { id: string }) {
   const [title, setTitle] = useState("");
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  /** A past run being read (a finished ticket, or the plan conversation); null shows the live one. */
+  const [past, setPast] = useState<{ runId: string; t: TranscriptT | null } | null>(null);
 
   useEffect(() => {
     watch(id);
     return () => watch(null);
   }, [id, watch]);
+
+  const viewRun = (runId: string) => {
+    if (!s || runId === s.activeRun) return setPast(null);
+    setPast({ runId, t: null });
+    api
+      .get<TranscriptT>(`/api/sessions/${id}/runs/${encodeURIComponent(runId)}`)
+      .then((t) => setPast((p) => (p?.runId === runId ? { runId, t } : p)))
+      .catch((e) => {
+        toast(e.message, "error");
+        setPast(null);
+      });
+  };
 
   // Follow the stream while the user is at the bottom; leave them be once they scroll up.
   useLayoutEffect(() => {
@@ -155,6 +171,21 @@ export function SessionView({ id }: { id: string }) {
         </div>
       </header>
 
+      {s.mode === "pipeline" && <PipelinePanel s={s} viewRun={past?.runId ?? s.activeRun} onView={viewRun} />}
+      {s.runs.length > 1 && (
+        <div className="run-tabs tabs">
+          {s.runs.map((r) => {
+            const on = (past?.runId ?? s.activeRun) === r.id;
+            return (
+              <button key={r.id} className={on ? "active" : ""} onClick={() => viewRun(r.id)} title={r.label}>
+                {r.id === s.activeRun && <span className="live-dot" />}
+                {r.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <div
         className="session-scroll"
         ref={scroller}
@@ -163,7 +194,15 @@ export function SessionView({ id }: { id: string }) {
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         }}
       >
-        {!t ? (
+        {past ? (
+          past.t ? (
+            <Transcript t={past.t} />
+          ) : (
+            <div className="center-pad">
+              <Spinner />
+            </div>
+          )
+        ) : !t ? (
           <div className="center-pad">
             <Spinner />
           </div>
@@ -185,11 +224,23 @@ export function SessionView({ id }: { id: string }) {
       </div>
 
       <div className="session-foot">
-        {s.heldPrompt && (
+        {past && (
+          <div className="held">
+            <span className="muted">You are reading an earlier run. It is read-only.</span>
+            <button className="btn btn-sm btn-primary" onClick={() => setPast(null)}>
+              Back to live
+            </button>
+          </div>
+        )}
+        {!past && s.heldPrompt && (
           <div className="held">
             <div>
               <strong>Setting up Matt Pocock’s skills first.</strong>{" "}
-              <span className="muted">Your task is queued and goes out once setup commits its files:</span>
+              <span className="muted">
+                {s.mode === "pipeline"
+                  ? "Then grill-me starts on your task:"
+                  : "Your task is queued and goes out once setup commits its files:"}
+              </span>
               <div className="held-text">{s.heldPrompt}</div>
             </div>
             <div className="row gap">
@@ -202,10 +253,8 @@ export function SessionView({ id }: { id: string }) {
             </div>
           </div>
         )}
-        {s.pending.map((r) => (
-          <PendingCard key={r.id} sessionId={id} req={r} />
-        ))}
-        <Composer
+        {!past && s.pending.map((r) => <PendingCard key={r.id} sessionId={id} req={r} />)}
+        {!past && <Composer
           sessionId={id}
           busy={busy}
           onSend={async (text, mode) => {
@@ -215,7 +264,7 @@ export function SessionView({ id }: { id: string }) {
               throw e;
             });
           }}
-        />
+        />}
       </div>
       {pr && <PrModal session={s} onClose={() => setPr(false)} />}
       {changes && <ChangesModal sessionId={id} onClose={() => setChanges(false)} />}

@@ -1,6 +1,7 @@
 import type { Route } from "./App.tsx";
 import { useStore } from "./store.tsx";
 import type { SessionSummary } from "./types.ts";
+import { phaseLabel } from "./session/PipelinePanel.tsx";
 import { StatusDot } from "./ui.tsx";
 
 function SessionLink({ s, active }: { s: SessionSummary; active: boolean }) {
@@ -14,10 +15,12 @@ function SessionLink({ s, active }: { s: SessionSummary; active: boolean }) {
             ? s.pending[0].kind === "permission"
               ? `Permission: ${s.pending[0].tool}`
               : "Decision needed"
-            : s.activity || (s.prNumber ? `PR #${s.prNumber}` : s.branch)}
+            : s.attention
+              ? "Pipeline needs you"
+              : s.activity || phaseLabel(s) || (s.prNumber ? `PR #${s.prNumber}` : s.branch)}
         </span>
       </span>
-      {s.pending.length > 0 && <span className="badge">{s.pending.length}</span>}
+      {(s.pending.length > 0 || s.attention) && <span className="badge">{s.pending.length || "!"}</span>}
     </a>
   );
 }
@@ -25,7 +28,7 @@ function SessionLink({ s, active }: { s: SessionSummary; active: boolean }) {
 export function Sidebar({ route, onClose }: { route: Route; onClose: () => void }) {
   const { sessions, connected } = useStore();
   const all = Object.values(sessions).sort((a, b) => b.updatedAt - a.updatedAt);
-  const waiting = all.filter((s) => s.pending.length > 0);
+  const waiting = all.filter((s) => s.pending.length > 0 || s.attention);
   const byRepo = new Map<string, SessionSummary[]>();
   for (const s of all) byRepo.set(s.repoId, [...(byRepo.get(s.repoId) ?? []), s]);
   const activeId = route.page === "session" ? route.id : null;

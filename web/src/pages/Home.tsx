@@ -1,10 +1,11 @@
+import { phaseLabel } from "../session/PipelinePanel.tsx";
 import { useStore } from "../store.tsx";
 import { ago, Empty, PageHeader, StatusPill } from "../ui.tsx";
 
 export function Home() {
   const { sessions } = useStore();
   const all = Object.values(sessions).sort((a, b) => b.updatedAt - a.updatedAt);
-  const waiting = all.filter((s) => s.pending.length > 0);
+  const waiting = all.filter((s) => s.pending.length > 0 || s.attention);
   const running = all.filter((s) => s.status === "running" || s.status === "starting");
 
   if (all.length === 0) {
@@ -35,7 +36,7 @@ export function Home() {
       </PageHeader>
       <div className="cards">
         {all.map((s) => (
-          <a key={s.id} href={`#/session/${s.id}`} className={`card session-card ${s.pending.length ? "card-attn" : ""}`}>
+          <a key={s.id} href={`#/session/${s.id}`} className={`card session-card ${s.pending.length || s.attention ? "card-attn" : ""}`}>
             <div className="row between">
               <StatusPill status={s.status} />
               <span className="muted small">{ago(s.updatedAt)}</span>
@@ -49,10 +50,13 @@ export function Home() {
                 ? s.pending[0].kind === "permission"
                   ? `⚠ Wants to run: ${s.pending[0].subject}`
                   : `❓ ${s.pending[0].title}`
-                : s.heldPrompt
-                  ? "Setting up skills; your task is queued"
-                  : s.activity || (s.error ? s.error : "Idle")}
+                : s.attention
+                  ? `⚠ ${s.attention}`
+                  : s.heldPrompt
+                    ? "Setting up skills; your task is queued"
+                    : s.activity || (s.error ? s.error : "Idle")}
             </p>
+            {s.mode === "pipeline" && <p className="small phase-line">{phaseLabel(s)}</p>}
             {s.prUrl && <span className="tag">PR #{s.prNumber}</span>}
           </a>
         ))}
