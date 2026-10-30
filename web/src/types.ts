@@ -104,3 +104,9 @@ export type PrStatus = {
   comments: number;
   checks: { total: number; pending: number; failed: number; passed: number };
 };
+
+export type ProbeResult = {
+  ok: boolean;
+  models: string[];
+  checks: { name: string; url: string; ok: boolean; status?: number; contentType?: string; excerpt?: string; hint?: string; ms: number }[];
+};

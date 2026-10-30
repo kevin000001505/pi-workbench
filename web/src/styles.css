@@ -1602,3 +1602,35 @@ label .skill-picker {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------- endpoint test ---------- */
+.text-ok {
+  color: var(--ok);
+}
+.probe {
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.probe-ok {
+  border-color: rgba(60, 207, 145, 0.45);
+}
+.probe-fail {
+  border-color: rgba(255, 107, 107, 0.45);
+}
+.probe-check p {
+  margin: 4px 0 0 22px;
+}
+.probe-hint {
+  font-size: 13px;
+}
+.probe-excerpt {
+  margin: 6px 0 0 22px;
+  max-height: 120px;
+}
+.msg-error details {
+  margin-top: 4px;
+}

@@ -22,7 +22,7 @@ A self-hosted web UI for the [pi coding agent](https://github.com/earendil-works
 - **Setup on every repo.** A repo's first session runs `/setup-matt-pocock-skills` before your task. Its questions come to you as decision cards, it commits the result on the session branch, and then your task goes out.
 - **GitHub.** **Create repo** makes a new GitHub repo and clones it. **Create PR**: the model drafts a title and body from the diff, you edit them, then the server pushes the branch and opens the PR. After that, the session header shows the PR's state and CI.
 - **Secrets.** Environment variables for sessions, global or per repo. They are encrypted at rest (AES-256-GCM) and write-only from the browser.
-- **Model settings.** Base URL, model ID (listed from the endpoint's `/v1/models`), context window, and output limit. The default is `Qwen3.8-27B-radiance` with 256K (262144) tokens.
+- **Model settings.** Base URL, model ID (listed from the endpoint's `/v1/models`), context window, and output limit. The default is `Qwen3.8-27B-radiance` with 256K (262144) tokens. **Test** makes the same chat call a session makes and reports the URL, status, and likely cause when it fails (wrong service, missing `/v1`, unknown model, missing key, unreachable host).
 
 ## The pipeline
 

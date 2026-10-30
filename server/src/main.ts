@@ -7,7 +7,7 @@ import { openDb } from "./db.ts";
 import type { GitEnv } from "./git.ts";
 import { GitHub, GitHubError } from "./github.ts";
 import { checkRequestOrigin, type Ctx, HttpError, readJson, Router, sendJson, serveStatic } from "./http.ts";
-import { listModels } from "./llm.ts";
+import { listModels, probeEndpoint } from "./llm.ts";
 import { draftPr, openPr, changes } from "./prs.ts";
 import { addRepo, assertRepoName, clonePath, getRepo, listRepos, repoNeedsSetup } from "./repos.ts";
 import { GLOBAL_SCOPE, SecretStore } from "./secrets.ts";
@@ -222,6 +222,13 @@ const router = new Router()
     const m = getModelSettings(db);
     const baseUrl = query.get("baseUrl");
     return listModels(baseUrl ? { ...m, baseUrl } : m, llmKey());
+  })
+  .on("POST", "/api/models/test", async ({ body }) => {
+    const m = getModelSettings(db);
+    return probeEndpoint(
+      { ...m, baseUrl: typeof body.baseUrl === "string" && body.baseUrl ? body.baseUrl : m.baseUrl, modelId: typeof body.modelId === "string" && body.modelId ? body.modelId : m.modelId },
+      llmKey(),
+    );
   })
   .on("GET", "/api/secrets", () => secrets.list())
   .on("PUT", "/api/secrets", ({ body }) => {
