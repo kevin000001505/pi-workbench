@@ -1,0 +1,16 @@
+{
+  "name": "pi-workbench-server",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/main.ts",
+    "dev": "node --watch src/main.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 test/*.test.ts"
+  },
+  "dependencies": {
+    "ws": "8.18.3"
+  }
+}
