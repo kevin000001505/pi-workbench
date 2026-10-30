@@ -129,6 +129,7 @@ const router = new Router()
       title: String(body.title ?? ""),
       baseBranch: body.baseBranch ? String(body.baseBranch) : undefined,
       prompt: String(body.prompt ?? ""),
+      mode: body.mode === "direct" ? "direct" : "pipeline",
     }),
   )
   .on("GET", "/api/sessions/:id", ({ params }) => sessions.snapshot(params.id))
@@ -169,13 +170,19 @@ const router = new Router()
     await sessions.releaseHeld(params.id, body.action === "discard");
     return { ok: true };
   })
+  .on("POST", "/api/sessions/:id/pipeline", async ({ params, body }) => {
+    if (!["retry", "skip", "stop"].includes(body.action)) throw new HttpError(400, "action must be retry, skip or stop");
+    await sessions.pipelineAction(params.id, body.action);
+    return sessions.summary(params.id);
+  })
+  .on("GET", "/api/sessions/:id/runs/:runId", ({ params }) => sessions.runTranscript(params.id, params.runId))
   .on("GET", "/api/sessions/:id/changes", async ({ params }) => {
     const { row } = sessions.repoOf(params.id);
     return changes(row, await gitEnv());
   })
   .on("POST", "/api/sessions/:id/pr/draft", async ({ params }) => {
     const { row } = sessions.repoOf(params.id);
-    return draftPr(row, await gitEnv(), getModelSettings(db), llmKey());
+    return draftPr(row, await gitEnv(), getModelSettings(db), llmKey(), sessions.tickets(params.id));
   })
   .on("POST", "/api/sessions/:id/pr", async ({ params, body }) => {
     const { row, repo } = sessions.repoOf(params.id);

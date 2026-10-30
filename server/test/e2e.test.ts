@@ -80,7 +80,7 @@ after(async () => {
 test("first session runs setup, holds the task, then releases it", { skip: !hasPi && "pi CLI not found" }, async () => {
   const events: any[] = [];
   mgr.on("event", (_id: string, ev: any) => events.push(ev));
-  const s = await mgr.create({ repoId: "me/demo", title: "Say hello", prompt: "hello there" });
+  const s = await mgr.create({ repoId: "me/demo", title: "Say hello", prompt: "hello there", mode: "direct" });
   assert.equal(s.heldPrompt, "hello there");
   assert.equal(s.setupRunning, true);
 

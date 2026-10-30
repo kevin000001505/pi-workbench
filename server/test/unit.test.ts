@@ -152,3 +152,56 @@ test("redact strips tokens from git output", () => {
   assert.equal(redact("fatal: https://x-access-token:ghp_abcdefghijklmnopqrstuvwxyz12@github.com/a/b"), "fatal: https://***@github.com/a/b");
   assert.equal(redact("token github_pat_11ABCDEFGHIJKLMNOPQRSTUV_xyz leaked"), "token *** leaked");
 });
+
+test("pipeline: ticket validation, frontier order and prompts", async () => {
+  const { validateTickets, nextTicket, allDone, implementPrompt } = await import("../src/pipeline.ts");
+  const { ticketsSection } = await import("../src/prs.ts");
+  const ok = validateTickets([
+    { number: 2, title: "B", body: "b", blockedBy: [1] },
+    { number: 1, title: "A", body: "a" },
+  ]);
+  assert.deepEqual(ok.map((t) => t.number), [1, 2]);
+  assert.throws(() => validateTickets([]), /non-empty/);
+  assert.throws(() => validateTickets([{ number: 1, title: "A", body: "a", blockedBy: [3] }]), /unknown ticket 3/);
+  assert.throws(() => validateTickets([{ number: 1, title: "A", body: "a" }, { number: 1, title: "B", body: "b" }]), /unique/);
+  assert.throws(
+    () => validateTickets([{ number: 1, title: "A", body: "a", blockedBy: [2] }, { number: 2, title: "B", body: "b", blockedBy: [1] }]),
+    /cycle/,
+  );
+
+  const t = (num: number, status: string, blockedBy: number[] = []) =>
+    ({ num, title: `T${num}`, body: "", blockedBy, trackerRef: null, status, note: null, runId: null }) as any;
+  assert.equal(nextTicket([t(1, "done"), t(2, "ready", [1]), t(3, "ready")])!.num, 2);
+  assert.equal(nextTicket([t(1, "blocked"), t(2, "ready", [1])]), undefined);
+  assert.equal(allDone([t(1, "done"), t(2, "done")]), true);
+  assert.equal(allDone([]), false);
+
+  const prompt = implementPrompt(t(2, "ready", [1]), "Use SQLite.", [{ ...t(1, "done"), note: "Added schema" }]);
+  assert.match(prompt, /^\/skill:implement Ticket #2: T2/);
+  assert.match(prompt, /Use SQLite\./);
+  assert.match(prompt, /- #1 T1: Added schema/);
+  assert.match(prompt, /finish_ticket/);
+
+  const section = ticketsSection([
+    { ...t(1, "done"), trackerRef: "#12" },
+    { ...t(2, "ready"), trackerRef: "https://github.com/a/b/issues/13" },
+    { ...t(3, "done"), trackerRef: ".scratch/x/issues/03.md" },
+  ]);
+  assert.match(section, /- \[x\] #1 T1 \(Closes #12\)/);
+  assert.match(section, /- \[ \] #2 T2 \(Closes #13\)/);
+  assert.match(section, /- \[x\] #3 T3 \(`\.scratch\/x\/issues\/03\.md`\)/);
+});
+
+test("old databases gain the pipeline columns", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wb-mig-")), "old.db");
+  const old = new DatabaseSync(file);
+  old.exec(
+    "CREATE TABLE sessions (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, title TEXT NOT NULL, branch TEXT NOT NULL, base_branch TEXT NOT NULL, worktree TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, pr_number INTEGER, pr_url TEXT, held_prompt TEXT, archived INTEGER NOT NULL DEFAULT 0)",
+  );
+  old.prepare("INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at) VALUES ('s','r','t','b','main','/w',0,0)").run();
+  old.close();
+  const db = openDb(file);
+  const row = db.prepare("SELECT mode, phase, active_run, attention FROM sessions").get() as any;
+  assert.deepEqual({ ...row }, { mode: "direct", phase: "direct", active_run: null, attention: null });
+});

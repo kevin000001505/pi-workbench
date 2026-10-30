@@ -11,8 +11,19 @@ import {
   withMessages,
 } from "../../shared/transcript.ts";
 import { config, PROVIDER_ID, SETUP_SKILL } from "./config.ts";
-import type { Db, RepoRow, SessionRow } from "./db.ts";
+import type { Db, RepoRow, SessionRow, TicketRow } from "./db.ts";
 import type { GitEnv } from "./git.ts";
+import {
+  allDone,
+  grillPrompt,
+  implementPrompt,
+  nextTicket,
+  type Phase,
+  PIPELINE_TOOLS,
+  type Ticket,
+  ticketsPrompt,
+  validateTickets,
+} from "./pipeline.ts";
 import { createWorktree, getRepo, removeWorktree, slugify, worktreeNeedsSetup } from "./repos.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
@@ -38,6 +49,8 @@ export type UiRequest = {
 
 export type UiResponse = { value?: string; confirmed?: boolean; cancelled?: boolean };
 
+export type Run = { id: string; label: string };
+
 export type SessionSummary = {
   id: string;
   repoId: string;
@@ -56,6 +69,15 @@ export type SessionSummary = {
   error: string | null;
   createdAt: number;
   updatedAt: number;
+  mode: "pipeline" | "direct";
+  phase: Phase;
+  /** Why the pipeline stopped and waits for the user. */
+  attention: string | null;
+  grillSummary: string | null;
+  tickets: Ticket[];
+  /** The conversation on screen; ticket runs each have their own. */
+  activeRun: string;
+  runs: Run[];
 };
 
 type Live = {
@@ -68,15 +90,35 @@ type Live = {
   error: string | null;
   stderr: string[];
   setupRunning: boolean;
+  /** Arguments of pipeline tool calls in flight, by toolCallId. */
+  toolArgs: Map<string, { name: string; args: any }>;
+  /** finish_ticket's report for the current ticket run, applied when the run settles. */
+  finished?: { status: "done" | "blocked"; note: string };
+  lastSettleAborted: boolean;
 };
 
 const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs automatically on this repository's first pi-workbench session. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push.`;
 
+const toTicket = (r: TicketRow): Ticket => ({
+  num: r.num,
+  title: r.title,
+  body: r.body,
+  blockedBy: JSON.parse(r.blocked_by),
+  trackerRef: r.tracker_ref,
+  status: r.status as Ticket["status"],
+  note: r.note,
+  runId: r.run_id,
+});
+
 /**
  * Owns every session: its row, its worktree and, while it runs, its `pi --mode rpc` process.
  *
+ * A pipeline session moves setup → grill → tickets → implement → done. Setup, grill and tickets
+ * share the session's main conversation; each ticket gets a fresh pi run (its own pi session id) in
+ * the same worktree. `active_run` says which conversation is live and on screen.
+ *
  * Events: "summary" (SessionSummary) when list-level state changes; "event" (sessionId, record) for
- * every pi record and for synthetic `wb_pending` / `wb_held` records.
+ * every pi record and for synthetic `wb_*` records; "removed" (sessionId).
  */
 export class SessionManager extends EventEmitter {
   private db: Db;
@@ -98,10 +140,42 @@ export class SessionManager extends EventEmitter {
     return row;
   }
 
+  private update(id: string, fields: Partial<SessionRow>) {
+    const keys = Object.keys(fields);
+    this.db.prepare(`UPDATE sessions SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`).run(
+      ...keys.map((k) => (fields as any)[k]),
+      id,
+    );
+  }
+
+  tickets(id: string): Ticket[] {
+    return (this.db.prepare("SELECT * FROM tickets WHERE session_id = ? ORDER BY num").all(id) as TicketRow[]).map(toTicket);
+  }
+
+  private updateTicket(id: string, num: number, fields: Partial<TicketRow>) {
+    const keys = Object.keys(fields);
+    this.db.prepare(`UPDATE tickets SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE session_id = ? AND num = ?`).run(
+      ...keys.map((k) => (fields as any)[k]),
+      id,
+      num,
+    );
+  }
+
+  private runOf = (row: SessionRow) => row.active_run ?? row.id;
+
   private state(id: string): Live {
     let s = this.live.get(id);
     if (!s) {
-      s = { transcript: emptyTranscript(), loaded: false, pending: new Map(), error: null, stderr: [], setupRunning: false };
+      s = {
+        transcript: emptyTranscript(),
+        loaded: false,
+        pending: new Map(),
+        error: null,
+        stderr: [],
+        setupRunning: false,
+        toolArgs: new Map(),
+        lastSettleAborted: false,
+      };
       this.live.set(id, s);
     }
     return s;
@@ -117,6 +191,9 @@ export class SessionManager extends EventEmitter {
   summary(id: string): SessionSummary {
     const row = this.row(id);
     const s = this.state(id);
+    const tickets = this.tickets(id);
+    const running = tickets.find((t) => t.status === "running");
+    const activity = activityOf(s.transcript);
     return {
       id: row.id,
       repoId: row.repo_id,
@@ -124,7 +201,7 @@ export class SessionManager extends EventEmitter {
       branch: row.branch,
       baseBranch: row.base_branch,
       status: this.status(s),
-      activity: activityOf(s.transcript),
+      activity: running && activity ? `#${running.num} · ${activity}` : activity,
       pending: [...s.pending.values()],
       heldPrompt: row.held_prompt,
       setupRunning: s.setupRunning,
@@ -135,6 +212,16 @@ export class SessionManager extends EventEmitter {
       error: s.error,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      mode: row.mode === "pipeline" ? "pipeline" : "direct",
+      phase: row.phase as Phase,
+      attention: row.attention,
+      grillSummary: row.grill_summary,
+      tickets,
+      activeRun: this.runOf(row),
+      runs: [
+        { id: row.id, label: row.mode === "pipeline" ? "Plan" : "Conversation" },
+        ...tickets.filter((t) => t.runId).map((t) => ({ id: t.runId!, label: `#${t.num} ${t.title}` })),
+      ],
     };
   }
 
@@ -150,6 +237,14 @@ export class SessionManager extends EventEmitter {
     return { summary: this.summary(id), transcript: s.transcript, stderr: s.stderr.slice(-20) };
   }
 
+  /** A finished or inactive run's conversation, read from its pi session file. */
+  runTranscript(id: string, runId: string): Transcript {
+    const sum = this.summary(id);
+    if (!sum.runs.some((r) => r.id === runId)) throw Object.assign(new Error(`Unknown run ${runId}`), { status: 404 });
+    if (runId === sum.activeRun && this.state(id).loaded) return this.state(id).transcript;
+    return withMessages(readSessionFile(runId));
+  }
+
   private async load(id: string, s: Live) {
     if (s.proc && !s.proc.exited) {
       const data = await s.proc.call<{ messages: AgentMessage[] }>({ type: "get_messages" });
@@ -159,41 +254,47 @@ export class SessionManager extends EventEmitter {
       s.transcript = withMessages(data.messages);
       Object.assign(s.transcript, { busy, tools, streaming });
     } else {
-      s.transcript = withMessages(readSessionFile(id));
+      s.transcript = withMessages(readSessionFile(this.runOf(this.row(id))));
     }
     s.loaded = true;
   }
 
-  async create(input: { repoId: string; title: string; baseBranch?: string; prompt: string }) {
+  async create(input: { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string }) {
     const repo = getRepo(this.db, input.repoId);
     if (!repo) throw Object.assign(new Error(`Unknown repo ${input.repoId}`), { status: 404 });
+    const mode = input.mode === "direct" ? "direct" : "pipeline";
+    const task = input.prompt.trim();
+    if (mode === "pipeline" && !task) throw Object.assign(new Error("Describe what you want built; grill-me starts from it"), { status: 400 });
     const id = crypto.randomUUID();
-    const title = input.title.trim() || input.prompt.trim().split("\n")[0].slice(0, 60) || "New session";
+    const title = input.title.trim() || task.split("\n")[0].slice(0, 60) || "New session";
     const base = input.baseBranch?.trim() || repo.default_branch;
     const branch = `pi/${slugify(title)}-${id.slice(0, 6)}`;
     const worktree = await createWorktree(repo, id, branch, base, await this.gitEnv());
     const now = Date.now();
     const needsSetup = worktreeNeedsSetup(worktree);
+    const phase: Phase = needsSetup ? "setup" : mode === "pipeline" ? "grill" : "direct";
     this.db
       .prepare(
-        `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt, mode, phase, active_run)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup && input.prompt.trim() ? input.prompt : null);
+      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup && task ? input.prompt : null, mode, phase, id);
     const s = this.state(id);
     s.loaded = true;
     await this.start(id);
     if (needsSetup) {
       s.setupRunning = true;
       await this.send(id, SETUP_PROMPT);
-    } else if (input.prompt.trim()) {
+    } else if (mode === "pipeline") {
+      await this.send(id, grillPrompt(input.prompt));
+    } else if (task) {
       await this.send(id, input.prompt);
     }
     this.emitSummary(id);
     return this.summary(id);
   }
 
-  /** Spawn pi for the session if it isn't running; resumes its saved conversation. */
+  /** Spawn pi for the session's active run if it isn't running; resumes its saved conversation. */
   async start(id: string) {
     const s = this.state(id);
     if (s.proc && !s.proc.exited) return;
@@ -212,15 +313,25 @@ export class SessionManager extends EventEmitter {
     const m = getModelSettings(this.db);
     fs.mkdirSync(config.piSessionsDir, { recursive: true });
     const env = await this.processEnv(row.repo_id);
+    const runId = this.runOf(row);
+    const ticket = this.tickets(id).find((t) => t.runId === runId);
     s.error = null;
     s.stderr = [];
     const proc = new RpcProcess(
       config.piBin,
-      ["--session-dir", config.piSessionsDir, "--session-id", id, "--name", row.title, "--approve", "--offline", "--provider", PROVIDER_ID, "--model", m.modelId],
+      [
+        "--session-dir", config.piSessionsDir,
+        "--session-id", runId,
+        "--name", ticket ? `${row.title} · #${ticket.num}` : row.title,
+        "--approve", "--offline",
+        "--provider", PROVIDER_ID, "--model", m.modelId,
+      ],
       { cwd: row.worktree, env },
     );
     s.proc = proc;
-    proc.on("record", (rec: RpcRecord) => this.onRecord(id, s, rec));
+    proc.on("record", (rec: RpcRecord) => {
+      if (s.proc === proc) this.onRecord(id, s, rec);
+    });
     proc.on("stderr", (text: string) => {
       for (const line of text.split("\n")) if (line.trim()) s.stderr.push(line);
       if (s.stderr.length > 200) s.stderr.splice(0, s.stderr.length - 200);
@@ -254,6 +365,7 @@ export class SessionManager extends EventEmitter {
     Object.assign(env, await this.gitEnv(), {
       PI_CODING_AGENT_DIR: config.piAgentDir,
       PI_WORKBENCH_RULES: rulesFile(),
+      PI_WORKBENCH_SKILLS: config.skillsDir,
       [LLM_KEY_ENV]: "none",
       ...secrets,
     });
@@ -268,9 +380,27 @@ export class SessionManager extends EventEmitter {
     }
     applyEvent(s.transcript, rec);
     this.emit("event", id, rec);
+    if (rec.type === "tool_execution_start" && (PIPELINE_TOOLS as readonly string[]).includes(rec.toolName as string)) {
+      s.toolArgs.set(rec.toolCallId as string, { name: rec.toolName as string, args: rec.args });
+    }
+    if (rec.type === "tool_execution_end" && s.toolArgs.has(rec.toolCallId as string)) {
+      const call = s.toolArgs.get(rec.toolCallId as string)!;
+      s.toolArgs.delete(rec.toolCallId as string);
+      if (!rec.isError) {
+        try {
+          this.onPipelineTool(id, s, call.name, call.args ?? {});
+        } catch (err) {
+          this.flag(id, `The agent's ${call.name} call was rejected: ${(err as Error).message}`);
+        }
+      }
+    }
     if (rec.type === "agent_settled") {
       this.touch(id);
-      void this.afterSettled(id, s);
+      s.lastSettleAborted = !!rec.aborted;
+      void this.afterSettled(id, s).catch((err) => {
+        this.update(id, { attention: `Pipeline error: ${err.message}` });
+        this.emitSummary(id, true);
+      });
     }
     if (
       rec.type === "agent_start" ||
@@ -282,6 +412,24 @@ export class SessionManager extends EventEmitter {
     ) {
       this.emitSummary(id);
     }
+  }
+
+  /** Record what the pipeline tools reported; phase changes wait until the run settles. */
+  private onPipelineTool(id: string, s: Live, name: string, args: any) {
+    const row = this.row(id);
+    if (name === "save_grill_summary" && row.phase === "grill" && typeof args.summary === "string") {
+      this.update(id, { grill_summary: args.summary.trim() });
+    } else if (name === "record_tickets" && row.phase === "tickets") {
+      const tickets = validateTickets(args.tickets);
+      this.db.prepare("DELETE FROM tickets WHERE session_id = ?").run(id);
+      const insert = this.db.prepare(
+        "INSERT INTO tickets (session_id, num, title, body, blocked_by, tracker_ref, status) VALUES (?, ?, ?, ?, ?, ?, 'ready')",
+      );
+      for (const t of tickets) insert.run(id, t.number, t.title, t.body, JSON.stringify(t.blockedBy), t.trackerRef ?? null);
+    } else if (name === "finish_ticket" && row.phase === "implement" && (args.status === "done" || args.status === "blocked")) {
+      s.finished = { status: args.status, note: String(args.note ?? "").trim() };
+    }
+    this.emitSummary(id, true);
   }
 
   private onUiRequest(id: string, s: Live, rec: RpcRecord) {
@@ -333,6 +481,10 @@ export class SessionManager extends EventEmitter {
     const s = this.state(id);
     const cmd: RpcRecord = { type: "prompt", message };
     if (s.transcript.busy) cmd.streamingBehavior = mode;
+    if (this.row(id).attention) {
+      this.update(id, { attention: null });
+      this.emitSummary(id, true);
+    }
     this.touch(id);
     return s.proc!.call<{ disposition: string }>(cmd);
   }
@@ -354,20 +506,121 @@ export class SessionManager extends EventEmitter {
   async releaseHeld(id: string, discard = false) {
     const row = this.row(id);
     if (!row.held_prompt) return;
-    this.db.prepare("UPDATE sessions SET held_prompt = NULL WHERE id = ?").run(id);
+    this.update(id, { held_prompt: null });
     this.state(id).setupRunning = false;
     this.emit("event", id, { type: "wb_held", heldPrompt: null });
+    if (row.mode === "pipeline" && !discard) {
+      this.update(id, { phase: "grill" });
+      this.emitSummary(id);
+      await this.send(id, grillPrompt(row.held_prompt), "followUp");
+      return;
+    }
+    this.update(id, { phase: "direct", mode: "direct" });
     this.emitSummary(id);
     if (!discard) await this.send(id, row.held_prompt, "followUp");
   }
 
   private async afterSettled(id: string, s: Live) {
     const row = this.row(id);
-    if (s.setupRunning && !worktreeNeedsSetup(row.worktree)) {
-      s.setupRunning = false;
-      if (row.held_prompt) await this.releaseHeld(id).catch((err) => (s.error = err.message));
-      this.emitSummary(id);
+    if (row.phase === "setup") {
+      if (s.setupRunning && !worktreeNeedsSetup(row.worktree)) {
+        s.setupRunning = false;
+        if (row.held_prompt) await this.releaseHeld(id);
+        else this.update(id, { phase: row.mode === "pipeline" ? "grill" : "direct" });
+      }
+    } else if (row.phase === "grill" && row.grill_summary) {
+      this.update(id, { phase: "tickets" });
+      await this.send(id, ticketsPrompt(), "followUp");
+    } else if (row.phase === "tickets" && this.tickets(id).length > 0) {
+      this.update(id, { phase: "implement" });
+      await this.runNext(id);
+    } else if (row.phase === "implement") {
+      await this.afterTicketRun(id, s);
     }
+    this.emitSummary(id, true);
+  }
+
+  private async afterTicketRun(id: string, s: Live) {
+    const row = this.row(id);
+    const ticket = this.tickets(id).find((t) => t.status === "running" && t.runId === this.runOf(row));
+    if (!ticket) return;
+    const report = s.finished;
+    s.finished = undefined;
+    if (report?.status === "done") {
+      this.updateTicket(id, ticket.num, { status: "done", note: report.note || null, finished_at: Date.now() });
+      await this.runNext(id);
+    } else if (report?.status === "blocked") {
+      this.updateTicket(id, ticket.num, { status: "blocked", note: report.note || null, finished_at: Date.now() });
+      this.flag(id, `Ticket #${ticket.num} is blocked: ${report.note || "no reason given"}. Retry it, mark it done, or reply to the agent.`);
+    } else if (s.lastSettleAborted) {
+      this.flag(id, `Ticket #${ticket.num} was stopped. Reply to continue it, retry it from scratch, or mark it done.`);
+    } else {
+      this.flag(id, `Ticket #${ticket.num} stopped without finishing. Reply to the agent, retry it, or mark it done.`);
+    }
+  }
+
+  /** Start the next unblocked ticket in a fresh run, or finish the pipeline. */
+  private async runNext(id: string) {
+    const tickets = this.tickets(id);
+    if (allDone(tickets)) {
+      this.update(id, { phase: "done", attention: null });
+      await this.switchRun(id, id, false);
+      this.emit("event", id, { type: "wb_notify", message: "All tickets are done. Review the changes and create the PR.", level: "info" });
+      return;
+    }
+    const t = nextTicket(tickets);
+    if (!t) {
+      this.flag(id, "No ticket can start: every remaining ticket waits on a blocked one.");
+      return;
+    }
+    const runId = `${id}-t${t.num}-${Date.now().toString(36)}`;
+    this.updateTicket(id, t.num, { status: "running", run_id: runId, started_at: Date.now(), finished_at: null });
+    await this.switchRun(id, runId, true);
+    const row = this.row(id);
+    const finished = this.tickets(id).filter((x) => x.status === "done");
+    await this.send(id, implementPrompt({ ...t, runId }, row.grill_summary, finished));
+  }
+
+  /** Point the session at another pi conversation: stop the current process, swap, tell viewers. */
+  private async switchRun(id: string, runId: string, fresh: boolean) {
+    const s = this.state(id);
+    await this.stop(id);
+    s.proc = undefined;
+    s.pending.clear();
+    s.toolArgs.clear();
+    s.finished = undefined;
+    s.transcript = emptyTranscript();
+    s.loaded = fresh;
+    this.update(id, { active_run: runId });
+    this.emit("event", id, { type: "wb_run", runId });
+    this.emitSummary(id, true);
+  }
+
+  private flag(id: string, reason: string) {
+    this.update(id, { attention: reason });
+    this.emit("event", id, { type: "wb_notify", message: reason, level: "warning" });
+  }
+
+  /** User actions on a stopped pipeline: retry or skip the current ticket, or stop the pipeline. */
+  async pipelineAction(id: string, action: "retry" | "skip" | "stop") {
+    const row = this.row(id);
+    if (row.mode !== "pipeline") throw Object.assign(new Error("Not a pipeline session"), { status: 409 });
+    const current = this.tickets(id).find((t) => t.status === "running" || t.status === "blocked");
+    if (action === "stop") {
+      await this.abort(id).catch(() => {});
+      this.update(id, { phase: "done", attention: null });
+    } else if (row.phase !== "implement") {
+      throw Object.assign(new Error("Retry and skip only apply while tickets are being implemented"), { status: 409 });
+    } else if (action === "retry") {
+      if (current) this.updateTicket(id, current.num, { status: "ready" });
+      this.update(id, { attention: null });
+      await this.runNext(id);
+    } else if (action === "skip") {
+      if (current) this.updateTicket(id, current.num, { status: "done", note: current.note ?? "Marked done by the user.", finished_at: Date.now() });
+      this.update(id, { attention: null });
+      await this.runNext(id);
+    }
+    this.emitSummary(id, true);
   }
 
   async archive(id: string) {
@@ -375,18 +628,18 @@ export class SessionManager extends EventEmitter {
     await this.stop(id);
     const repo = getRepo(this.db, row.repo_id);
     if (repo && fs.existsSync(row.worktree)) await removeWorktree(repo, row.worktree);
-    this.db.prepare("UPDATE sessions SET archived = 1, updated_at = ? WHERE id = ?").run(Date.now(), id);
+    this.update(id, { archived: 1, updated_at: Date.now() });
     this.live.delete(id);
     this.emit("removed", id);
   }
 
   rename(id: string, title: string) {
-    this.db.prepare("UPDATE sessions SET title = ? WHERE id = ?").run(title.trim().slice(0, 120) || "Untitled", id);
+    this.update(id, { title: title.trim().slice(0, 120) || "Untitled" });
     this.emitSummary(id);
   }
 
   setPr(id: string, number: number, url: string) {
-    this.db.prepare("UPDATE sessions SET pr_number = ?, pr_url = ? WHERE id = ?").run(number, url, id);
+    this.update(id, { pr_number: number, pr_url: url });
     this.emitSummary(id);
   }
 
@@ -402,7 +655,7 @@ export class SessionManager extends EventEmitter {
   }
 
   private touch(id: string) {
-    this.db.prepare("UPDATE sessions SET updated_at = ? WHERE id = ?").run(Date.now(), id);
+    this.update(id, { updated_at: Date.now() });
   }
 
   /** Coalesce summary pushes (streaming would otherwise send one per token); `now` skips the wait. */
@@ -432,9 +685,9 @@ function parseEnvelope(title: string): Record<string, any> | null {
   }
 }
 
-/** Messages of a stopped session, read from pi's JSONL file (linear: workbench sessions never branch). */
-export function readSessionFile(id: string): AgentMessage[] {
-  const file = findSessionFile(config.piSessionsDir, id);
+/** Messages of a stopped run, read from pi's JSONL file (linear: workbench runs never branch). */
+export function readSessionFile(runId: string): AgentMessage[] {
+  const file = findSessionFile(config.piSessionsDir, runId);
   if (!file) return [];
   const messages: AgentMessage[] = [];
   for (const line of fs.readFileSync(file, "utf8").split("\n")) {
@@ -447,7 +700,7 @@ export function readSessionFile(id: string): AgentMessage[] {
   return messages;
 }
 
-function findSessionFile(dir: string, id: string): string | undefined {
+function findSessionFile(dir: string, runId: string): string | undefined {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -456,9 +709,9 @@ function findSessionFile(dir: string, id: string): string | undefined {
   }
   for (const e of entries) {
     const p = path.join(dir, e.name);
-    if (e.isFile() && e.name.endsWith(`_${id}.jsonl`)) return p;
+    if (e.isFile() && e.name.endsWith(`_${runId}.jsonl`)) return p;
     if (e.isDirectory()) {
-      const found = findSessionFile(p, id);
+      const found = findSessionFile(p, runId);
       if (found) return found;
     }
   }

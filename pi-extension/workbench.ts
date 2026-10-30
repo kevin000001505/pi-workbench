@@ -124,4 +124,123 @@ export default function workbench(pi: ExtensionAPI) {
       };
     },
   });
+
+  // Skills written for Claude Code hand off with "call the Skill tool with <name>"; this makes that work in pi.
+  pi.registerTool({
+    name: "Skill",
+    label: "Skill",
+    description: "Load a skill's instructions by name (e.g. grilling, tdd, code-review) and follow them.",
+    parameters: Type.Object({
+      skill: Type.String({ description: "The skill name" }),
+      args: Type.Optional(Type.String({ description: "Arguments for the skill" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const file = findSkill(params.skill.replace(/^\//, "").replace(/^skill:/, ""), ctx.cwd);
+      if (!file) return { content: [{ type: "text", text: `No skill named "${params.skill}".` }], details: {}, isError: true };
+      const body = fs.readFileSync(file, "utf8").replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
+      const text = `<skill name="${params.skill}" location="${file}">\nReferences are relative to ${path.dirname(file)}.\n\n${body}\n</skill>${params.args ? `\n\n${params.args}` : ""}`;
+      return { content: [{ type: "text", text }], details: { file } };
+    },
+  });
+
+  // Pipeline tools. They only record; the workbench reads their arguments from the event stream.
+  pi.registerTool({
+    name: "save_grill_summary",
+    label: "Save grill summary",
+    description:
+      "pi-workbench pipeline: call once grilling is over and the user confirmed a shared understanding. Saves the agreed decisions for the ticket and implement phases.",
+    parameters: Type.Object({ summary: Type.String({ description: "Every decision made: what to build, what not, and why" }) }),
+    async execute(_id, params) {
+      if (!params.summary.trim()) return { content: [{ type: "text", text: "summary is empty" }], details: {}, isError: true };
+      return { content: [{ type: "text", text: "Saved. Stop here; the workbench starts the ticket phase." }], details: {} };
+    },
+  });
+
+  pi.registerTool({
+    name: "record_tickets",
+    label: "Record tickets",
+    description:
+      "pi-workbench pipeline: after the user approved the ticket breakdown and you published it, record every ticket so the workbench can run them in order.",
+    parameters: Type.Object({
+      tickets: Type.Array(
+        Type.Object({
+          number: Type.Integer({ description: "Ticket number, from 1, blockers first" }),
+          title: Type.String(),
+          body: Type.String({ description: "What to build and the acceptance criteria" }),
+          blockedBy: Type.Optional(Type.Array(Type.Integer(), { description: "Numbers of the tickets that must finish first" })),
+          trackerRef: Type.Optional(Type.String({ description: "Ticket file path or issue number/URL" })),
+        }),
+      ),
+    }),
+    async execute(_id, params) {
+      const problem = checkTickets(params.tickets);
+      if (problem) return { content: [{ type: "text", text: `Not recorded: ${problem}. Fix it and call record_tickets again.` }], details: {}, isError: true };
+      return { content: [{ type: "text", text: `Recorded ${params.tickets.length} tickets. Stop here; the workbench runs them.` }], details: {} };
+    },
+  });
+
+  pi.registerTool({
+    name: "finish_ticket",
+    label: "Finish ticket",
+    description: "pi-workbench pipeline: report the current ticket as done (committed) or blocked, with a short note for the next tickets.",
+    parameters: Type.Object({
+      status: Type.Union([Type.Literal("done"), Type.Literal("blocked")]),
+      note: Type.String({ description: "What changed, or why it is blocked" }),
+    }),
+    async execute(_id, params) {
+      return { content: [{ type: "text", text: `Ticket marked ${params.status}. Stop here.` }], details: {} };
+    },
+  });
+}
+
+function findSkill(name: string, cwd: string): string | undefined {
+  const roots = [path.join(cwd, ".agents", "skills"), path.join(cwd, ".pi", "skills"), process.env.PI_WORKBENCH_SKILLS ?? ""].filter(Boolean);
+  for (const root of roots) {
+    const found = walk(root, name, 0);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function walk(dir: string, name: string, depth: number): string | undefined {
+  if (depth > 6) return undefined;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return undefined;
+  }
+  const skill = path.join(dir, "SKILL.md");
+  if (entries.some((e) => e.isFile() && e.name === "SKILL.md")) {
+    const m = /^name:\s*["']?([\w-]+)/m.exec(fs.readFileSync(skill, "utf8"));
+    return (m?.[1] ?? path.basename(dir)) === name ? skill : undefined;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name.startsWith(".") || e.name === "node_modules") continue;
+    const found = walk(path.join(dir, e.name), name, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** Same rules as the server's validateTickets, so the model hears about mistakes and retries. */
+function checkTickets(tickets: { number: number; title: string; body: string; blockedBy?: number[] }[]): string | null {
+  if (tickets.length === 0) return "no tickets";
+  const nums = new Set(tickets.map((t) => t.number));
+  if (nums.size !== tickets.length) return "ticket numbers must be unique";
+  for (const t of tickets) {
+    if (!t.title.trim() || !t.body.trim()) return `ticket ${t.number} needs a title and body`;
+    for (const b of t.blockedBy ?? []) if (!nums.has(b) || b === t.number) return `ticket ${t.number} has an invalid blocker ${b}`;
+  }
+  const blockers = new Map(tickets.map((t) => [t.number, t.blockedBy ?? []]));
+  const state = new Map<number, number>();
+  const cyclic = (n: number): boolean => {
+    if (state.get(n) === 2) return false;
+    if (state.get(n) === 1) return true;
+    state.set(n, 1);
+    const c = blockers.get(n)!.some(cyclic);
+    state.set(n, 2);
+    return c;
+  };
+  return tickets.some((t) => cyclic(t.number)) ? "the blocking edges form a cycle" : null;
 }

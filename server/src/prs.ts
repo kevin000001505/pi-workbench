@@ -5,6 +5,7 @@ import { git, type GitEnv } from "./git.ts";
 import type { GitHub } from "./github.ts";
 import { complete } from "./llm.ts";
 import { worktreeStatus } from "./repos.ts";
+import type { Ticket } from "./pipeline.ts";
 import type { ModelSettings } from "./settings.ts";
 
 const MAX_DIFF = 80_000;
@@ -43,9 +44,10 @@ function newFileDiff(root: string, file: string) {
 }
 
 /** Ask the configured model for a title and body; fall back to the session title and commit list. */
-export async function draftPr(row: SessionRow, env: GitEnv, model: ModelSettings, apiKey: string | undefined) {
+export async function draftPr(row: SessionRow, env: GitEnv, model: ModelSettings, apiKey: string | undefined, tickets: Ticket[] = []) {
   const c = await changes(row, env);
-  const fallback = { title: row.title, body: `## Summary\n\n${c.log || "- (no commits yet)"}\n` };
+  const ticketList = ticketsSection(tickets);
+  const fallback = { title: row.title, body: `## Summary\n\n${c.log || "- (no commits yet)"}\n${ticketList}` };
   const diff = `${c.committed}\n${c.uncommitted}`.trim();
   if (!diff) return { ...fallback, drafted: false, error: "No changes against the base branch yet", ...c };
   try {
@@ -58,10 +60,21 @@ export async function draftPr(row: SessionRow, env: GitEnv, model: ModelSettings
     if (!text.includes("{")) throw new Error("the model's reply had no JSON object");
     const json = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
     if (typeof json.title !== "string" || typeof json.body !== "string") throw new Error("model reply had no title/body");
-    return { title: json.title.trim(), body: json.body.trim(), drafted: true, error: null, ...c };
+    return { title: json.title.trim(), body: `${json.body.trim()}\n${ticketList}`, drafted: true, error: null, ...c };
   } catch (err) {
     return { ...fallback, drafted: false, error: `Draft failed: ${(err as Error).message}`, ...c };
   }
+}
+
+/** The pipeline's tickets; GitHub issue references become "Closes #n" so merging closes them. */
+export function ticketsSection(tickets: Ticket[]) {
+  if (tickets.length === 0) return "";
+  const lines = tickets.map((t) => {
+    const issue = /(?:^#|\/issues\/)(\d+)$/.exec(t.trackerRef ?? "") ?? /^(\d+)$/.exec(t.trackerRef ?? "");
+    const ref = issue ? `Closes #${issue[1]}` : t.trackerRef ? `\`${t.trackerRef}\`` : "";
+    return `- [${t.status === "done" ? "x" : " "}] #${t.num} ${t.title}${ref ? ` (${ref})` : ""}`;
+  });
+  return `\n## Tickets\n\n${lines.join("\n")}\n`;
 }
 
 export async function openPr(

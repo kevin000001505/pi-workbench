@@ -75,10 +75,58 @@ function textOf(content: unknown): string {
   return "";
 }
 
+/**
+ * The pipeline's three phases, scripted by step (assistant replies since the last user message):
+ * - grill-me: ask to confirm → save_grill_summary → done
+ * - to-tickets: ask to approve → write .scratch files → record_tickets (3 tickets) → done
+ * - implement: commit a line for the ticket → finish_ticket (blocked if the ticket says BLOCKME) → done
+ */
+function pipelineScript(userText: string, step: number, lastResult: string): Reply | undefined {
+  if (userText.includes('<skill name="grill-me"')) {
+    if (step === 0) return { tool: { name: "ask_user", args: { question: "We build a greeting file plus tests. Have we reached a shared understanding?", options: ["Yes, that's the plan", "Not yet"] } } };
+    if (step === 1 && /Yes/.test(lastResult)) return { tool: { name: "save_grill_summary", args: { summary: "Build hello.txt saying Hello, with a test. No UI." } } };
+    if (step === 1) return { text: "What is missing?" };
+    return { text: "Grilling done." };
+  }
+  if (userText.includes('<skill name="to-tickets"')) {
+    if (step === 0) return { tool: { name: "ask_user", args: { question: "Approve: 1. Write hello.txt; 2. Add a test (blocked by 1); 3. Add docs (blocked by 1)?", options: ["Approve", "Change it"] } } };
+    if (step === 1) return { tool: { name: "bash", args: { command: "mkdir -p .scratch/greeting/issues && for n in 01 02 03; do echo ticket > .scratch/greeting/issues/$n.md; done && echo published" } } };
+    if (step === 2) {
+      return {
+        tool: {
+          name: "record_tickets",
+          args: {
+            tickets: [
+              { number: 1, title: "Write hello.txt", body: "Create hello.txt containing Hello.", trackerRef: ".scratch/greeting/issues/01.md" },
+              { number: 2, title: "Add a test", body: "Test that hello.txt says Hello.", blockedBy: [1], trackerRef: ".scratch/greeting/issues/02.md" },
+              { number: 3, title: "Add docs", body: "Document it. BLOCKME", blockedBy: [1], trackerRef: ".scratch/greeting/issues/03.md" },
+            ],
+          },
+        },
+      };
+    }
+    return { text: "Published 3 tickets." };
+  }
+  if (userText.includes('<skill name="implement"')) {
+    const num = /Ticket #(\d+)/.exec(userText)?.[1] ?? "?";
+    if (step === 0) return { tool: { name: "bash", args: { command: `echo "ticket ${num}" >> work.txt && git add -A && git commit -qm "Ticket ${num}" && echo committed` } } };
+    if (step === 1) {
+      const blocked = userText.includes("BLOCKME");
+      return { tool: { name: "finish_ticket", args: { status: blocked ? "blocked" : "done", note: blocked ? "Needs a docs folder decision" : `Ticket ${num} appended to work.txt` } } };
+    }
+    return { text: `Ticket ${num} finished.` };
+  }
+  return undefined;
+}
+
 function script(messages: { role: string; content: unknown }[]): Reply {
   const last = messages[messages.length - 1];
-  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  const lastUserIdx = messages.map((m) => m.role).lastIndexOf("user");
+  const lastUser = messages[lastUserIdx];
   const userText = textOf(lastUser?.content);
+  const step = messages.slice(lastUserIdx + 1).filter((m) => m.role === "assistant").length;
+  const piped = pipelineScript(userText, step, last?.role === "tool" ? textOf(last.content) : "");
+  if (piped) return piped;
   if (last?.role === "tool") {
     const result = textOf(last.content).split("\n")[0].slice(0, 80);
     if (userText.includes("setup-matt-pocock-skills") && !messages.some((m) => m.role === "assistant" && JSON.stringify(m).includes("git commit"))) {
@@ -99,6 +147,7 @@ function script(messages: { role: string; content: unknown }[]): Reply {
   if (/\bask\b/i.test(userText)) {
     return { tool: { name: "ask_user", args: { question: "Which database should I use?", options: ["SQLite (Recommended)", "Postgres"] } } };
   }
+  if (/\bload skill\b/i.test(userText)) return { tool: { name: "Skill", args: { skill: "implement" } } };
   if (/\blist\b/i.test(userText)) return { tool: { name: "bash", args: { command: "ls" } } };
   return { text: "Hello from the mock model. Everything looks fine." };
 }
