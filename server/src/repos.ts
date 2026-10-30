@@ -29,7 +29,7 @@ export async function syncClone(repo: RepoRow, env: GitEnv) {
     await git(dir, ["fetch", "origin", "--prune"], env);
   } else {
     fs.mkdirSync(path.dirname(dir), { recursive: true });
-    await git(config.reposDir, ["clone", `https://github.com/${repo.owner}/${repo.name}.git`, dir], env);
+    await git(config.reposDir, ["clone", `${config.githubCloneBase}/${repo.owner}/${repo.name}.git`, dir], env);
   }
   return dir;
 }

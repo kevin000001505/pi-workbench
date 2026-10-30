@@ -1,0 +1,15 @@
+# Optional: join llm-model-manager's Docker network and reach llama-swap by name instead of via the host.
+#   docker compose -f docker-compose.yml -f docker-compose.llama-net.yml up -d
+# Then set the base URL to http://llama-swap:8080/v1 (LLM_BASE_URL on first boot, or the Settings page).
+services:
+  workbench:
+    environment:
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://llama-swap:8080/v1}
+    networks:
+      - default
+      - llama-net
+
+networks:
+  llama-net:
+    external: true
+    name: ${LLAMA_NET:-llm-llama-net}

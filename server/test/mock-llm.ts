@@ -25,12 +25,10 @@ export function startMockLlm(port = 0): Promise<{ url: string; requests: any[]; 
     requests.push(body);
     const reply = script(body.messages ?? []);
     if (!body.stream) {
+      // Non-streaming calls are the workbench's PR drafts.
+      const pr = { title: "Add a friendly greeting", body: "## Summary\n- Set up agent skills\n- Greet the user\n\n## Testing\n- Ran it" };
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({
-          choices: [{ message: { role: "assistant", content: reply.text ?? '{"title":"Mock PR","body":"## Summary\\n- mock"}' } }],
-        }),
-      );
+      res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: `<think>hmm</think>${JSON.stringify(pr)}` } }] }));
       return;
     }
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
@@ -62,7 +60,7 @@ export function startMockLlm(port = 0): Promise<{ url: string; requests: any[]; 
     res.end();
   });
   return new Promise((resolve) => {
-    server.listen(port, "127.0.0.1", () => {
+    server.listen(port, process.env.MOCK_HOST ?? "127.0.0.1", () => {
       const { port: p } = server.address() as AddressInfo;
       resolve({ url: `http://127.0.0.1:${p}/v1`, requests, close: () => new Promise((r) => server.close(() => r())) });
     });

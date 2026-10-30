@@ -277,9 +277,21 @@ wss.on("connection", (ws) => {
     } catch {
       return;
     }
-    const set = subs.get(ws)!;
-    if (msg.type === "subscribe" && msg.sessionId) set.add(msg.sessionId);
-    if (msg.type === "unsubscribe" && msg.sessionId) set.delete(msg.sessionId);
+    const set = subs.get(ws);
+    if (!set || !msg.sessionId) return;
+    const id = msg.sessionId;
+    if (msg.type === "subscribe") {
+      // Snapshot and subscription happen in the same tick, so no event falls between them or is doubled.
+      sessions
+        .snapshot(id)
+        .then((snap) => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          ws.send(JSON.stringify({ type: "snapshot", sessionId: id, ...snap }));
+          set.add(id);
+        })
+        .catch((err) => ws.send(JSON.stringify({ type: "error", sessionId: id, error: err.message })));
+    }
+    if (msg.type === "unsubscribe") set.delete(id);
   });
   ws.on("close", () => subs.delete(ws));
 });

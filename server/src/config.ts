@@ -24,6 +24,8 @@ export const config = {
   webDir: path.resolve(process.env.WEB_DIR ?? path.join(appRoot, "web", "dist")),
   masterKey: process.env.WORKBENCH_MASTER_KEY ?? "",
   githubApi: process.env.GITHUB_API_URL ?? "https://api.github.com",
+  /** Where repos are cloned from; tests point it at local bare repos. */
+  githubCloneBase: process.env.GITHUB_CLONE_BASE ?? "https://github.com",
   defaults: {
     baseUrl: process.env.LLM_BASE_URL ?? "http://host.docker.internal:8080/v1",
     modelId: process.env.LLM_MODEL ?? "Qwen3.8-27B-radiance",

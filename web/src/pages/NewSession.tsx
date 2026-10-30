@@ -1,0 +1,131 @@
+import { useEffect, useState } from "react";
+import { go } from "../App.tsx";
+import { api } from "../api.ts";
+import { SkillPicker, useSkills } from "../session/Composer.tsx";
+import { useStore } from "../store.tsx";
+import type { Repo, SessionSummary, Skill } from "../types.ts";
+import { Empty, PageHeader, Spinner } from "../ui.tsx";
+
+export function NewSession({ repoId }: { repoId?: string }) {
+  const { toast, upsert } = useStore();
+  const [repos, setRepos] = useState<Repo[] | null>(null);
+  const [repo, setRepo] = useState(repoId ?? "");
+  const [base, setBase] = useState("");
+  const [title, setTitle] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [picker, setPicker] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const skills = useSkills();
+
+  useEffect(() => {
+    api
+      .get<Repo[]>("/api/repos")
+      .then((r) => {
+        setRepos(r);
+        if (!repoId && r[0]) setRepo(r[0].id);
+      })
+      .catch((e) => toast(e.message, "error"));
+  }, [repoId, toast]);
+
+  const selected = repos?.find((r) => r.id === repo);
+
+  const create = async () => {
+    setCreating(true);
+    try {
+      const s = await api.post<SessionSummary>("/api/sessions", { repoId: repo, title, baseBranch: base || undefined, prompt });
+      upsert(s);
+      go(`#/session/${s.id}`);
+    } catch (e) {
+      toast((e as Error).message, "error");
+      setCreating(false);
+    }
+  };
+
+  if (repos && repos.length === 0) {
+    return (
+      <div className="page">
+        <Empty title="Add a repository first">
+          <a className="btn btn-primary" href="#/repos">
+            Go to Repositories
+          </a>
+        </Empty>
+      </div>
+    );
+  }
+
+  return (
+    <div className="page page-narrow">
+      <PageHeader title="New session" sub="Each session works in its own git worktree and branch, so sessions can run side by side." />
+      {!repos ? (
+        <Spinner />
+      ) : (
+        <div className="form card">
+          <div className="grid2">
+            <label>
+              Repository
+              <select className="input" value={repo} onChange={(e) => setRepo(e.target.value)}>
+                {repos.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.id}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Base branch
+              <input className="input mono" placeholder={selected?.defaultBranch ?? "main"} value={base} onChange={(e) => setBase(e.target.value)} />
+            </label>
+          </div>
+          {selected?.needsSetup && (
+            <div className="alert alert-info">
+              This repo hasn’t been set up for Matt Pocock’s skills yet. The session runs <code>/setup-matt-pocock-skills</code> first and
+              asks you its questions; your task goes out right after.
+            </div>
+          )}
+          <label>
+            Title <span className="muted small">(optional)</span>
+            <input className="input" placeholder="Taken from the first line of the task" value={title} onChange={(e) => setTitle(e.target.value)} />
+          </label>
+          <label className="rel">
+            Task
+            {picker && (
+              <SkillPicker
+                skills={skills}
+                query=""
+                onPick={(s: Skill) => {
+                  setPrompt(`/skill:${s.name} ${prompt}`);
+                  setPicker(false);
+                }}
+                onClose={() => setPicker(false)}
+              />
+            )}
+            <textarea
+              className="input"
+              rows={8}
+              placeholder="What should the agent do?"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && repo) void create();
+              }}
+            />
+          </label>
+          <div className="row gap between">
+            <button className="btn btn-ghost btn-sm" onClick={() => setPicker((p) => !p)}>
+              ✦ Start with a skill
+            </button>
+            <button className="btn btn-primary" disabled={!repo || creating} onClick={create}>
+              {creating ? (
+                <>
+                  <Spinner small /> Creating worktree…
+                </>
+              ) : (
+                "Start session"
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

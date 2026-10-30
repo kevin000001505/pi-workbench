@@ -1,0 +1,26 @@
+services:
+  workbench:
+    build: .
+    image: pi-workbench:latest
+    container_name: pi-workbench
+    restart: unless-stopped
+    # No login: publish only on an address you trust (your VM's LAN/Tailscale IP, or 127.0.0.1).
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${PORT:-8787}:8787"
+    environment:
+      WORKBENCH_MASTER_KEY: ${WORKBENCH_MASTER_KEY:?Set WORKBENCH_MASTER_KEY in .env (openssl rand -base64 32)}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+      # First-boot model defaults; after that, change them on the Settings page.
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:8080/v1}
+      LLM_MODEL: ${LLM_MODEL:-Qwen3.8-27B-radiance}
+      LLM_CONTEXT_WINDOW: ${LLM_CONTEXT_WINDOW:-262144}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-32768}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - workbench-data:/data
+    # Lets running pi sessions shut down cleanly.
+    stop_grace_period: 30s
+
+volumes:
+  workbench-data:

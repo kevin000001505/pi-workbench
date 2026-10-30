@@ -1,0 +1,86 @@
+import type { Route } from "./App.tsx";
+import { useStore } from "./store.tsx";
+import type { SessionSummary } from "./types.ts";
+import { StatusDot } from "./ui.tsx";
+
+function SessionLink({ s, active }: { s: SessionSummary; active: boolean }) {
+  return (
+    <a href={`#/session/${s.id}`} className={`side-item ${active ? "active" : ""}`}>
+      <StatusDot status={s.status} />
+      <span className="side-item-main">
+        <span className="side-item-title">{s.title}</span>
+        <span className="side-item-sub">
+          {s.pending.length > 0
+            ? s.pending[0].kind === "permission"
+              ? `Permission: ${s.pending[0].tool}`
+              : "Decision needed"
+            : s.activity || (s.prNumber ? `PR #${s.prNumber}` : s.branch)}
+        </span>
+      </span>
+      {s.pending.length > 0 && <span className="badge">{s.pending.length}</span>}
+    </a>
+  );
+}
+
+export function Sidebar({ route, onClose }: { route: Route; onClose: () => void }) {
+  const { sessions, connected } = useStore();
+  const all = Object.values(sessions).sort((a, b) => b.updatedAt - a.updatedAt);
+  const waiting = all.filter((s) => s.pending.length > 0);
+  const byRepo = new Map<string, SessionSummary[]>();
+  for (const s of all) byRepo.set(s.repoId, [...(byRepo.get(s.repoId) ?? []), s]);
+  const activeId = route.page === "session" ? route.id : null;
+
+  return (
+    <>
+      <div className="nav-scrim" onClick={onClose} />
+      <aside className="sidebar">
+        <a className="brand" href="#/">
+          <span className="brand-mark">π</span>
+          <span>workbench</span>
+          <span className={`conn ${connected ? "on" : ""}`} title={connected ? "Live" : "Reconnecting…"} />
+        </a>
+        <a className="btn btn-primary btn-block" href="#/new">
+          + New session
+        </a>
+
+        {waiting.length > 0 && (
+          <section className="side-section side-waiting">
+            <h4>Waiting on you</h4>
+            {waiting.map((s) => (
+              <SessionLink key={s.id} s={s} active={s.id === activeId} />
+            ))}
+          </section>
+        )}
+
+        <div className="side-scroll">
+          {[...byRepo.entries()].map(([repo, list]) => (
+            <section key={repo} className="side-section">
+              <h4 title={repo}>
+                {repo}
+                <a className="side-add" href={`#/new/${encodeURIComponent(repo)}`} title="New session in this repo">
+                  +
+                </a>
+              </h4>
+              {list.map((s) => (
+                <SessionLink key={s.id} s={s} active={s.id === activeId} />
+              ))}
+            </section>
+          ))}
+          {all.length === 0 && <p className="side-empty muted">No sessions yet.</p>}
+        </div>
+
+        <nav className="side-nav">
+          <a href="#/repos" className={route.page === "repos" ? "active" : ""}>
+            Repositories
+          </a>
+          <a href="#/secrets" className={route.page === "secrets" ? "active" : ""}>
+            Secrets
+          </a>
+          <a href="#/settings" className={route.page === "settings" ? "active" : ""}>
+            Settings
+          </a>
+        </nav>
+      </aside>
+    </>
+  );
+}
