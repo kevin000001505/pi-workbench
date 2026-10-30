@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { type AgentMessage, type ContentBlock, describeTool, type ToolRun, type Transcript as T } from "../../../shared/transcript.ts";
+import { explainModelError } from "../../../shared/endpoint.ts";
 import { Markdown, Spinner } from "../ui.tsx";
 
 type ToolResult = AgentMessage & { role: "toolResult" };
@@ -128,6 +129,22 @@ function AssistantBlocks({
   );
 }
 
+/** A failed model call. A web page in place of an API reply gets an explanation, not raw HTML. */
+function ModelError({ message }: { message?: string }) {
+  const explained = explainModelError(message);
+  if (!explained) return <div className="msg-error">⚠ {message ?? "The model returned an error"}</div>;
+  return (
+    <div className="msg-error">
+      ⚠ {explained}{" "}
+      <a href="#/settings">Open Settings → Test</a>
+      <details>
+        <summary className="muted small">Raw reply</summary>
+        <pre className="code">{message}</pre>
+      </details>
+    </div>
+  );
+}
+
 function Message({ m, results, running }: { m: AgentMessage; results: Map<string, ToolResult>; running: Record<string, ToolRun> }) {
   if (m.role === "user") {
     const text = textOf(m.content);
@@ -146,7 +163,7 @@ function Message({ m, results, running }: { m: AgentMessage; results: Map<string
     return (
       <div className="msg msg-assistant">
         <AssistantBlocks blocks={blocks} results={results} running={running} />
-        {m.stopReason === "error" && <div className="msg-error">⚠ {m.errorMessage ?? "The model returned an error"}</div>}
+        {m.stopReason === "error" && <ModelError message={m.errorMessage} />}
         {m.stopReason === "aborted" && <div className="msg-note">Stopped.</div>}
       </div>
     );

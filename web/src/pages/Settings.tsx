@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.ts";
 import { notificationsEnabled, setNotifications, useStore } from "../store.tsx";
-import type { ApprovalRule, ApprovalSettings, ModelSettings } from "../types.ts";
+import type { ApprovalRule, ApprovalSettings, ModelSettings, ProbeResult } from "../types.ts";
 import { PageHeader, Spinner } from "../ui.tsx";
 
 const THINKING_FORMATS = ["", "qwen-chat-template", "qwen", "chat-template", "openai", "deepseek"];
@@ -11,6 +11,7 @@ function ModelForm() {
   const [m, setM] = useState<ModelSettings | null>(null);
   const [models, setModels] = useState<string[] | null>(null);
   const [probe, setProbe] = useState<string | null>(null);
+  const [test, setTest] = useState<ProbeResult | "running" | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -33,6 +34,20 @@ function ModelForm() {
     // Probe once on load; afterwards on demand.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [m === null]);
+
+  /** Calls the endpoint the way a session does, and shows which step fails and why. */
+  const runTest = async () => {
+    if (!m) return;
+    setTest("running");
+    try {
+      const r = await api.post<ProbeResult>("/api/models/test", { baseUrl: m.baseUrl, modelId: m.modelId });
+      setTest(r);
+      if (r.models.length) setModels(r.models);
+    } catch (e) {
+      setTest(null);
+      toast((e as Error).message, "error");
+    }
+  };
 
   if (!m) return <Spinner />;
   const set = <K extends keyof ModelSettings>(k: K, v: ModelSettings[K]) => setM({ ...m, [k]: v });
@@ -58,12 +73,34 @@ function ModelForm() {
         OpenAI-compatible base URL
         <div className="row gap">
           <input className="input mono grow" value={m.baseUrl} onChange={(e) => set("baseUrl", e.target.value)} />
-          <button type="button" className="btn btn-sm" onClick={() => fetchModels(m.baseUrl)}>
-            Test
+          <button type="button" className="btn btn-sm" disabled={test === "running"} onClick={runTest}>
+            {test === "running" ? <Spinner small /> : null} Test
           </button>
         </div>
-        {probe && <span className={`small ${probe.startsWith("Unreachable") ? "text-error" : "muted"}`}>{probe}</span>}
+        {probe && !test && <span className={`small ${probe.startsWith("Unreachable") ? "text-error" : "muted"}`}>{probe}</span>}
       </label>
+      {test === "running" && <p className="muted small">Calling the model; the first call can take a while if llama-swap has to load it…</p>}
+      {test && test !== "running" && (
+        <div className={`probe ${test.ok ? "probe-ok" : "probe-fail"}`}>
+          {test.checks.map((c) => (
+            <div key={c.name} className="probe-check">
+              <div className="row gap">
+                <span className={c.ok ? "text-ok" : "text-error"}>{c.ok ? "✓" : "✕"}</span>
+                <strong>{c.name === "Chat" ? `Chat with ${m.modelId}` : "List models"}</strong>
+                <span className="mono small muted ellipsis grow">
+                  {c.name === "Chat" ? "POST" : "GET"} {c.url}
+                </span>
+                <span className="mono small muted">
+                  {c.status ? `HTTP ${c.status}` : "no reply"} · {(c.ms / 1000).toFixed(1)}s
+                </span>
+              </div>
+              {c.hint && <p className="probe-hint">{c.hint}</p>}
+              {!c.ok && c.excerpt && <pre className="code probe-excerpt">{c.excerpt}</pre>}
+            </div>
+          ))}
+          {test.ok && <p className="small text-ok">Sessions can reach this model.</p>}
+        </div>
+      )}
       <div className="grid2">
         <label>
           Model ID
