@@ -176,9 +176,11 @@ test("pipeline: ticket validation, frontier order and prompts", async () => {
   assert.equal(allDone([t(1, "done"), t(2, "done")]), true);
   assert.equal(allDone([]), false);
 
-  const prompt = implementPrompt(t(2, "ready", [1]), "Use SQLite.", [{ ...t(1, "done"), note: "Added schema" }]);
-  assert.match(prompt, /^\/skill:implement Ticket #2: T2/);
-  assert.match(prompt, /Use SQLite\./);
+  const prompt = implementPrompt(t(2, "ready", [1]), "Use SQLite.", ".scratch/f/spec.md", [{ ...t(1, "done"), note: "Added schema" }]);
+  assert.match(prompt, /^\/skill:tdd Ticket #2: T2/);
+  assert.match(prompt, /\(\.scratch\/f\/spec\.md\)\n\nUse SQLite\./);
+  // A very long spec goes as a pointer only.
+  assert.match(implementPrompt(t(2, "ready"), "x".repeat(50_000), "#7", []), /read it at #7/);
   assert.match(prompt, /- #1 T1: Added schema/);
   assert.match(prompt, /finish_ticket/);
 
@@ -204,4 +206,13 @@ test("old databases gain the pipeline columns", async () => {
   const db = openDb(file);
   const row = db.prepare("SELECT mode, phase, active_run, attention FROM sessions").get() as any;
   assert.deepEqual({ ...row }, { mode: "direct", phase: "direct", active_run: null, attention: null });
+});
+
+test("every pipeline prompt starts with a /skill: command pi will expand", async () => {
+  const p = await import("../src/pipeline.ts");
+  const t = { num: 1, title: "T", body: "b", blockedBy: [], trackerRef: null, status: "ready", note: null, runId: null } as any;
+  for (const prompt of [p.grillPrompt("task"), p.specPrompt(), p.ticketsPrompt(null), p.ticketsPrompt("#4"), p.implementPrompt(t, null, null, []), p.reviewPrompt("main", null, null, [t])]) {
+    // pi needs an argument after the skill name on the first line.
+    assert.match(prompt.split("\n")[0], /^\/skill:[\w-]+ \S/);
+  }
 });

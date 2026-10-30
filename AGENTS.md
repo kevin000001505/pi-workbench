@@ -10,8 +10,9 @@ Self-hosted web UI that drives the pi coding agent (`@earendil-works/pi-coding-a
 
 ## Pipeline
 - Phase transitions happen in `SessionManager.afterSettled`, after a run settles, never mid-run. The extension's pipeline tools only validate and acknowledge. The server reads their arguments from `tool_execution_start` and applies them on a successful `tool_execution_end`.
-- Each ticket runs under its own pi session id (`<session>-t<num>-<stamp>`), stored on the ticket row. `sessions.active_run` says which run is live. A run switch emits `wb_run`, and the browser re-subscribes to get the new snapshot.
-- `server/test/mock-llm.ts` scripts the three phases by step. Keep `test/pipeline-e2e.test.ts` passing when you change prompts, tools, or transitions.
+- Flow: setup → grill (`grill-with-docs`) → spec (`to-spec`) → tickets (`to-tickets`) → implement (`tdd` per ticket) → review (`code-review`) → done. Prompts are in `server/src/pipeline.ts`. pi only expands `/skill:name` when an argument follows on the same line; a unit test guards this.
+- Each ticket runs under its own pi session id (`<session>-t<num>-<stamp>`), stored on the ticket row, and the review under `sessions.review_run`. `sessions.active_run` says which run is live. A run switch emits `wb_run`, and the browser re-subscribes to get the new snapshot. Switch runs *before* announcing a phase that implies the switch.
+- `server/test/mock-llm.ts` scripts each phase by step. Keep `test/pipeline-e2e.test.ts` passing when you change prompts, tools, or transitions.
 - New columns go through `ADDED_COLUMNS` in `db.ts`, so older databases migrate on open.
 
 ## Rules

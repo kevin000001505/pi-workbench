@@ -80,7 +80,7 @@ export function NewSession({ repoId }: { repoId?: string }) {
           <div className="mode-pick" role="radiogroup" aria-label="How to work">
             <button type="button" role="radio" aria-checked={mode === "pipeline"} className={`mode ${mode === "pipeline" ? "on" : ""}`} onClick={() => setMode("pipeline")}>
               <strong>Pipeline</strong>
-              <span className="muted small">grill-me → to-tickets → implement each ticket. You approve the plan and the tickets; the tickets then run on their own.</span>
+              <span className="muted small">grill-with-docs → to-spec → to-tickets → build each ticket test-first → one code review. You approve the plan, the spec’s test seams and the tickets; the rest runs on its own.</span>
             </button>
             <button type="button" role="radio" aria-checked={mode === "direct"} className={`mode ${mode === "direct" ? "on" : ""}`} onClick={() => setMode("direct")}>
               <strong>Direct</strong>
@@ -113,7 +113,7 @@ export function NewSession({ repoId }: { repoId?: string }) {
             <textarea
               className="input"
               rows={8}
-              placeholder={mode === "pipeline" ? "Describe the feature or change. grill-me will question you until the plan is clear." : "What should the agent do?"}
+              placeholder={mode === "pipeline" ? "Describe the feature or change, e.g. an API that tracks member points. grill-with-docs will question you until every detail is agreed." : "What should the agent do?"}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={(e) => {

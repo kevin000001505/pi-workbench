@@ -76,17 +76,25 @@ function textOf(content: unknown): string {
 }
 
 /**
- * The pipeline's three phases, scripted by step (assistant replies since the last user message):
- * - grill-me: ask to confirm → save_grill_summary → done
+ * The pipeline's phases, scripted by step (assistant replies since the last user message):
+ * - grill-with-docs: ask to confirm → save_grill_summary → done
+ * - to-spec: ask about seams → write the spec file → save_spec → done
  * - to-tickets: ask to approve → write .scratch files → record_tickets (3 tickets) → done
- * - implement: commit a line for the ticket → finish_ticket (blocked if the ticket says BLOCKME) → done
+ * - tdd (a ticket): commit a line for the ticket → finish_ticket (blocked if the ticket says BLOCKME) → done
+ * - code-review: commit a fix → finish_review → done
  */
 function pipelineScript(userText: string, step: number, lastResult: string): Reply | undefined {
-  if (userText.includes('<skill name="grill-me"')) {
+  if (userText.includes('<skill name="grill-with-docs"')) {
     if (step === 0) return { tool: { name: "ask_user", args: { question: "We build a greeting file plus tests. Have we reached a shared understanding?", options: ["Yes, that's the plan", "Not yet"] } } };
     if (step === 1 && /Yes/.test(lastResult)) return { tool: { name: "save_grill_summary", args: { summary: "Build hello.txt saying Hello, with a test. No UI." } } };
     if (step === 1) return { text: "What is missing?" };
     return { text: "Grilling done." };
+  }
+  if (userText.includes('<skill name="to-spec"')) {
+    if (step === 0) return { tool: { name: "ask_user", args: { question: "Test at the file level, through one seam: the hello.txt contents. OK?", options: ["Yes", "No"] } } };
+    if (step === 1) return { tool: { name: "bash", args: { command: "mkdir -p .scratch/greeting && echo spec > .scratch/greeting/spec.md && echo published" } } };
+    if (step === 2) return { tool: { name: "save_spec", args: { spec: "## Problem Statement\nNo greeting.\n## Solution\nhello.txt says Hello.", trackerRef: ".scratch/greeting/spec.md" } } };
+    return { text: "Spec published." };
   }
   if (userText.includes('<skill name="to-tickets"')) {
     if (step === 0) return { tool: { name: "ask_user", args: { question: "Approve: 1. Write hello.txt; 2. Add a test (blocked by 1); 3. Add docs (blocked by 1)?", options: ["Approve", "Change it"] } } };
@@ -107,7 +115,12 @@ function pipelineScript(userText: string, step: number, lastResult: string): Rep
     }
     return { text: "Published 3 tickets." };
   }
-  if (userText.includes('<skill name="implement"')) {
+  if (userText.includes('<skill name="code-review"')) {
+    if (step === 0) return { tool: { name: "bash", args: { command: 'echo reviewed >> work.txt && git add -A && git commit -qm "Fix review findings" && echo fixed' } } };
+    if (step === 1) return { tool: { name: "finish_review", args: { note: "Fixed one naming issue" } } };
+    return { text: "Review done." };
+  }
+  if (userText.includes('<skill name="tdd"')) {
     const num = /Ticket #(\d+)/.exec(userText)?.[1] ?? "?";
     if (step === 0) return { tool: { name: "bash", args: { command: `echo "ticket ${num}" >> work.txt && git add -A && git commit -qm "Ticket ${num}" && echo committed` } } };
     if (step === 1) {
@@ -147,7 +160,7 @@ function script(messages: { role: string; content: unknown }[]): Reply {
   if (/\bask\b/i.test(userText)) {
     return { tool: { name: "ask_user", args: { question: "Which database should I use?", options: ["SQLite (Recommended)", "Postgres"] } } };
   }
-  if (/\bload skill\b/i.test(userText)) return { tool: { name: "Skill", args: { skill: "implement" } } };
+  if (/\bload skill\b/i.test(userText)) return { tool: { name: "Skill", args: { skill: "tdd" } } };
   if (/\blist\b/i.test(userText)) return { tool: { name: "bash", args: { command: "ls" } } };
   return { text: "Hello from the mock model. Everything looks fine." };
 }

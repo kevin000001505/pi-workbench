@@ -7,8 +7,10 @@ import { Markdown, Spinner } from "../ui.tsx";
 const STEPS: { phase: Phase; label: string }[] = [
   { phase: "setup", label: "Setup" },
   { phase: "grill", label: "Grill" },
+  { phase: "spec", label: "Spec" },
   { phase: "tickets", label: "Tickets" },
   { phase: "implement", label: "Implement" },
+  { phase: "review", label: "Review" },
   { phase: "done", label: "Done" },
 ];
 
@@ -21,10 +23,14 @@ export const phaseLabel = (s: SessionSummary) => {
       return "Setting up skills";
     case "grill":
       return "Grilling the plan";
+    case "spec":
+      return "Writing the spec";
     case "tickets":
       return "Writing tickets";
     case "implement":
       return running ? `Ticket ${running.num} · ${done}/${s.tickets.length} done` : `${done}/${s.tickets.length} tickets done`;
+    case "review":
+      return `Reviewing all ${s.tickets.length} tickets`;
     case "done":
       return s.tickets.length ? `All ${s.tickets.length} tickets done` : "Pipeline stopped";
     default:
@@ -111,7 +117,7 @@ export function PipelinePanel({ s, viewRun, onView }: { s: SessionSummary; viewR
             <span style={{ width: `${(done / s.tickets.length) * 100}%` }} />
           </div>
         )}
-        {(s.tickets.length > 0 || s.grillSummary) && (
+        {(s.tickets.length > 0 || s.grillSummary || s.spec) && (
           <button className="btn btn-ghost btn-sm" onClick={() => setOpen((o) => !o)}>
             {open ? "Hide" : "Show"} plan
           </button>
@@ -126,10 +132,10 @@ export function PipelinePanel({ s, viewRun, onView }: { s: SessionSummary; viewR
       {s.attention && (
         <div className="attention">
           <span>⚠ {s.attention}</span>
-          {s.phase === "implement" && (
+          {(s.phase === "implement" || s.phase === "review") && (
             <div className="row gap">
               <button className="btn btn-sm" disabled={busy} onClick={() => act("retry")}>
-                Retry ticket
+                {s.phase === "review" ? "Retry review" : "Retry ticket"}
               </button>
               <button className="btn btn-sm" disabled={busy} onClick={() => act("skip")}>
                 Mark done &amp; continue
@@ -140,16 +146,24 @@ export function PipelinePanel({ s, viewRun, onView }: { s: SessionSummary; viewR
       )}
       {s.phase === "done" && s.tickets.length > 0 && !s.prUrl && (
         <div className="attention attention-ok">
-          <span>✓ All tickets are done on {s.branch}. Review the changes, then Create PR.</span>
+          <span>✓ All tickets are done and reviewed on {s.branch}. Check the changes, then Create PR.</span>
         </div>
       )}
 
-      {open && (s.tickets.length > 0 || s.grillSummary) && (
+      {open && (s.tickets.length > 0 || s.grillSummary || s.spec) && (
         <div className="pipeline-body">
           {s.grillSummary && (
             <details className="grill-summary">
               <summary>Agreed decisions</summary>
               <Markdown text={s.grillSummary} />
+            </details>
+          )}
+          {s.spec && (
+            <details className="grill-summary">
+              <summary>
+                Spec {s.specRef && <span className="tag mono" title={s.specRef}>{refLabel(s.specRef)}</span>}
+              </summary>
+              <Markdown text={s.spec} />
             </details>
           )}
           {s.tickets.length > 0 && (

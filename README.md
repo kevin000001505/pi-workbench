@@ -13,7 +13,7 @@ A self-hosted web UI for the [pi coding agent](https://github.com/earendil-works
 
 ## What you get
 
-- **Plan, then build, as the default.** A new session runs a pipeline (see [The pipeline](#the-pipeline)): `grill-me` questions you until the plan is clear, `to-tickets` splits it into small tickets, and `implement` builds them one at a time. Pick **Direct** on the New session form to skip the pipeline for small fixes.
+- **Plan, then build, as the default.** A new session runs a pipeline (see [The pipeline](#the-pipeline)): `grill-with-docs` → `to-spec` → `to-tickets` → test-first build of each ticket → one code review. Pick **Direct** on the New session form to skip it for small fixes.
 - **Live sessions.** Every session streams text, thinking, and tool calls as they happen. Sessions keep running when you close the tab, and several can run in parallel, each in its own git worktree and branch.
 - **Permissions.** Before a risky tool call runs, the session waits for **Allow / Allow for this session / Deny**. Risky calls include `git push`, `gh`, `rm -r`, `sudo`, `curl`/`wget`, package installs, destructive git commands, and writes outside the worktree. You can edit the rules under Settings.
 - **Decisions.** The agent has an `ask_user` tool. Its questions show up as decision cards with options, and you can always type your own answer. A waiting session never times out.
@@ -26,21 +26,26 @@ A self-hosted web UI for the [pi coding agent](https://github.com/earendil-works
 
 ## The pipeline
 
+New sessions follow the flow these skills are designed for: align on requirements, write a spec, split it into tickets, then build each ticket test-first.
+
 | Phase | What runs | Ends when |
 |---|---|---|
 | Setup | `/setup-matt-pocock-skills`, only on a repo that hasn't run it | its files are committed |
-| Grill | `/skill:grill-me` on your task; questions arrive as decision cards | you confirm a shared understanding and the agent calls `save_grill_summary` |
-| Tickets | `/skill:to-tickets`, in the same conversation | you approve the breakdown, the agent publishes it to the repo's tracker and calls `record_tickets` |
-| Implement | `/skill:implement` per ticket, in dependency order | the agent calls `finish_ticket`; the next ticket starts |
+| Grill | `/skill:grill-with-docs` on your idea. It questions you (database choice, edge cases, terms) and writes the glossary and ADRs as it goes | you confirm a shared understanding; the agent commits the docs and calls `save_grill_summary` |
+| Spec | `/skill:to-spec` in the same conversation: turns what you agreed into a spec | you approve its test seams; it publishes the spec and calls `save_spec` |
+| Tickets | `/skill:to-tickets` on the spec | you approve the breakdown; it publishes the tickets and calls `record_tickets` |
+| Implement | one fresh run per ticket with `/skill:tdd`, in dependency order | the agent commits and calls `finish_ticket`; the next ticket starts |
+| Review | one fresh `/skill:code-review` run over the whole branch, fixing what it finds | the agent commits the fixes and calls `finish_review` |
 | Done | messages become plain follow-ups on the same branch | you press **Create PR** |
 
-- **Every ticket starts a fresh pi conversation** in the session's worktree and branch, so each one fits its own context window. It starts with the ticket, the agreed decisions saved by grilling, and a note from each finished ticket. That's the memory between tickets, kept in SQLite.
-- **Each ticket's conversation stays readable** from the run tabs above the transcript.
-- **The pipeline stops and notifies you** when a ticket reports itself blocked, stops without finishing, or is stopped by you. **Retry ticket** reruns it from scratch. **Mark done & continue** moves on. A reply in the chat continues the same ticket.
-- **When all tickets are done,** the session tells you, and **Create PR** drafts a PR whose body lists the tickets. GitHub issues become `Closes #n`.
-- **New feature, new session.** One session holds one feature.
+- **The workbench plays `/implement-spec`'s orchestrator.** pi has no subagents, so the workbench runs `implement-spec`'s plan itself: a fresh context per ticket (its "implementer subagent"), all on the session's single branch, then one `code-review` over the whole branch. Tickets run one at a time, since one GPU serves the model.
+- **Each ticket starts with context pointers:** its ticket, the spec (inline, or a pointer if it's very long), and a note from each finished ticket. The spec, tickets, and notes are kept in SQLite.
+- **Every conversation stays readable** (the plan, each ticket, the review) from the run tabs above the transcript.
+- **The pipeline stops and notifies you** when a ticket reports itself blocked, a run stops without finishing, or you stop it. **Retry** reruns that ticket (or the review) from scratch. **Mark done & continue** moves on. A reply in the chat continues the same run.
+- **When the review is done,** the session tells you, and **Create PR** drafts a PR whose body lists the tickets. GitHub issues become `Closes #n`.
+- **New feature, new session.** One session holds one feature. Pick **Direct** on the New session form to skip the pipeline for small fixes.
 
-Matt Pocock's skills hand off to each other by "calling the Skill tool" (`grill-me` → `grilling`, `implement` → `tdd` and `code-review`). The workbench extension adds a `Skill` tool to pi so these hand-offs work.
+Matt Pocock's skills hand off to each other by "calling the Skill tool": `grill-with-docs` calls `grilling` and `domain-modeling`, and `implement` calls `tdd` and `code-review`. The workbench extension adds a `Skill` tool to pi so these hand-offs work.
 
 ## Deploy
 
@@ -103,7 +108,7 @@ Then enable notifications under **Settings → Notifications**.
 |---|---|
 | One `pi --mode rpc` process per session, JSONL over stdio, resumed by session ID from `/data/pi-sessions` | `server/src/rpc.ts`, `server/src/sessions.ts` |
 | Rebuilding the streamed conversation, shared by the server snapshot and the browser | `shared/transcript.ts` |
-| Approval gate, `ask_user`, `Skill`, and the pipeline tools (`save_grill_summary`, `record_tickets`, `finish_ticket`) | `pi-extension/workbench.ts` |
+| Approval gate, `ask_user`, `Skill`, and the pipeline tools (`save_grill_summary`, `save_spec`, `record_tickets`, `finish_ticket`, `finish_review`) | `pi-extension/workbench.ts` |
 | Pipeline phases, prompts, ticket order | `server/src/pipeline.ts`, `server/src/sessions.ts` |
 | pi config (`models.json`, `settings.json`, rules) generated from the db | `server/src/settings.ts` |
 | Clones, worktrees, setup detection (`docs/agents/issue-tracker.md`) | `server/src/repos.ts` |
@@ -118,7 +123,7 @@ Then enable notifications under **Settings → Notifications**.
 
 `@earendil-works/pi-durable` is an experimental library: no coding tools, no skills, no approval flow, and an API that changes without notice. The pi coding agent's RPC mode already has all three.
 
-Orchestration and memory live in the workbench's own SQLite: phases, tickets, blocking edges, notes, and the grill summary. pi's session files keep each conversation, so a stopped run resumes where it left off.
+Orchestration and memory live in the workbench's own SQLite: phases, the spec, tickets, blocking edges, and notes. pi's session files keep each conversation, so a stopped run resumes where it left off.
 
 ## Development
 

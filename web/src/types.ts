@@ -37,12 +37,14 @@ export type SessionSummary = {
   phase: Phase;
   attention: string | null;
   grillSummary: string | null;
+  spec: string | null;
+  specRef: string | null;
   tickets: Ticket[];
   activeRun: string;
   runs: { id: string; label: string }[];
 };
 
-export type Phase = "setup" | "grill" | "tickets" | "implement" | "done" | "direct";
+export type Phase = "setup" | "grill" | "spec" | "tickets" | "implement" | "review" | "done" | "direct";
 
 export type Ticket = {
   num: number;

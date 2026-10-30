@@ -20,6 +20,8 @@ import {
   nextTicket,
   type Phase,
   PIPELINE_TOOLS,
+  reviewPrompt,
+  specPrompt,
   type Ticket,
   ticketsPrompt,
   validateTickets,
@@ -74,6 +76,8 @@ export type SessionSummary = {
   /** Why the pipeline stopped and waits for the user. */
   attention: string | null;
   grillSummary: string | null;
+  spec: string | null;
+  specRef: string | null;
   tickets: Ticket[];
   /** The conversation on screen; ticket runs each have their own. */
   activeRun: string;
@@ -92,7 +96,7 @@ type Live = {
   setupRunning: boolean;
   /** Arguments of pipeline tool calls in flight, by toolCallId. */
   toolArgs: Map<string, { name: string; args: any }>;
-  /** finish_ticket's report for the current ticket run, applied when the run settles. */
+  /** finish_ticket's (or finish_review's) report for the current run, applied when the run settles. */
   finished?: { status: "done" | "blocked"; note: string };
   lastSettleAborted: boolean;
 };
@@ -113,9 +117,10 @@ const toTicket = (r: TicketRow): Ticket => ({
 /**
  * Owns every session: its row, its worktree and, while it runs, its `pi --mode rpc` process.
  *
- * A pipeline session moves setup → grill → tickets → implement → done. Setup, grill and tickets
- * share the session's main conversation; each ticket gets a fresh pi run (its own pi session id) in
- * the same worktree. `active_run` says which conversation is live and on screen.
+ * A pipeline session moves setup → grill → spec → tickets → implement → review → done. Setup,
+ * grill, spec and tickets share the session's main conversation; each ticket and the final review
+ * get a fresh pi run (their own pi session id) in the same worktree. `active_run` says which
+ * conversation is live and on screen.
  *
  * Events: "summary" (SessionSummary) when list-level state changes; "event" (sessionId, record) for
  * every pi record and for synthetic `wb_*` records; "removed" (sessionId).
@@ -216,11 +221,14 @@ export class SessionManager extends EventEmitter {
       phase: row.phase as Phase,
       attention: row.attention,
       grillSummary: row.grill_summary,
+      spec: row.spec,
+      specRef: row.spec_ref,
       tickets,
       activeRun: this.runOf(row),
       runs: [
         { id: row.id, label: row.mode === "pipeline" ? "Plan" : "Conversation" },
         ...tickets.filter((t) => t.runId).map((t) => ({ id: t.runId!, label: `#${t.num} ${t.title}` })),
+        ...(row.review_run ? [{ id: row.review_run, label: "Review" }] : []),
       ],
     };
   }
@@ -315,6 +323,7 @@ export class SessionManager extends EventEmitter {
     const env = await this.processEnv(row.repo_id);
     const runId = this.runOf(row);
     const ticket = this.tickets(id).find((t) => t.runId === runId);
+    const label = ticket ? ` · #${ticket.num}` : runId === row.review_run ? " · review" : "";
     s.error = null;
     s.stderr = [];
     const proc = new RpcProcess(
@@ -322,7 +331,7 @@ export class SessionManager extends EventEmitter {
       [
         "--session-dir", config.piSessionsDir,
         "--session-id", runId,
-        "--name", ticket ? `${row.title} · #${ticket.num}` : row.title,
+        "--name", `${row.title}${label}`,
         "--approve", "--offline",
         "--provider", PROVIDER_ID, "--model", m.modelId,
       ],
@@ -419,6 +428,8 @@ export class SessionManager extends EventEmitter {
     const row = this.row(id);
     if (name === "save_grill_summary" && row.phase === "grill" && typeof args.summary === "string") {
       this.update(id, { grill_summary: args.summary.trim() });
+    } else if (name === "save_spec" && row.phase === "spec" && typeof args.spec === "string" && args.spec.trim()) {
+      this.update(id, { spec: args.spec.trim(), spec_ref: typeof args.trackerRef === "string" ? args.trackerRef : null });
     } else if (name === "record_tickets" && row.phase === "tickets") {
       const tickets = validateTickets(args.tickets);
       this.db.prepare("DELETE FROM tickets WHERE session_id = ?").run(id);
@@ -428,6 +439,8 @@ export class SessionManager extends EventEmitter {
       for (const t of tickets) insert.run(id, t.number, t.title, t.body, JSON.stringify(t.blockedBy), t.trackerRef ?? null);
     } else if (name === "finish_ticket" && row.phase === "implement" && (args.status === "done" || args.status === "blocked")) {
       s.finished = { status: args.status, note: String(args.note ?? "").trim() };
+    } else if (name === "finish_review" && row.phase === "review") {
+      s.finished = { status: "done", note: String(args.note ?? "").trim() };
     }
     this.emitSummary(id, true);
   }
@@ -529,13 +542,18 @@ export class SessionManager extends EventEmitter {
         else this.update(id, { phase: row.mode === "pipeline" ? "grill" : "direct" });
       }
     } else if (row.phase === "grill" && row.grill_summary) {
+      this.update(id, { phase: "spec" });
+      await this.send(id, specPrompt(), "followUp");
+    } else if (row.phase === "spec" && row.spec) {
       this.update(id, { phase: "tickets" });
-      await this.send(id, ticketsPrompt(), "followUp");
+      await this.send(id, ticketsPrompt(row.spec_ref), "followUp");
     } else if (row.phase === "tickets" && this.tickets(id).length > 0) {
       this.update(id, { phase: "implement" });
       await this.runNext(id);
     } else if (row.phase === "implement") {
       await this.afterTicketRun(id, s);
+    } else if (row.phase === "review" && row.review_run === this.runOf(row)) {
+      await this.afterReviewRun(id, s);
     }
     this.emitSummary(id, true);
   }
@@ -559,13 +577,36 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  /** Start the next unblocked ticket in a fresh run, or finish the pipeline. */
+  private async afterReviewRun(id: string, s: Live) {
+    const report = s.finished;
+    s.finished = undefined;
+    if (report) await this.finishPipeline(id, report.note);
+    else if (s.lastSettleAborted) this.flag(id, "The review was stopped. Reply to continue it, retry it, or mark it done.");
+    else this.flag(id, "The review stopped without finishing. Reply to the agent, retry it, or mark it done.");
+  }
+
+  private async finishPipeline(id: string, reviewNote: string | null) {
+    // Switch back to the plan conversation before announcing "done", so no one sees done + review run.
+    await this.switchRun(id, id, false);
+    this.update(id, { phase: "done", attention: null });
+    const msg = `All tickets are done and reviewed${reviewNote ? ` (${reviewNote})` : ""}. Create the PR.`;
+    this.emit("event", id, { type: "wb_notify", message: msg, level: "info" });
+  }
+
+  /** Fresh run for implement-spec's final step: one code-review over the whole branch. */
+  private async startReview(id: string) {
+    const runId = `${id}-review-${Date.now().toString(36)}`;
+    this.update(id, { phase: "review", review_run: runId, attention: null });
+    await this.switchRun(id, runId, true);
+    const row = this.row(id);
+    await this.send(id, reviewPrompt(row.base_branch, row.spec, row.spec_ref, this.tickets(id)));
+  }
+
+  /** Start the next unblocked ticket in a fresh run, or move on to the review. */
   private async runNext(id: string) {
     const tickets = this.tickets(id);
     if (allDone(tickets)) {
-      this.update(id, { phase: "done", attention: null });
-      await this.switchRun(id, id, false);
-      this.emit("event", id, { type: "wb_notify", message: "All tickets are done. Review the changes and create the PR.", level: "info" });
+      await this.startReview(id);
       return;
     }
     const t = nextTicket(tickets);
@@ -578,7 +619,7 @@ export class SessionManager extends EventEmitter {
     await this.switchRun(id, runId, true);
     const row = this.row(id);
     const finished = this.tickets(id).filter((x) => x.status === "done");
-    await this.send(id, implementPrompt({ ...t, runId }, row.grill_summary, finished));
+    await this.send(id, implementPrompt({ ...t, runId }, row.spec, row.spec_ref, finished));
   }
 
   /** Point the session at another pi conversation: stop the current process, swap, tell viewers. */
@@ -609,8 +650,11 @@ export class SessionManager extends EventEmitter {
     if (action === "stop") {
       await this.abort(id).catch(() => {});
       this.update(id, { phase: "done", attention: null });
+    } else if (row.phase === "review") {
+      if (action === "retry") await this.startReview(id);
+      else await this.finishPipeline(id, null);
     } else if (row.phase !== "implement") {
-      throw Object.assign(new Error("Retry and skip only apply while tickets are being implemented"), { status: 409 });
+      throw Object.assign(new Error("Retry and skip only apply to tickets and the review"), { status: 409 });
     } else if (action === "retry") {
       if (current) this.updateTicket(id, current.num, { status: "ready" });
       this.update(id, { attention: null });

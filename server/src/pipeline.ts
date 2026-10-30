@@ -1,13 +1,16 @@
 /**
- * The grill → tickets → implement pipeline: phase prompts and ticket bookkeeping. Pure functions;
- * SessionManager drives the transitions.
+ * The pipeline: phase prompts and ticket bookkeeping. Pure functions; SessionManager drives the
+ * transitions. The workbench plays implement-spec's orchestrator (pi has no subagents): each ticket
+ * and the final review get a fresh pi run on the session's single branch.
  *
- * - grill: /skill:grill-me on the task; ends when the agent calls save_grill_summary.
+ * - grill: /skill:grill-with-docs on the task; ends when the agent calls save_grill_summary.
+ * - spec: /skill:to-spec in the same conversation; ends when the agent calls save_spec.
  * - tickets: /skill:to-tickets in the same conversation; ends when the agent calls record_tickets.
- * - implement: one fresh pi run per ticket, in dependency order; each ends with finish_ticket.
+ * - implement: one fresh run per ticket with /skill:tdd, in dependency order; each ends with finish_ticket.
+ * - review: one fresh /skill:code-review run over the whole branch that fixes what it finds; ends with finish_review.
  */
 
-export type Phase = "setup" | "grill" | "tickets" | "implement" | "done" | "direct";
+export type Phase = "setup" | "grill" | "spec" | "tickets" | "implement" | "review" | "done" | "direct";
 
 export type Ticket = {
   num: number;
@@ -22,7 +25,10 @@ export type Ticket = {
 
 export type TicketInput = { number: number; title: string; body: string; blockedBy?: number[]; trackerRef?: string };
 
-export const PIPELINE_TOOLS = ["save_grill_summary", "record_tickets", "finish_ticket"] as const;
+export const PIPELINE_TOOLS = ["save_grill_summary", "save_spec", "record_tickets", "finish_ticket", "finish_review"] as const;
+
+/** Specs longer than this go to ticket runs as a pointer only (implement-spec: "communicate through context pointers"). */
+const SPEC_INLINE_LIMIT = 40_000;
 
 /** Check what the agent passed to record_tickets: unique numbers, known blockers, no cycles. */
 export function validateTickets(input: unknown): TicketInput[] {
@@ -68,15 +74,25 @@ export function nextTicket(tickets: Ticket[]): Ticket | undefined {
 export const allDone = (tickets: Ticket[]) => tickets.length > 0 && tickets.every((t) => t.status === "done");
 
 export function grillPrompt(task: string) {
-  return `/skill:grill-me ${task}
+  return `/skill:grill-with-docs ${task}
 
-[pi-workbench pipeline: grill → tickets → implement]
+[pi-workbench pipeline: grill-with-docs → to-spec → to-tickets → implement → review]
 Ask your questions with the ask_user tool. Keep going until the user explicitly confirms, through ask_user, that we have reached a shared understanding.
-Then call save_grill_summary with a complete summary of every decision made (what to build, what not to build, and why), and stop. Do not write tickets or code yet.`;
+Commit any docs you wrote along the way (glossary, ADRs) to the current branch. Do not push.
+Then call save_grill_summary with a short summary of the decisions made, and stop. Do not write the spec, tickets or code yet.`;
 }
 
-export function ticketsPrompt() {
-  return `/skill:to-tickets Break the plan we just agreed into tickets.
+export function specPrompt() {
+  // pi only expands "/skill:name" when an argument follows on the same line.
+  return `/skill:to-spec Write the spec from what we just agreed.
+
+[pi-workbench pipeline]
+Check the testing seams with the user using ask_user. After you publish the spec to the tracker,
+call save_spec with the full spec text and trackerRef (the file path or issue number/URL). Then stop.`;
+}
+
+export function ticketsPrompt(specRef: string | null) {
+  return `/skill:to-tickets ${specRef ? `Break the spec (${specRef}) into tickets.` : "Break the spec we just wrote into tickets."}
 
 [pi-workbench pipeline]
 Present the breakdown and ask the user to approve it with ask_user before publishing. After you publish the approved tickets to the tracker,
@@ -84,22 +100,42 @@ call record_tickets with every ticket: its number, title, full body (what to bui
 Then stop. Do not start implementing.`;
 }
 
-export function implementPrompt(ticket: Ticket, summary: string | null, finished: Ticket[]) {
+function specSection(spec: string | null, specRef: string | null) {
+  if (!spec) return specRef ? `Read the spec first: ${specRef}` : "(no spec recorded)";
+  if (spec.length > SPEC_INLINE_LIMIT) return `The spec is long; read it at ${specRef ?? "the tracker"} before starting.`;
+  return `${specRef ? `(${specRef})\n\n` : ""}${spec}`;
+}
+
+export function implementPrompt(ticket: Ticket, spec: string | null, specRef: string | null, finished: Ticket[]) {
   const notes = finished.length
     ? finished.map((t) => `- #${t.num} ${t.title}: ${t.note ?? "(no note)"}`).join("\n")
     : "- none yet";
-  return `/skill:implement Ticket #${ticket.num}: ${ticket.title}${ticket.trackerRef ? ` (${ticket.trackerRef})` : ""}
+  return `/skill:tdd Ticket #${ticket.num}: ${ticket.title}${ticket.trackerRef ? ` (${ticket.trackerRef})` : ""}
 
 ${ticket.body}
 
-## Agreed decisions for this feature
-${summary ?? "(none recorded)"}
+## Spec
+${specSection(spec, specRef)}
 
-## Tickets already finished
+## Tickets already finished (see their commits on this branch)
 ${notes}
 
-[pi-workbench pipeline]
-Work only on this ticket, in this worktree, and commit to the current branch. Do not push.
+[pi-workbench pipeline: you are the implementer for this one ticket]
+Build it test-first. Work only on this ticket, in this worktree, and commit to the current branch. Do not push.
 When it is complete, call finish_ticket with status "done" and a short note: what changed, and anything the next tickets should know.
 If you cannot complete it, call finish_ticket with status "blocked" and explain why.`;
+}
+
+export function reviewPrompt(base: string, spec: string | null, specRef: string | null, tickets: Ticket[]) {
+  return `/skill:code-review Review every change on this branch since origin/${base}.
+
+## Spec
+${specSection(spec, specRef)}
+
+## Tickets
+${tickets.map((t) => `- #${t.num} ${t.title}${t.trackerRef ? ` (${t.trackerRef})` : ""}`).join("\n")}
+
+[pi-workbench pipeline: final review of the whole branch]
+Fix every issue the review raises, run the tests, and commit the fixes to the current branch. Do not push.
+Then call finish_review with a short note of what you found and fixed.`;
 }

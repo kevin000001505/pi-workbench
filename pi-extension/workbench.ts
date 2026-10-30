@@ -157,6 +157,30 @@ export default function workbench(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "save_spec",
+    label: "Save spec",
+    description: "pi-workbench pipeline: after /to-spec published the spec, record its full text and where it was published.",
+    parameters: Type.Object({
+      spec: Type.String({ description: "The full spec, as published" }),
+      trackerRef: Type.Optional(Type.String({ description: "Spec file path or issue number/URL" })),
+    }),
+    async execute(_id, params) {
+      if (!params.spec.trim()) return { content: [{ type: "text", text: "spec is empty" }], details: {}, isError: true };
+      return { content: [{ type: "text", text: "Saved. Stop here; the workbench starts the ticket phase." }], details: {} };
+    },
+  });
+
+  pi.registerTool({
+    name: "finish_review",
+    label: "Finish review",
+    description: "pi-workbench pipeline: report that the final code review is done and its fixes are committed.",
+    parameters: Type.Object({ note: Type.String({ description: "What the review found and what you fixed" }) }),
+    async execute(_id, params) {
+      return { content: [{ type: "text", text: `Review recorded. Stop here.` }], details: { note: params.note } };
+    },
+  });
+
+  pi.registerTool({
     name: "record_tickets",
     label: "Record tickets",
     description:

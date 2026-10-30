@@ -27,10 +27,15 @@ export type SessionRow = {
   archived: number;
   /** "pipeline" (grill → tickets → implement) or "direct" (plain agent turns). */
   mode: string;
-  /** setup | grill | tickets | implement | done | direct */
+  /** setup | grill | spec | tickets | implement | review | done | direct */
   phase: string;
-  /** The decisions agreed while grilling; every ticket run starts with it. */
+  /** Short summary of the decisions agreed while grilling. */
   grill_summary: string | null;
+  /** The spec /to-spec wrote, and where it was published; ticket runs get it. */
+  spec: string | null;
+  spec_ref: string | null;
+  /** pi session id of the final code-review run. */
+  review_run: string | null;
   /** pi session id of the conversation on screen: the session id itself, or a ticket's run. */
   active_run: string | null;
   /** Why the pipeline stopped and waits for the user; null while it may proceed. */
@@ -103,6 +108,9 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ["sessions", "grill_summary", "TEXT"],
   ["sessions", "active_run", "TEXT"],
   ["sessions", "attention", "TEXT"],
+  ["sessions", "spec", "TEXT"],
+  ["sessions", "spec_ref", "TEXT"],
+  ["sessions", "review_run", "TEXT"],
 ];
 
 function migrate(db: DatabaseSync) {
