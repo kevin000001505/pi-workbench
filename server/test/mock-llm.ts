@@ -4,7 +4,8 @@ import type { AddressInfo } from "node:net";
 /**
  * A scripted OpenAI-compatible endpoint for tests and local UI work. It answers by the last message:
  * - a tool result → "Done: <first line of the result>"
- * - user text containing "push" → bash `git push origin HEAD` (hits the approval gate)
+ * - user text containing "ssh" → bash `ssh Media true` (hits the approval gate)
+ * - "push" → bash `git push origin HEAD` (hits the approval gate)
  * - "rm" → bash `rm -rf build`
  * - "ask" → ask_user with two options
  * - "list" → bash `ls`
@@ -155,6 +156,7 @@ function script(messages: { role: string; content: unknown }[]): Reply {
       },
     };
   }
+  if (/\bssh\b/i.test(userText)) return { tool: { name: "bash", args: { command: "ssh Media true" } } };
   if (/\bpush\b/i.test(userText)) return { tool: { name: "bash", args: { command: "git push origin HEAD" } } };
   if (/\brm\b/i.test(userText)) return { tool: { name: "bash", args: { command: "rm -rf build" } } };
   if (/\bask\b/i.test(userText)) {

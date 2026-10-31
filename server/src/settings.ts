@@ -36,6 +36,7 @@ export const DEFAULT_RULES: ApprovalRule[] = [
   { id: "rm-rf", tool: "bash", pattern: String.raw`\brm\s+(-[a-zA-Z]*[rRf]|--recursive|--force)`, label: "rm -r / -f", enabled: true },
   { id: "sudo", tool: "bash", pattern: String.raw`\bsudo\b`, label: "sudo", enabled: true },
   { id: "net", tool: "bash", pattern: String.raw`\b(curl|wget)\b`, label: "curl / wget", enabled: true },
+  { id: "ssh", tool: "bash", pattern: String.raw`(^|[\s;&|(])ssh\s`, label: "ssh", enabled: true },
   {
     id: "pkg",
     tool: "bash",

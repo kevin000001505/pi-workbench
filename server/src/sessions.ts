@@ -139,14 +139,17 @@ export class SessionManager extends EventEmitter {
   private db: Db;
   private secrets: SecretStore;
   private gitEnv: () => Promise<GitEnv>;
+  /** Runs before every pi spawn so materialized ssh keys are fresh; the server wires applySsh here. */
+  private refreshSsh?: () => void;
   private live = new Map<string, Live>();
   private summaryTimers = new Map<string, NodeJS.Timeout>();
 
-  constructor(db: Db, secrets: SecretStore, gitEnv: () => Promise<GitEnv>) {
+  constructor(db: Db, secrets: SecretStore, gitEnv: () => Promise<GitEnv>, refreshSsh?: () => void) {
     super();
     this.db = db;
     this.secrets = secrets;
     this.gitEnv = gitEnv;
+    this.refreshSsh = refreshSsh;
   }
 
   private row(id: string): SessionRow {
@@ -330,6 +333,12 @@ export class SessionManager extends EventEmitter {
   private async spawn(id: string, s: Live) {
     const row = this.row(id);
     if (!fs.existsSync(row.worktree)) throw new Error(`Worktree ${row.worktree} is gone`);
+    // A bad ssh materialization must not wedge the session; missing keys surface at connect time.
+    try {
+      this.refreshSsh?.();
+    } catch (err) {
+      console.error("ssh key materialization failed:", err);
+    }
     const m = getModelSettings(this.db);
     fs.mkdirSync(config.piSessionsDir, { recursive: true });
     const env = await this.processEnv(row.repo_id);

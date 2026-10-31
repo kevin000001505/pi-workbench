@@ -7,6 +7,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import { startMockLlm } from "./mock-llm.ts";
 
@@ -17,12 +18,25 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-"));
 process.env.DATA_DIR = path.join(tmp, "data");
 process.env.WORKBENCH_MASTER_KEY = "e2e-master-key-0123456789";
 process.env.SKILLS_DIR = path.join(tmp, "skills");
+// The spawned pi inherits this HOME, so the agent's ~/.ssh (ADR 0001) lands in a temp dir.
+process.env.HOME = path.join(tmp, "agent-home");
+// A deployment may export PI_EXTENSION (the installed copy); the test must load this repo's
+// extension, so the assertions cover the code under test.
+process.env.PI_EXTENSION = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "pi-extension", "workbench.ts");
 
 let mock: Awaited<ReturnType<typeof startMockLlm>>;
 let mgr: any;
 let db: any;
+let secrets: any;
 
 const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
+
+/** The system prompt delivered to the LLM in a captured request (string or content blocks). */
+const sysText = (req: any): string => {
+  const m = (req.messages ?? []).find((x: any) => x.role === "system");
+  const c = m?.content;
+  return typeof c === "string" ? c : Array.isArray(c) ? c.map((b: any) => b?.text ?? "").join("") : "";
+};
 
 async function waitFor<T>(fn: () => T | undefined | false | Promise<T | undefined | false>, ms = 30_000): Promise<T> {
   const start = Date.now();
@@ -39,9 +53,10 @@ before(async () => {
   mock = await startMockLlm();
   const { config } = await import("../src/config.ts");
   const { openDb } = await import("../src/db.ts");
-  const { SecretStore } = await import("../src/secrets.ts");
+  const { GLOBAL_SCOPE, SecretStore } = await import("../src/secrets.ts");
   const { saveModelSettings, writePiConfig } = await import("../src/settings.ts");
   const { SessionManager } = await import("../src/sessions.ts");
+  const { applySsh } = await import("../src/ssh.ts");
   config.piBin = piBin;
   db = openDb(config.dbFile);
   saveModelSettings(db, { baseUrl: mock.url });
@@ -61,13 +76,14 @@ before(async () => {
   sh(tmp, "clone", "-q", bare, clone);
   db.prepare("INSERT INTO repos (id, owner, name, default_branch, private, added_at) VALUES ('me/demo','me','demo','main',1,0)").run();
 
-  const secrets = new SecretStore(db, process.env.WORKBENCH_MASTER_KEY!);
+  secrets = new SecretStore(db, process.env.WORKBENCH_MASTER_KEY!);
+  // Every pi spawn re-materializes ~/.ssh and the hosts file (ADR 0001), so nothing goes stale.
   mgr = new SessionManager(db, secrets, async () => ({
     GIT_AUTHOR_NAME: "t",
     GIT_AUTHOR_EMAIL: "t@t",
     GIT_COMMITTER_NAME: "t",
     GIT_COMMITTER_EMAIL: "t@t",
-  }));
+  }), () => applySsh(db, secrets, config.agentHome, config.piAgentDir));
 });
 
 after(async () => {
@@ -147,4 +163,58 @@ test("an issue session persists its origin issue on the summary; plain sessions 
   assert.equal(s.issueRef, "me/demo#42");
   const p = await mgr.create({ repoId: "me/demo", title: "Plain", prompt: "Tidy the demo", mode: "direct" });
   assert.equal(p.issueRef, null);
+});
+
+test("the agent knows the ssh hosts: prompt section, fresh materialization, approval gate, cleanup", {
+  skip: !hasPi && "pi CLI not found",
+}, async () => {
+  const { config } = await import("../src/config.ts");
+  const { GLOBAL_SCOPE } = await import("../src/secrets.ts");
+  const { applySsh, saveSshHosts } = await import("../src/ssh.ts");
+
+  // Save a key and a host whose address fails fast (nothing listens on 127.0.0.1:2223).
+  const key = `-----BEGIN OPENSSH PRIVATE KEY-----\ne2e-ssh-key-data==\n-----END OPENSSH PRIVATE KEY-----\n`;
+  secrets.set(GLOBAL_SCOPE, "media", key);
+  saveSshHosts(db, [{ alias: "Media", user: "ubuntu", hostname: "127.0.0.1", port: 2223, keyName: "media" }]);
+  applySsh(db, secrets, config.agentHome, config.piAgentDir);
+  assert.match(fs.readFileSync(path.join(config.agentHome, ".ssh", "config"), "utf8"), /Host Media/);
+
+  // Materialization repeats before every spawn: nuke ~/.ssh, the spawn brings it back.
+  fs.rmSync(path.join(config.agentHome, ".ssh"), { recursive: true, force: true });
+
+  const before = mock.requests.length;
+  const s = await mgr.create({ repoId: "me/demo", title: "Remote", prompt: "please ssh into Media", mode: "direct" });
+
+  assert.ok(fs.existsSync(path.join(config.agentHome, ".ssh", "config")), "spawn re-materialized ~/.ssh/config");
+  assert.ok(fs.existsSync(path.join(config.agentHome, ".ssh", "media")), "spawn re-materialized the key file");
+
+  // The system prompt delivered to the LLM names the host (the extension injected it).
+  const sysReq = await waitFor(() => mock.requests.slice(before).find((r) => sysText(r).includes("Known SSH hosts")));
+  assert.ok(sysText(sysReq).includes("- Media → ubuntu@127.0.0.1 (key: media)"), "host line in the system prompt");
+
+  // The first ssh hits the approval gate labeled "ssh".
+  const req = await waitFor(() => mgr.summary(s.id).pending[0]);
+  assert.equal(req.kind, "permission");
+  assert.equal(req.subject, "ssh Media true");
+  assert.deepEqual(req.reasons, ["ssh"]);
+  mgr.respond(s.id, req.id, { value: "Allow" });
+  await waitFor(async () => {
+    const t = (await mgr.snapshot(s.id)).transcript;
+    return t.messages.some((m: any) => m.role === "toolResult" && m.toolName === "bash") && !t.busy ? t : undefined;
+  });
+  await waitFor(() => mgr.summary(s.id).status === "idle");
+
+  // Deleting the host (and its key) regenerates the config and removes the key file.
+  saveSshHosts(db, []);
+  secrets.delete(GLOBAL_SCOPE, "media");
+  applySsh(db, secrets, config.agentHome, config.piAgentDir);
+  const cfg = fs.readFileSync(path.join(config.agentHome, ".ssh", "config"), "utf8");
+  assert.ok(!cfg.includes("Host Media"), "config regenerated without the host");
+  assert.ok(!fs.existsSync(path.join(config.agentHome, ".ssh", "media")), "key file removed");
+
+  // No hosts → no section on the next run.
+  const before2 = mock.requests.length;
+  await mgr.send(s.id, "list the files");
+  await waitFor(() => mock.requests.length > before2);
+  assert.ok(!sysText(mock.requests[before2]).includes("Known SSH hosts"), "section gone without hosts");
 });

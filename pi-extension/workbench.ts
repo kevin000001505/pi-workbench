@@ -1,6 +1,8 @@
 /**
  * pi-workbench extension, loaded into every pi process the workbench starts.
  *
+ * - Known SSH hosts: on every run the "wb_ssh" system prompt section names the hosts from the
+ *   non-secret hosts file, so "fix the code in Media" means `ssh Media` and work there.
  * - Approval gate: tool calls matching the rules in workbench-rules.json wait for the user.
  * - ask_user tool: lets the model put a question or choice to the user as a decision card.
  *
@@ -25,6 +27,37 @@ function rulesPath() {
   return process.env.PI_WORKBENCH_RULES ?? path.join(agentDir, "workbench-rules.json");
 }
 
+type SshHost = { alias: string; user: string; hostname: string; port?: number; keyName: string };
+
+/** The non-secret hosts file the workbench materializes into the agent dir (names only, never values). */
+function sshHostsPath() {
+  const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(process.env.HOME ?? "", ".pi", "agent");
+  return process.env.PI_WORKBENCH_SSH ?? path.join(agentDir, "workbench-ssh.json");
+}
+
+function loadSshHosts(): SshHost[] {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(sshHostsPath(), "utf8")) as { hosts?: SshHost[] };
+    return Array.isArray(parsed.hosts) ? parsed.hosts : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The wb_ssh system prompt section: one line per host plus how to work there. */
+function sshSection(hosts: SshHost[]): string {
+  const lines = hosts.map((h) => `- ${h.alias} → ${h.user}@${h.hostname}${h.keyName ? ` (key: ${h.keyName})` : ""}`);
+  return [
+    "Known SSH hosts",
+    "",
+    "The user has registered these remote machines; their keys are already configured for the aliases:",
+    ...lines,
+    "",
+    "When the user names one of these hosts, work on that machine via `ssh <alias>`: run commands as",
+    "`ssh <alias> <cmd>` and move files with `scp` (`scp <alias>:path .` and `scp path <alias>:path`).",
+  ].join("\n");
+}
+
 function loadRules(): Rules {
   try {
     return JSON.parse(fs.readFileSync(rulesPath(), "utf8")) as Rules;
@@ -46,6 +79,14 @@ function isOutside(cwd: string, target: string): boolean {
 
 export default function workbench(pi: ExtensionAPI) {
   const allowedForSession = new Set<string>();
+
+  pi.on("before_agent_start", async (event) => {
+    const hosts = loadSshHosts();
+    if (hosts.length === 0) return;
+    // A section (not a forced prompt) so pi can diff it: it appears in every run while hosts
+    // exist and is removed from the transcript once they are deleted.
+    event.systemPromptOptions.sections.wb_ssh = sshSection(hosts);
+  });
 
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName === "ask_user") return undefined;

@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +16,8 @@ export const config = {
   piAgentDir: path.join(dataDir, "pi-agent"),
   /** pi session JSONL files, so a session can resume after its process exits. */
   piSessionsDir: path.join(dataDir, "pi-sessions"),
+  /** The workbench user's home: where `~/.ssh` is materialized for the agent (ADR 0001). */
+  agentHome: process.env.HOME ? path.resolve(process.env.HOME) : os.homedir(),
   reposDir: path.join(dataDir, "repos"),
   worktreesDir: path.join(dataDir, "worktrees"),
   piBin: process.env.PI_BIN ?? "pi",

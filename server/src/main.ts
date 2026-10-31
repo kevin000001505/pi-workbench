@@ -12,6 +12,7 @@ import { draftPr, openPr, changes } from "./prs.ts";
 import { addRepo, assertRepoName, clonePath, getRepo, listRepos, repoNeedsSetup, requireTrackedRepo } from "./repos.ts";
 import { GLOBAL_SCOPE, SecretStore } from "./secrets.ts";
 import { SessionManager } from "./sessions.ts";
+import { applySsh, saveSshHosts, sshView, testSshHost } from "./ssh.ts";
 import {
   getApprovalSettings,
   getModelSettings,
@@ -26,6 +27,8 @@ const db = openDb(config.dbFile);
 const secrets = new SecretStore(db, config.masterKey);
 for (const dir of [config.reposDir, config.worktreesDir, config.piSessionsDir]) fs.mkdirSync(dir, { recursive: true });
 writePiConfig(db);
+// Fresh ssh keys and host config before the first session and after every key/host change (ADR 0001).
+applySsh(db, secrets, config.agentHome, config.piAgentDir);
 
 const allowedHosts = (process.env.ALLOWED_HOSTS ?? "")
   .split(",")
@@ -56,7 +59,7 @@ async function gitEnv(): Promise<GitEnv> {
   return { ...identity.env, ...env };
 }
 
-const sessions = new SessionManager(db, secrets, gitEnv);
+const sessions = new SessionManager(db, secrets, gitEnv, () => applySsh(db, secrets, config.agentHome, config.piAgentDir));
 
 const llmKey = () => secrets.get(GLOBAL_SCOPE, LLM_KEY_ENV);
 
@@ -247,6 +250,7 @@ const router = new Router()
       llmKey(),
     );
   })
+  .on("GET", "/api/ssh", () => sshView(db, secrets))
   .on("GET", "/api/secrets", () => secrets.list())
   .on("PUT", "/api/secrets", ({ body }) => {
     const scope = String(body.scope ?? GLOBAL_SCOPE);
@@ -254,6 +258,7 @@ const router = new Router()
     if (typeof body.value !== "string" || body.value === "") throw new HttpError(400, "Value is empty");
     secrets.set(scope, String(body.name ?? ""), body.value);
     if (body.name === "GITHUB_TOKEN") identity = undefined;
+    if (scope === GLOBAL_SCOPE) applySsh(db, secrets, config.agentHome, config.piAgentDir);
     return { ok: true };
   })
   .on("DELETE", "/api/secrets/:scope*", ({ params }) => {
@@ -261,8 +266,17 @@ const router = new Router()
     const parts = params.scope.split("/");
     const name = parts.pop()!;
     secrets.delete(parts.join("/"), name);
+    if (parts.join("/") === GLOBAL_SCOPE) applySsh(db, secrets, config.agentHome, config.piAgentDir);
     return { ok: true };
-  });
+  })
+  .on("PUT", "/api/ssh/hosts", ({ body }) => {
+    const hosts = saveSshHosts(db, body?.hosts);
+    applySsh(db, secrets, config.agentHome, config.piAgentDir);
+    return { hosts };
+  })
+  .on("POST", "/api/ssh/test", ({ body }) =>
+    testSshHost(db, secrets, config.agentHome, config.piAgentDir, String(body.alias ?? "")),
+  );
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://x");
