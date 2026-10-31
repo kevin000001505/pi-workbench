@@ -7,8 +7,10 @@ Self-hosted web UI that drives the pi coding agent (`@earendil-works/pi-coding-a
 - `web/`: React + Vite. It imports `../shared/` directly.
 - `shared/transcript.ts`: the RPC-event → conversation reducer. **Both sides use it.** Change it in one place, never fork it.
 - `pi-extension/workbench.ts`: loaded into every pi process via the generated `settings.json`. Imports of pi packages and `typebox` resolve to pi's own copies.
+- `skills/`: workbench-bundled skills (asd-ste100). The Dockerfile copies them into the image skills dir next to mattpocock's skills.
 
 ## Pipeline
+- Every pi process is spawned with `--append-system-prompt`: user-facing explanations follow the asd-ste100 skill (Simplified Technical English). See `EXPLAIN_PROMPT` in `sessions.ts`.
 - Phase transitions happen in `SessionManager.afterSettled`, after a run settles, never mid-run. The extension's pipeline tools only validate and acknowledge. The server reads their arguments from `tool_execution_start` and applies them on a successful `tool_execution_end`.
 - Flow: setup → grill (`grill-with-docs`) → spec (`to-spec`) → tickets (`to-tickets`) → implement (`tdd` per ticket) → review (`code-review`) → done. Prompts are in `server/src/pipeline.ts`. pi only expands `/skill:name` when an argument follows on the same line; a unit test guards this.
 - Each ticket runs under its own pi session id (`<session>-t<num>-<stamp>`), stored on the ticket row, and the review under `sessions.review_run`. `sessions.active_run` says which run is live. A run switch emits `wb_run`, and the browser re-subscribes to get the new snapshot. Switch runs *before* announcing a phase that implies the switch.
