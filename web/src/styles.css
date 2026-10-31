@@ -1634,3 +1634,66 @@ label .skill-picker {
 .msg-error details {
   margin-top: 4px;
 }
+
+/* ---------- issues ---------- */
+.issue-repo {
+  width: 260px;
+}
+.issue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.issue-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 14px;
+  color: var(--text);
+  text-decoration: none;
+  transition:
+    border-color 0.15s,
+    transform 0.15s;
+}
+.issue-row:hover {
+  border-color: var(--line-2);
+  transform: translateY(-1px);
+}
+.issue-num {
+  flex: none;
+  width: 52px;
+}
+.issue-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+}
+.issue-labels {
+  flex: 0 1 auto;
+  max-width: 34%;
+}
+.issue-updated {
+  flex: none;
+  width: 64px;
+  text-align: right;
+}
+.issue-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.issue-detail section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.comment {
+  border-left: 2px solid var(--line-2);
+  padding: 2px 0 2px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}

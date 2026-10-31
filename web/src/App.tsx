@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Home } from "./pages/Home.tsx";
+import { Issues } from "./pages/Issues.tsx";
 import { NewSession } from "./pages/NewSession.tsx";
 import { Repos } from "./pages/Repos.tsx";
 import { Secrets } from "./pages/Secrets.tsx";
@@ -14,15 +15,23 @@ export type Route =
   | { page: "new"; repoId?: string }
   | { page: "repos" }
   | { page: "secrets" }
-  | { page: "settings" };
+  | { page: "settings" }
+  | { page: "issues"; repoId?: string; number?: number };
 
 function parse(hash: string): Route {
-  const [, page, arg] = hash.replace(/^#/, "").split("/");
+  const parts = hash.replace(/^#/, "").split("/").filter(Boolean);
+  const [page, a, b] = parts;
   switch (page) {
     case "session":
-      return arg ? { page: "session", id: arg } : { page: "home" };
+      return a ? { page: "session", id: a } : { page: "home" };
     case "new":
-      return { page: "new", repoId: arg ? decodeURIComponent(arg) : undefined };
+      return { page: "new", repoId: a ? decodeURIComponent(a) : undefined };
+    case "issues":
+      return {
+        page: "issues",
+        repoId: a ? decodeURIComponent(a) : undefined,
+        number: b && /^\d+$/.test(b) ? Number(b) : undefined,
+      };
     case "repos":
     case "secrets":
     case "settings":
@@ -65,6 +74,7 @@ export function App() {
         {route.page === "repos" && <Repos />}
         {route.page === "secrets" && <Secrets />}
         {route.page === "settings" && <Settings />}
+        {route.page === "issues" && <Issues repoId={route.repoId} number={route.number} />}
       </main>
       <div className="toasts" role="status">
         {toasts.map((t) => (
