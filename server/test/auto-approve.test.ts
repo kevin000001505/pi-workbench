@@ -5,6 +5,8 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -188,6 +190,9 @@ for (const [name, reply, why] of [
   ["a timeout", { probabilities: [0.95, 0.04, 0.01], delayMs: 3000 }, /no answer within/],
   ["an unreadable answer", { body: "<html>nope</html>" }, /no risk probabilities/],
   ["an out-of-range answer", { body: '{"answers":{"risk":{"probabilities":{"0":1e999,"1":0,"2":0}}}}' }, /no risk probabilities/],
+  ["a probability above 1", { body: '{"answers":{"risk":{"probabilities":{"0":1.005,"1":0,"2":0}}}}' }, /no risk probabilities/],
+  ["a negative probability", { body: '{"answers":{"risk":{"probabilities":{"0":-0.5,"1":1,"2":0.5}}}}' }, /no risk probabilities/],
+  ["probabilities that do not sum to 1", { probabilities: [0.9, 0.9, 0.9] }, /no risk probabilities/],
 ] as const) {
   test(`when Jev fails with ${name}, the card waits for the user with a failure note`, { skip }, async () => {
     enable();
@@ -201,10 +206,15 @@ for (const [name, reply, why] of [
 }
 
 test("when Jev is unreachable, the card waits for the user", { skip }, async () => {
-  enable({ judge: { kind: "jev", jevBaseUrl: "http://127.0.0.1:9/v1", safeThreshold: 0.8 } });
+  // A port that was just free: nothing listens there, so the connection is refused.
+  const closed = http.createServer();
+  await new Promise<void>((r) => closed.listen(0, "127.0.0.1", () => r()));
+  const port = (closed.address() as AddressInfo).port;
+  await new Promise((r) => closed.close(r));
+  enable({ judge: { kind: "jev", jevBaseUrl: `http://127.0.0.1:${port}/v1`, safeThreshold: 0.8 } });
   const req = await cardFor(sessionId, "please push", (r) => r.review?.state !== "reviewing");
   assert.equal(req.review.state, "failed");
-  assert.match(req.review.note, /^Jev failed/);
+  assert.match(req.review.note, /^Jev failed: .*ECONNREFUSED/);
   await deny(sessionId, req);
 });
 

@@ -295,6 +295,12 @@ test("auto-approve settings: off by default, validated on save", () => {
   assert.equal(saveAutoApproveSettings(db, { judge: { kind: "jev", jevBaseUrl: "https://j.example/v1", safeThreshold: 1 } }).judge.safeThreshold, 1);
   assert.equal(saveAutoApproveSettings(db, { enabled: true }).judge.jevBaseUrl, "https://j.example/v1");
   assert.equal(getAutoApproveSettings(db).enabled, true);
+  for (const enabled of ["false", 0, 1, null]) {
+    assert.throws(() => saveAutoApproveSettings(db, { enabled } as any), /on or off/);
+  }
+  assert.equal(getAutoApproveSettings(db).enabled, true, "a rejected save changes nothing");
+  saveAutoApproveSettings(db, { judge: { kind: "jev", jevBaseUrl: "https://j.example/v1", safeThreshold: 0.8, extra: "x" } as any });
+  assert.deepEqual(Object.keys(getAutoApproveSettings(db).judge).sort(), ["jevBaseUrl", "kind", "safeThreshold"]);
 });
 
 test("the Jev token is write-only and never reaches a pi environment", () => {

@@ -30,9 +30,12 @@ export function getAutoApproveSettings(db: Db): AutoApproveSettings {
 
 export function saveAutoApproveSettings(db: Db, input: Partial<AutoApproveSettings>): AutoApproveSettings {
   const cur = getAutoApproveSettings(db);
+  // A safety switch: only a real boolean turns it on or off ("false" must never mean on).
+  if (input.enabled !== undefined && typeof input.enabled !== "boolean") throw new Error("Auto-approve must be on or off (true or false)");
+  const judge = { ...cur.judge, ...input.judge };
   const next: AutoApproveSettings = {
     enabled: input.enabled ?? cur.enabled,
-    judge: { ...cur.judge, ...input.judge, kind: "jev" },
+    judge: { kind: "jev", jevBaseUrl: judge.jevBaseUrl, safeThreshold: judge.safeThreshold },
   };
   if (!/^https?:\/\//.test(next.judge.jevBaseUrl)) throw new Error("Jev URL must start with http:// or https://");
   const t = next.judge.safeThreshold;
@@ -88,8 +91,8 @@ export async function reviewPermission(
     });
     text = await res.text();
   } catch (err) {
-    const e = err as Error;
-    const why = e.name === "TimeoutError" ? `no answer within ${Math.round(timeoutMs() / 1000)} s` : e.message;
+    const e = err as Error & { cause?: { code?: string; message?: string } };
+    const why = e.name === "TimeoutError" ? `no answer within ${Math.round(timeoutMs() / 1000)} s` : [e.message, e.cause?.code ?? e.cause?.message].filter(Boolean).join(": ");
     return { decision: "failed", by: "jev", note: `Jev failed: ${why}` };
   }
   if (!res.ok) return { decision: "failed", by: "jev", note: `Jev failed: HTTP ${res.status}` };
@@ -111,7 +114,9 @@ function readProbabilities(text: string): [number, number, number] | undefined {
   try {
     const p = JSON.parse(text)?.answers?.risk?.probabilities;
     const v = [p?.["0"], p?.["1"], p?.["2"]];
-    return v.every((x) => typeof x === "number" && Number.isFinite(x)) ? (v as [number, number, number]) : undefined;
+    // Real probabilities only: each in [0, 1] and together about 1. Anything else is unreadable, never "safe".
+    if (!v.every((x) => typeof x === "number" && x >= 0 && x <= 1)) return undefined;
+    return Math.abs(v[0] + v[1] + v[2] - 1) <= 0.01 ? (v as [number, number, number]) : undefined;
   } catch {
     return undefined;
   }
