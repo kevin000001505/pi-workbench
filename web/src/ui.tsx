@@ -87,4 +87,10 @@ export const ago = (ts: number) => {
   return `${Math.round(s / 86400)}d ago`;
 };
 
+/** The issue-detail hash link for an `owner/name#123` ref. */
+export const issueUrl = (issueRef: string) => {
+  const [repoId, number] = issueRef.split("#");
+  return `#/issues/${encodeURIComponent(repoId)}/${number}`;
+};
+
 export const kTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}K` : String(n));

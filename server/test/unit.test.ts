@@ -195,6 +195,18 @@ test("pipeline: ticket validation, frontier order and prompts", async () => {
   assert.match(section, /- \[x\] #3 T3 \(`\.scratch\/x\/issues\/03\.md`\)/);
 });
 
+test("the origin issue's Closes line is deduped against ticket lines by number", async () => {
+  const { originCloses } = await import("../src/prs.ts");
+  const section = (ref: string) => `\n## Tickets\n\n- [x] #1 Ship it (${ref})\n`;
+
+  assert.equal(originCloses("me/app#42", ""), "Closes #42\n");
+  assert.equal(originCloses("me/app#42", section(`.scratch/issues/42.md`)), "Closes #42\n"); // a non-issue ref doesn't close anything
+  assert.equal(originCloses(null, section("Closes #42")), ""); // no origin issue
+  assert.equal(originCloses("me/app", ""), ""); // malformed ref
+  assert.equal(originCloses("me/app#42", section("Closes #42")), ""); // a ticket already closes it
+  assert.equal(originCloses("me/app#1", section("Closes #12")), "Closes #1\n"); // 1 is not 12
+});
+
 test("requireTrackedRepo resolves tracked repos and rejects the rest", () => {
   const db = tmpDb();
   db.prepare("INSERT INTO repos (id, owner, name, default_branch, private, added_at) VALUES ('me/app','me','app','main',1,0)").run();

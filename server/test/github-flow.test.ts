@@ -186,6 +186,62 @@ test("listIssueComments returns the issue's comments, capped at 100", async () =
   assert.equal((await client.listIssueComments(login, name, 1)).length, 100);
 });
 
+test("a session that solves an issue opens a PR whose body closes it; ticket closes are kept and deduped", async () => {
+  const { openDb } = await import("../src/db.ts");
+  const { config } = await import("../src/config.ts");
+  const { GitHub } = await import("../src/github.ts");
+  const { addRepo, createWorktree } = await import("../src/repos.ts");
+  const { openPr, draftPr } = await import("../src/prs.ts");
+  const { startMockLlm } = await import("./mock-llm.ts");
+  const db = openDb(config.dbFile);
+  const client = new GitHub("ghp_test");
+
+  const created = await client.createRepo({ name: "solve-app", private: true });
+  const repo = await addRepo(db, { owner: created.owner.login, name: created.name, defaultBranch: created.default_branch, private: true }, env);
+  const worktree = await createWorktree(repo, "s9", "pi/solve-s9", "main", env);
+  // The sessions table, as sessions.create persists it: this one solves the repo's issue #1.
+  db.prepare(
+    "INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, issue_ref) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)",
+  ).run("s9", repo.id, "Solve issue 1", "pi/solve-s9", "main", worktree, `${repo.id}#1`);
+  const row = db.prepare("SELECT * FROM sessions WHERE id = ?").get("s9") as any;
+
+  fs.writeFileSync(path.join(worktree, "dark.txt"), "dark mode\n");
+  execFileSync("git", ["add", "."], { cwd: worktree });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add dark mode"], { cwd: worktree });
+
+  // The ticket phase published issue #2; the origin issue is #1. Both must close.
+  const t = (trackerRef: string) => ({ num: 1, title: "Ship it", body: "", blockedBy: [], trackerRef, status: "done" as const, note: null, runId: null });
+  const noModel = { baseUrl: "http://127.0.0.1:9/v1", modelId: "m", contextWindow: 1, maxTokens: 1, reasoning: false, thinkingFormat: "" };
+
+  const fallback = await draftPr(row, env, noModel, undefined, [t("#2")]);
+  assert.equal(fallback.drafted, false);
+  assert.match(fallback.body, /Closes #2/); // the ticket issue's line is preserved
+  assert.match(fallback.body, /Closes #1\n$/); // the origin issue gets its own line
+
+  const llm = await startMockLlm();
+  const drafted = await draftPr(row, env, { ...noModel, baseUrl: llm.url }, undefined, [t("#2")]);
+  await llm.close();
+  assert.equal(drafted.drafted, true);
+  assert.match(drafted.body, /Closes #2/);
+  assert.match(drafted.body, /Closes #1\n$/);
+
+  await openPr(row, repo, client, env, { title: "Add dark mode", body: fallback.body });
+  const pr = gh.pulls[gh.pulls.length - 1];
+  assert.match(pr.body, /Closes #1/);
+  assert.match(pr.body, /Closes #2/);
+
+  // A ticket that tracks the origin issue itself: the number appears once, not twice.
+  const dup = await draftPr(row, env, noModel, undefined, [t("#1")]);
+  assert.equal((dup.body.match(/Closes #1/g) ?? []).length, 1);
+
+  // A plain session closes nothing.
+  db.prepare(
+    "INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, 0)",
+  ).run("s10", repo.id, "Plain", "pi/plain-s10", "main", worktree);
+  const plain = await draftPr(db.prepare("SELECT * FROM sessions WHERE id = ?").get("s10") as any, env, noModel, undefined);
+  assert.doesNotMatch(plain.body, /Closes/);
+});
+
 test("a bad token surfaces GitHub's message", async () => {
   const { GitHub, GitHubError } = await import("../src/github.ts");
   await assert.rejects(new GitHub("nope").user(), (e: any) => e instanceof GitHubError && e.status === 401 && /Bad credentials/.test(e.message));

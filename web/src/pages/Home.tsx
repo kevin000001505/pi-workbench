@@ -1,6 +1,6 @@
 import { phaseLabel } from "../session/PipelinePanel.tsx";
 import { useStore } from "../store.tsx";
-import { ago, Empty, PageHeader, StatusPill } from "../ui.tsx";
+import { ago, Empty, PageHeader, StatusPill, issueUrl } from "../ui.tsx";
 
 export function Home() {
   const { sessions } = useStore();
@@ -57,7 +57,14 @@ export function Home() {
                     : s.activity || (s.error ? s.error : "Idle")}
             </p>
             {s.mode === "pipeline" && <p className="small phase-line">{phaseLabel(s)}</p>}
-            {s.prUrl && <span className="tag">PR #{s.prNumber}</span>}
+            <div className="row gap">
+              {s.issueRef && (
+                <a className="tag" href={issueUrl(s.issueRef)} title={`Solving ${s.issueRef}`}>
+                  Issue #{s.issueRef.split("#")[1]}
+                </a>
+              )}
+              {s.prUrl && <span className="tag">PR #{s.prNumber}</span>}
+            </div>
           </a>
         ))}
       </div>
