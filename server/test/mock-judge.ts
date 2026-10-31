@@ -13,7 +13,7 @@ export type JudgeReply = {
 
 /**
  * A scripted Jev (`POST /v1/systemone`) for the auto-approve tests. Queued `replies` answer first;
- * otherwise it answers by the subject in the state: "push" is safe, "rm" risky, "ssh" dangerous.
+ * otherwise it answers by the subject in the state: "rm" is risky, anything else safe.
  */
 export function startMockJudge(port = 0): Promise<{
   url: string;
@@ -81,7 +81,6 @@ export function startMockJudge(port = 0): Promise<{
 }
 
 function byKeyword(state: string): JudgeReply {
-  if (state.includes("ssh")) return { probabilities: [0.02, 0.18, 0.8] };
   if (state.includes("rm ")) return { probabilities: [0.1, 0.7, 0.2] };
   return { probabilities: [0.95, 0.04, 0.01] };
 }

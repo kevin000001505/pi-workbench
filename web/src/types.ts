@@ -1,3 +1,5 @@
+import { waitsOnUser } from "../../shared/pending.ts";
+
 export type SessionStatus = "stopped" | "starting" | "running" | "waiting" | "idle" | "error";
 
 export type UiRequest = {
@@ -12,13 +14,13 @@ export type UiRequest = {
   tool?: string;
   subject?: string;
   reasons?: string[];
-  /** permission under auto-approve: the risk judge's review, then why it still waits for the user. */
-  review?: { state: "reviewing" | "waiting" | "failed"; by: "jev"; rating?: string; pSafe?: number; note?: string };
+  /** permission under auto-approve: the risk judge's rating, then why it still waits for the user. */
+  judge?: { state: "judging" | "waiting" | "failed"; by: "jev"; rating?: string; pSafe?: number; note?: string };
   createdAt: number;
 };
 
-/** Requests that wait on the user: a permission the risk judge is still reviewing does not. */
-export const waitingOn = (s: { pending: UiRequest[] }) => s.pending.filter((r) => r.review?.state !== "reviewing");
+/** The session's requests that wait on the user (see shared/pending.ts). */
+export const waitingOn = (s: { pending: UiRequest[] }) => s.pending.filter(waitsOnUser);
 
 export type AutoApproveSettings = {
   enabled: boolean;

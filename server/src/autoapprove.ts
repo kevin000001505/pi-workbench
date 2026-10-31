@@ -1,3 +1,4 @@
+import { config } from "./config.ts";
 import type { Db } from "./db.ts";
 import { getSetting, putSetting } from "./db.ts";
 import type { SecretStore } from "./secrets.ts";
@@ -52,15 +53,13 @@ export function setAutoApproveKey(secrets: SecretStore, key: AutoApproveKey, val
 export type Permission = { tool: string; subject: string; reasons: string[]; cwd?: string; repo?: string };
 
 /** The risk judge's rating levels, in Jev's score order. */
-export const LEVELS = ["safe", "risky", "dangerous"] as const;
-export type Level = (typeof LEVELS)[number];
+export type Level = "safe" | "risky" | "dangerous";
 
 export type Verdict =
-  | { decision: "allow"; by: "jev"; pSafe: number }
-  | { decision: "user"; by: "jev"; pSafe: number; rating: Level; note: string }
-  | { decision: "failed"; by: "jev"; note: string };
+  | { outcome: "allow"; by: "jev"; pSafe: number }
+  | { outcome: "user"; by: "jev"; pSafe: number; rating: Level; note: string }
+  | { outcome: "failed"; by: "jev"; note: string };
 
-const timeoutMs = () => Number(process.env.AUTO_APPROVE_TIMEOUT_MS ?? 60_000);
 
 const RISK_QUESTION = {
   type: "score",
@@ -74,7 +73,7 @@ const RISK_QUESTION = {
 };
 
 /** Ask the risk judge about one permission. Never throws: a failure is a verdict too. */
-export async function reviewPermission(
+export async function judgePermission(
   p: Permission,
   settings: AutoApproveSettings,
   keys: { jevToken?: string },
@@ -87,22 +86,22 @@ export async function reviewPermission(
       method: "POST",
       headers: { "Content-Type": "application/json", ...(keys.jevToken ? { Authorization: `Bearer ${keys.jevToken}` } : {}) },
       body: JSON.stringify({ model: "jev-latest", state: JSON.stringify(p), questions: { risk: RISK_QUESTION } }),
-      signal: AbortSignal.timeout(timeoutMs()),
+      signal: AbortSignal.timeout(config.autoApproveTimeoutMs),
     });
     text = await res.text();
   } catch (err) {
     const e = err as Error & { cause?: { code?: string; message?: string } };
-    const why = e.name === "TimeoutError" ? `no answer within ${Math.round(timeoutMs() / 1000)} s` : [e.message, e.cause?.code ?? e.cause?.message].filter(Boolean).join(": ");
-    return { decision: "failed", by: "jev", note: `Jev failed: ${why}` };
+    const why = e.name === "TimeoutError" ? `no answer within ${Math.round(config.autoApproveTimeoutMs / 1000)} s` : [e.message, e.cause?.code ?? e.cause?.message].filter(Boolean).join(": ");
+    return { outcome: "failed", by: "jev", note: `Jev failed: ${why}` };
   }
-  if (!res.ok) return { decision: "failed", by: "jev", note: `Jev failed: HTTP ${res.status}` };
+  if (!res.ok) return { outcome: "failed", by: "jev", note: `Jev failed: HTTP ${res.status}` };
   const probs = readProbabilities(text);
-  if (!probs) return { decision: "failed", by: "jev", note: "Jev failed: the answer had no risk probabilities" };
+  if (!probs) return { outcome: "failed", by: "jev", note: "Jev failed: the answer had no risk probabilities" };
   const [pSafe] = probs;
-  if (pSafe >= settings.judge.safeThreshold) return { decision: "allow", by: "jev", pSafe };
+  if (pSafe >= settings.judge.safeThreshold) return { outcome: "allow", by: "jev", pSafe };
   const rating: Level = probs[2] > probs[1] ? "dangerous" : "risky";
   return {
-    decision: "user",
+    outcome: "user",
     by: "jev",
     pSafe,
     rating,
@@ -134,7 +133,7 @@ export function autoApproveView(db: Db, secrets: SecretStore) {
 
 /** Settings → Test: ask the risk judge about a harmless call and report whether it answered. */
 export async function testJudge(settings: AutoApproveSettings, keys: { jevToken?: string }) {
-  const v = await reviewPermission({ tool: "bash", subject: "ls", reasons: ["connection test"] }, settings, keys);
-  if (v.decision === "failed") return { ok: false, message: v.note };
+  const v = await judgePermission({ tool: "bash", subject: "ls", reasons: ["connection test"] }, settings, keys);
+  if (v.outcome === "failed") return { ok: false, message: v.note };
   return { ok: true, message: `Jev answered: P(safe)=${v.pSafe.toFixed(2)} for \`ls\`.` };
 }

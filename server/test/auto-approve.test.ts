@@ -123,8 +123,8 @@ test("a permission Jev rates safe runs without the user, with an allowed-by-Jev 
   const added = await run(sessionId, "please push");
   const result = added.find((m: any) => m.role === "toolResult");
   assert.ok(!result.isError || !JSON.stringify(result.content).includes("denied"), "the call was not blocked");
-  const line = added.find((m: any) => m.role === "autoDecision");
-  assert.equal(line.decision, "allow");
+  const line = added.find((m: any) => m.role === "autoAnswer");
+  assert.equal(line.answer, "allow");
   assert.equal(line.by, "jev");
   assert.equal(line.subject, "git push origin HEAD");
   assert.equal(line.pSafe, 0.95);
@@ -145,11 +145,11 @@ async function deny(id: string, req: any) {
   await settle(id);
 }
 
-test("while Jev reviews, the card shows reviewing and the session is not waiting on the user", { skip }, async () => {
+test("while Jev judges, the card shows judging and the session is not waiting on the user", { skip }, async () => {
   enable();
   judge.replies.push({ probabilities: [0.95, 0.04, 0.01], delayMs: 800 });
   const req = await cardFor(sessionId, "please push");
-  assert.equal(req.review.state, "reviewing");
+  assert.equal(req.judge.state, "judging");
   assert.notEqual(mgr.summary(sessionId).status, "waiting");
   await settle(sessionId);
   assert.equal(mgr.summary(sessionId).pending.length, 0);
@@ -157,11 +157,11 @@ test("while Jev reviews, the card shows reviewing and the session is not waiting
 
 test("a call below the safe threshold waits for the user with Jev's rating", { skip }, async () => {
   enable();
-  const req = await cardFor(sessionId, "please rm the build dir", (r) => r.review?.state !== "reviewing");
-  assert.equal(req.review.state, "waiting");
-  assert.equal(req.review.rating, "risky");
-  assert.equal(req.review.pSafe, 0.1);
-  assert.match(req.review.note, /risky/);
+  const req = await cardFor(sessionId, "please rm the build dir", (r) => r.judge?.state !== "judging");
+  assert.equal(req.judge.state, "waiting");
+  assert.equal(req.judge.rating, "risky");
+  assert.equal(req.judge.pSafe, 0.1);
+  assert.match(req.judge.note, /risky/);
   assert.equal(mgr.summary(sessionId).status, "waiting");
   await deny(sessionId, req);
 });
@@ -169,20 +169,20 @@ test("a call below the safe threshold waits for the user with Jev's rating", { s
 test("a dangerous rating names the dangerous level", { skip }, async () => {
   enable();
   judge.replies.push({ probabilities: [0.05, 0.15, 0.8] });
-  const req = await cardFor(sessionId, "please rm the build dir", (r) => r.review?.state !== "reviewing");
-  assert.equal(req.review.rating, "dangerous");
+  const req = await cardFor(sessionId, "please rm the build dir", (r) => r.judge?.state !== "judging");
+  assert.equal(req.judge.rating, "dangerous");
   await deny(sessionId, req);
 });
 
 test("the safe threshold is the user's setting", { skip }, async () => {
   enable({ judge: { kind: "jev", jevBaseUrl: judge.url, safeThreshold: 0.99 } });
-  const req = await cardFor(sessionId, "please push", (r) => r.review?.state !== "reviewing");
-  assert.equal(req.review.state, "waiting");
-  assert.equal(req.review.pSafe, 0.95);
+  const req = await cardFor(sessionId, "please push", (r) => r.judge?.state !== "judging");
+  assert.equal(req.judge.state, "waiting");
+  assert.equal(req.judge.pSafe, 0.95);
   await deny(sessionId, req);
   enable({ judge: { kind: "jev", jevBaseUrl: judge.url, safeThreshold: 0.95 } });
   const added = await run(sessionId, "please push");
-  assert.ok(added.some((m: any) => m.role === "autoDecision"), "P(safe) equal to the threshold passes");
+  assert.ok(added.some((m: any) => m.role === "autoAnswer"), "P(safe) equal to the threshold passes");
 });
 
 for (const [name, reply, why] of [
@@ -197,9 +197,9 @@ for (const [name, reply, why] of [
   test(`when Jev fails with ${name}, the card waits for the user with a failure note`, { skip }, async () => {
     enable();
     judge.replies.push(reply);
-    const req = await cardFor(sessionId, "please push", (r) => r.review?.state !== "reviewing");
-    assert.equal(req.review.state, "failed");
-    assert.match(req.review.note, why);
+    const req = await cardFor(sessionId, "please push", (r) => r.judge?.state !== "judging");
+    assert.equal(req.judge.state, "failed");
+    assert.match(req.judge.note, why);
     assert.equal(mgr.summary(sessionId).status, "waiting");
     await deny(sessionId, req);
   });
@@ -212,9 +212,9 @@ test("when Jev is unreachable, the card waits for the user", { skip }, async () 
   const port = (closed.address() as AddressInfo).port;
   await new Promise((r) => closed.close(r));
   enable({ judge: { kind: "jev", jevBaseUrl: `http://127.0.0.1:${port}/v1`, safeThreshold: 0.8 } });
-  const req = await cardFor(sessionId, "please push", (r) => r.review?.state !== "reviewing");
-  assert.equal(req.review.state, "failed");
-  assert.match(req.review.note, /^Jev failed: .*ECONNREFUSED/);
+  const req = await cardFor(sessionId, "please push", (r) => r.judge?.state !== "judging");
+  assert.equal(req.judge.state, "failed");
+  assert.match(req.judge.note, /^Jev failed: .*ECONNREFUSED/);
   await deny(sessionId, req);
 });
 
@@ -222,11 +222,11 @@ test("the user's answer during a review wins and the late verdict is dropped", {
   enable();
   judge.replies.push({ probabilities: [0.95, 0.04, 0.01], delayMs: 1000 });
   const req = await cardFor(sessionId, "please push");
-  assert.equal(req.review.state, "reviewing");
+  assert.equal(req.judge.state, "judging");
   const from = events.length;
   await deny(sessionId, req);
   await new Promise((r) => setTimeout(r, 1300));
-  assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_decision"), "no automatic answer after the user's");
+  assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"), "no automatic answer after the user's");
   const t = (await mgr.snapshot(sessionId)).transcript;
   assert.ok(JSON.stringify(t.messages.findLast((m: any) => m.role === "toolResult").content).includes("denied"));
 });
@@ -237,7 +237,7 @@ test("decisions are never sent to the risk judge", { skip }, async () => {
   await mgr.send(sessionId, "ask me something");
   const req = await waitFor(() => mgr.summary(sessionId).pending[0]);
   assert.equal(req.kind, "decision");
-  assert.equal(req.review, undefined);
+  assert.equal(req.judge, undefined);
   mgr.respond(sessionId, req.id, { value: "Postgres" });
   await settle(sessionId);
   assert.equal(judge.requests.length, before);
@@ -247,7 +247,7 @@ test("with auto-approve off, permissions wait for the user and Jev is not asked"
   auto.saveAutoApproveSettings(db, { enabled: false });
   const before = judge.requests.length;
   const req = await cardFor(sessionId, "please push");
-  assert.equal(req.review, undefined);
+  assert.equal(req.judge, undefined);
   assert.equal(mgr.summary(sessionId).status, "waiting");
   await deny(sessionId, req);
   assert.equal(judge.requests.length, before);
