@@ -11,6 +11,15 @@ export type GhRepo = {
   pushed_at: string | null;
   html_url: string;
 };
+export type GhIssueSummary = {
+  number: number;
+  title: string;
+  labels: string[];
+  updatedAt: string;
+  htmlUrl: string;
+};
+export type GhIssueDetail = GhIssueSummary & { body: string | null; assignees: string[] };
+export type GhIssueComment = { id: number; author: string; body: string | null; createdAt: string };
 
 export class GitHubError extends Error {
   status: number;
@@ -63,6 +72,38 @@ export class GitHub {
     return this.req<GhRepo>("GET", `/repos/${owner}/${name}`);
   }
 
+  /**
+   * One page (up to 100) of the repo's open issues; pull requests in the feed are filtered out.
+   * `label` matches a label name case-insensitively; `q` is a case-insensitive substring over
+   * title, body and issue number. Results are capped at 30.
+   */
+  listIssues(owner: string, name: string, opts: { label?: string; q?: string } = {}) {
+    type Raw = {
+      number: number;
+      title: string;
+      body: string | null;
+      labels: { name: string }[];
+      updated_at: string;
+      html_url: string;
+      pull_request?: unknown;
+    };
+    const query = opts.q?.toLowerCase();
+    return this.req<Raw[]>("GET", `/repos/${owner}/${name}/issues?state=open&per_page=100`).then((feed) =>
+      feed
+        .filter((i) => !("pull_request" in i))
+        .filter((i) => !opts.label || i.labels.some((l) => l.name.toLowerCase() === opts.label!.toLowerCase()))
+        .filter(
+          (i) =>
+            !query ||
+            i.title.toLowerCase().includes(query) ||
+            (i.body ?? "").toLowerCase().includes(query) ||
+            String(i.number).includes(query),
+        )
+        .slice(0, 30)
+        .map((i) => ({ number: i.number, title: i.title, labels: i.labels.map((l) => l.name), updatedAt: i.updated_at, htmlUrl: i.html_url })),
+    );
+  }
+
   createRepo(input: { name: string; description?: string; private: boolean; org?: string }) {
     const body = { name: input.name, description: input.description ?? "", private: input.private, auto_init: true };
     return this.req<GhRepo>("POST", input.org ? `/orgs/${input.org}/repos` : "/user/repos", body);
@@ -70,6 +111,41 @@ export class GitHub {
 
   createPull(owner: string, name: string, input: { title: string; body: string; head: string; base: string; draft?: boolean }) {
     return this.req<{ number: number; html_url: string }>("POST", `/repos/${owner}/${name}/pulls`, input);
+  }
+
+  /** One issue's detail: body, label names, assignee logins and updated time. */
+  getIssue(owner: string, name: string, number: number) {
+    type Raw = {
+      number: number;
+      title: string;
+      body: string | null;
+      labels: { name: string }[];
+      assignees: { login: string }[];
+      updated_at: string;
+      html_url: string;
+    };
+    return this.req<Raw>("GET", `/repos/${owner}/${name}/issues/${number}`).then((i) => ({
+      number: i.number,
+      title: i.title,
+      body: i.body,
+      labels: i.labels.map((l) => l.name),
+      assignees: i.assignees.map((a) => a.login),
+      updatedAt: i.updated_at,
+      htmlUrl: i.html_url,
+    }));
+  }
+
+  /** One page of an issue's comments, capped at 100. */
+  listIssueComments(owner: string, name: string, number: number) {
+    type Raw = {
+      id: number;
+      user: { login: string };
+      body: string | null;
+      created_at: string;
+    };
+    return this.req<Raw[]>("GET", `/repos/${owner}/${name}/issues/${number}/comments?per_page=100`).then((all) =>
+      all.slice(0, 100).map((c) => ({ id: c.id, author: c.user.login, body: c.body, createdAt: c.created_at })),
+    );
   }
 
   async pullStatus(owner: string, name: string, number: number) {

@@ -7,6 +7,7 @@ import { applyEvent, emptyTranscript, withMessages } from "../../shared/transcri
 import { openDb } from "../src/db.ts";
 import { redact } from "../src/git.ts";
 import { checkRequestOrigin, Router } from "../src/http.ts";
+import { requireTrackedRepo } from "../src/repos.ts";
 import { SecretStore } from "../src/secrets.ts";
 import { DEFAULT_RULES, getApprovalSettings, saveApprovalSettings, saveModelSettings } from "../src/settings.ts";
 import { listSkills, parseFrontmatter } from "../src/skills.ts";
@@ -194,6 +195,33 @@ test("pipeline: ticket validation, frontier order and prompts", async () => {
   assert.match(section, /- \[x\] #3 T3 \(`\.scratch\/x\/issues\/03\.md`\)/);
 });
 
+test("the origin issue's Closes line is deduped against ticket lines by number", async () => {
+  const { originCloses } = await import("../src/prs.ts");
+  const section = (ref: string) => `\n## Tickets\n\n- [x] #1 Ship it (${ref})\n`;
+
+  assert.equal(originCloses("me/app#42", ""), "Closes #42\n");
+  assert.equal(originCloses("me/app#42", section(`.scratch/issues/42.md`)), "Closes #42\n"); // a non-issue ref doesn't close anything
+  assert.equal(originCloses(null, section("Closes #42")), ""); // no origin issue
+  assert.equal(originCloses("me/app", ""), ""); // malformed ref
+  assert.equal(originCloses("me/app#42", section("Closes #42")), ""); // a ticket already closes it
+  assert.equal(originCloses("me/app#1", section("Closes #12")), "Closes #1\n"); // 1 is not 12
+});
+
+test("requireTrackedRepo resolves tracked repos and rejects the rest", () => {
+  const db = tmpDb();
+  db.prepare("INSERT INTO repos (id, owner, name, default_branch, private, added_at) VALUES ('me/app','me','app','main',1,0)").run();
+  assert.equal(requireTrackedRepo(db, "me/app").name, "app");
+  let err: unknown;
+  try {
+    requireTrackedRepo(db, "other/repo");
+  } catch (e) {
+    err = e;
+  }
+  assert.ok(err instanceof Error);
+  assert.equal((err as { status: number }).status, 404);
+  assert.match((err as Error).message, /Unknown repo other\/repo/);
+});
+
 test("old databases gain the pipeline columns", async () => {
   const { DatabaseSync } = await import("node:sqlite");
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wb-mig-")), "old.db");
@@ -204,8 +232,39 @@ test("old databases gain the pipeline columns", async () => {
   old.prepare("INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at) VALUES ('s','r','t','b','main','/w',0,0)").run();
   old.close();
   const db = openDb(file);
-  const row = db.prepare("SELECT mode, phase, active_run, attention FROM sessions").get() as any;
-  assert.deepEqual({ ...row }, { mode: "direct", phase: "direct", active_run: null, attention: null });
+  const row = db.prepare("SELECT mode, phase, active_run, attention, issue_ref FROM sessions").get() as any;
+  assert.deepEqual({ ...row }, { mode: "direct", phase: "direct", active_run: null, attention: null, issue_ref: null });
+});
+
+test("README documents the issues feature for a fresh setup", () => {
+  const readme = fs.readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+  const section = (title: string) => {
+    const i = readme.indexOf(`## ${title}`);
+    assert.ok(i >= 0, `README has a "${title}" section`);
+    const rest = readme.slice(i);
+    const j = rest.indexOf("\n## ", 1);
+    return rest.slice(0, j === -1 ? undefined : j);
+  };
+
+  // Fresh setup: the PAT instructions list an Issues read scope, and not Issues write (the feature posts no comments).
+  const token = section("Deploy").split("\n").find((l) => l.includes("GITHUB_TOKEN"));
+  assert.ok(token, "token instructions line");
+  assert.ok(token!.includes("Issues"), "token instructions mention the Issues scope");
+  const clause = token!.slice(token!.indexOf("Issues")).split(/[.;]/)[0];
+  assert.match(clause, /read/i);
+  assert.doesNotMatch(clause, /write/i);
+
+  // Features: the Issues page browses and searches the open issues of a tracked repo, reads the discussion, and starts a pre-filled session.
+  const features = section("What you get");
+  assert.match(features, /Issues\*{0,2} page/i);
+  assert.match(features, /open issues/);
+  assert.match(features, /search/i);
+  assert.match(features, /discussion|comment/i);
+  assert.match(features, /pre-?filled/i);
+
+  // Solve flow: the PR body carries Closes #n, and merging the PR closes the issue.
+  assert.match(features, /Closes #/);
+  assert.match(features, /merg/i);
 });
 
 test("every pipeline prompt starts with a /skill: command pi will expand", async () => {

@@ -43,11 +43,24 @@ function newFileDiff(root: string, file: string) {
   return `${header}@@ -0,0 +1,${lines.length} @@\n${lines.map((l) => `+${l}`).join("\n")}`;
 }
 
+/**
+ * The `Closes #n` line for the session's origin issue, ready to append after the ticket section.
+ * Empty when the session has no origin issue, or when a ticket line already closes the same
+ * number (matched as a whole number, so `#1` is not deduped against `#12`).
+ */
+export function originCloses(issueRef: string | null, ticketSection: string): string {
+  const m = /#(\d+)$/.exec(issueRef ?? "");
+  if (!m) return "";
+  const closed = [...ticketSection.matchAll(/Closes #(\d+)/g)].map((x) => x[1]);
+  return closed.includes(m[1]) ? "" : `Closes #${m[1]}\n`;
+}
+
 /** Ask the configured model for a title and body; fall back to the session title and commit list. */
 export async function draftPr(row: SessionRow, env: GitEnv, model: ModelSettings, apiKey: string | undefined, tickets: Ticket[] = []) {
   const c = await changes(row, env);
   const ticketList = ticketsSection(tickets);
-  const fallback = { title: row.title, body: `## Summary\n\n${c.log || "- (no commits yet)"}\n${ticketList}` };
+  const issueLine = originCloses(row.issue_ref, ticketList);
+  const fallback = { title: row.title, body: `## Summary\n\n${c.log || "- (no commits yet)"}\n${ticketList}${issueLine}` };
   const diff = `${c.committed}\n${c.uncommitted}`.trim();
   if (!diff) return { ...fallback, drafted: false, error: "No changes against the base branch yet", ...c };
   try {
@@ -60,7 +73,7 @@ export async function draftPr(row: SessionRow, env: GitEnv, model: ModelSettings
     if (!text.includes("{")) throw new Error("the model's reply had no JSON object");
     const json = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
     if (typeof json.title !== "string" || typeof json.body !== "string") throw new Error("model reply had no title/body");
-    return { title: json.title.trim(), body: `${json.body.trim()}\n${ticketList}`, drafted: true, error: null, ...c };
+    return { title: json.title.trim(), body: `${json.body.trim()}\n${ticketList}${issueLine}`, drafted: true, error: null, ...c };
   } catch (err) {
     return { ...fallback, drafted: false, error: `Draft failed: ${(err as Error).message}`, ...c };
   }

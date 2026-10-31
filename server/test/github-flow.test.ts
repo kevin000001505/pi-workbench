@@ -78,6 +78,170 @@ test("create a repo, work on a branch, and open a PR", async () => {
   assert.equal(status.comments, 1);
 });
 
+test("listIssues returns the repo's open issues, with pull requests filtered out", async () => {
+  const { GitHub } = await import("../src/github.ts");
+  const client = new GitHub("ghp_test");
+
+  const created = await client.createRepo({ name: "issue-app", private: true });
+  const list = await client.listIssues(created.owner.login, created.name);
+  assert.equal(list.length, 3);
+  assert.deepEqual(
+    list.map((i) => [i.number, i.title, i.labels, i.updatedAt]),
+    [
+      [1, "Add dark mode", ["enhancement"], "2025-01-03T00:00:00Z"],
+      [2, "Fix login Crash", ["bug"], "2025-01-02T00:00:00Z"],
+      [3, "Docs: setup guide", ["documentation"], "2025-01-01T00:00:00Z"],
+    ],
+  );
+  assert.equal(list[0].htmlUrl, `https://github.com/${created.owner.login}/${created.name}/issues/1`);
+  // The mock's issues feed also carries a pull request entry (number 9); it must not leak in.
+  assert.ok(!list.some((i) => i.number === 9));
+});
+
+test("listIssues filters by label and by case-insensitive search over title, body and number", async () => {
+  const { GitHub } = await import("../src/github.ts");
+  const client = new GitHub("ghp_test");
+  const created = await client.createRepo({ name: "filter-app", private: true });
+  const { login } = created.owner;
+  const name = created.name;
+
+  assert.deepEqual((await client.listIssues(login, name, { label: "bug" })).map((i) => i.number), [2]);
+  assert.deepEqual((await client.listIssues(login, name, { label: "BUG" })).map((i) => i.number), [2]); // label match is case-insensitive
+  assert.deepEqual((await client.listIssues(login, name, { label: "nope" })).length, 0);
+
+  assert.deepEqual((await client.listIssues(login, name, { q: "DARK" })).map((i) => i.number), [1]); // title
+  assert.deepEqual((await client.listIssues(login, name, { q: "reloaded" })).map((i) => i.number), [2]); // body
+  assert.deepEqual((await client.listIssues(login, name, { q: "3" })).map((i) => i.number), [3]); // issue number
+  assert.deepEqual((await client.listIssues(login, name, { q: "absent" })).length, 0);
+  // label and search combine
+  assert.deepEqual((await client.listIssues(login, name, { label: "bug", q: "crash" })).map((i) => i.number), [2]);
+  assert.deepEqual((await client.listIssues(login, name, { label: "bug", q: "dark" })).length, 0);
+});
+
+test("listIssues caps at 30 when the issues feed holds more", async () => {
+  const { GitHub } = await import("../src/github.ts");
+  const client = new GitHub("ghp_test");
+  const created = await client.createRepo({ name: "cap-app", private: true });
+  const { login } = created.owner;
+  const name = created.name;
+  for (let n = 100; n < 130; n++)
+    gh.issues.push({
+      owner: login,
+      name,
+      number: n,
+      title: `Issue ${n}`,
+      body: null,
+      state: "open",
+      labels: [],
+      assignees: [],
+      updated_at: "2025-02-01T00:00:00Z",
+      html_url: `https://github.com/${login}/${name}/issues/${n}`,
+    });
+  assert.equal((await client.listIssues(login, name)).length, 30);
+});
+
+test("getIssue returns body, labels, assignees and updated time", async () => {
+  const { GitHub, GitHubError } = await import("../src/github.ts");
+  const client = new GitHub("ghp_test");
+  const created = await client.createRepo({ name: "detail-app", private: true });
+  const { login } = created.owner;
+
+  const issue = await client.getIssue(login, created.name, 1);
+  assert.deepEqual(
+    { number: issue.number, title: issue.title, body: issue.body, labels: issue.labels, assignees: issue.assignees, updatedAt: issue.updatedAt },
+    { number: 1, title: "Add dark mode", body: "Support a dark theme for the UI.", labels: ["enhancement"], assignees: ["kevin"], updatedAt: "2025-01-03T00:00:00Z" },
+  );
+  assert.equal(issue.htmlUrl, `https://github.com/${login}/${created.name}/issues/1`);
+  assert.equal((await client.getIssue(login, created.name, 2)).assignees.length, 0);
+  await assert.rejects(client.getIssue(login, created.name, 99), (e: any) => e instanceof GitHubError && e.status === 404);
+  // A bad token or missing scope surfaces in the client's existing error shape.
+  await assert.rejects(new GitHub("nope").getIssue(login, created.name, 1), (e: any) => e instanceof GitHubError && e.status === 401 && /Bad credentials/.test(e.message));
+});
+
+test("listIssueComments returns the issue's comments, capped at 100", async () => {
+  const { GitHub } = await import("../src/github.ts");
+  const client = new GitHub("ghp_test");
+  const created = await client.createRepo({ name: "comment-app", private: true });
+  const { login } = created.owner;
+  const name = created.name;
+
+  assert.deepEqual(
+    (await client.listIssueComments(login, name, 1)).map((c) => [c.id, c.author, c.body, c.createdAt]),
+    [
+      [101, "kevin", "I agree, this would be great.", "2025-01-03T01:00:00Z"],
+      [102, "other", "Anyone working on this?", "2025-01-03T02:00:00Z"],
+    ],
+  );
+  // More than 100 comments on one page: only the first 100 come back.
+  for (let n = 0; n < 150; n++)
+    gh.comments.push({
+      owner: login,
+      name,
+      issueNumber: 1,
+      id: 1000 + n,
+      user: { login: `bot${n % 5}`, id: 100 + (n % 5), name: null },
+      body: `Comment ${n}`,
+      created_at: "2025-03-01T00:00:00Z",
+    });
+  assert.equal((await client.listIssueComments(login, name, 1)).length, 100);
+});
+
+test("a session that solves an issue opens a PR whose body closes it; ticket closes are kept and deduped", async () => {
+  const { openDb } = await import("../src/db.ts");
+  const { config } = await import("../src/config.ts");
+  const { GitHub } = await import("../src/github.ts");
+  const { addRepo, createWorktree } = await import("../src/repos.ts");
+  const { openPr, draftPr } = await import("../src/prs.ts");
+  const { startMockLlm } = await import("./mock-llm.ts");
+  const db = openDb(config.dbFile);
+  const client = new GitHub("ghp_test");
+
+  const created = await client.createRepo({ name: "solve-app", private: true });
+  const repo = await addRepo(db, { owner: created.owner.login, name: created.name, defaultBranch: created.default_branch, private: true }, env);
+  const worktree = await createWorktree(repo, "s9", "pi/solve-s9", "main", env);
+  // The sessions table, as sessions.create persists it: this one solves the repo's issue #1.
+  db.prepare(
+    "INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, issue_ref) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)",
+  ).run("s9", repo.id, "Solve issue 1", "pi/solve-s9", "main", worktree, `${repo.id}#1`);
+  const row = db.prepare("SELECT * FROM sessions WHERE id = ?").get("s9") as any;
+
+  fs.writeFileSync(path.join(worktree, "dark.txt"), "dark mode\n");
+  execFileSync("git", ["add", "."], { cwd: worktree });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add dark mode"], { cwd: worktree });
+
+  // The ticket phase published issue #2; the origin issue is #1. Both must close.
+  const t = (trackerRef: string) => ({ num: 1, title: "Ship it", body: "", blockedBy: [], trackerRef, status: "done" as const, note: null, runId: null });
+  const noModel = { baseUrl: "http://127.0.0.1:9/v1", modelId: "m", contextWindow: 1, maxTokens: 1, reasoning: false, thinkingFormat: "" };
+
+  const fallback = await draftPr(row, env, noModel, undefined, [t("#2")]);
+  assert.equal(fallback.drafted, false);
+  assert.match(fallback.body, /Closes #2/); // the ticket issue's line is preserved
+  assert.match(fallback.body, /Closes #1\n$/); // the origin issue gets its own line
+
+  const llm = await startMockLlm();
+  const drafted = await draftPr(row, env, { ...noModel, baseUrl: llm.url }, undefined, [t("#2")]);
+  await llm.close();
+  assert.equal(drafted.drafted, true);
+  assert.match(drafted.body, /Closes #2/);
+  assert.match(drafted.body, /Closes #1\n$/);
+
+  await openPr(row, repo, client, env, { title: "Add dark mode", body: fallback.body });
+  const pr = gh.pulls[gh.pulls.length - 1];
+  assert.match(pr.body, /Closes #1/);
+  assert.match(pr.body, /Closes #2/);
+
+  // A ticket that tracks the origin issue itself: the number appears once, not twice.
+  const dup = await draftPr(row, env, noModel, undefined, [t("#1")]);
+  assert.equal((dup.body.match(/Closes #1/g) ?? []).length, 1);
+
+  // A plain session closes nothing.
+  db.prepare(
+    "INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, 0)",
+  ).run("s10", repo.id, "Plain", "pi/plain-s10", "main", worktree);
+  const plain = await draftPr(db.prepare("SELECT * FROM sessions WHERE id = ?").get("s10") as any, env, noModel, undefined);
+  assert.doesNotMatch(plain.body, /Closes/);
+});
+
 test("a bad token surfaces GitHub's message", async () => {
   const { GitHub, GitHubError } = await import("../src/github.ts");
   await assert.rejects(new GitHub("nope").user(), (e: any) => e instanceof GitHubError && e.status === 401 && /Bad credentials/.test(e.message));

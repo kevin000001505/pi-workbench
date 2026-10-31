@@ -39,6 +39,7 @@ export type SessionSummary = {
   grillSummary: string | null;
   spec: string | null;
   specRef: string | null;
+  issueRef: string | null;
   tickets: Ticket[];
   activeRun: string;
   runs: { id: string; label: string }[];
@@ -68,6 +69,12 @@ export type GhRepo = {
   description: string | null;
   pushedAt: string | null;
 };
+
+export type GhIssueSummary = { number: number; title: string; labels: string[]; updatedAt: string; htmlUrl: string };
+export type GhIssueDetail = GhIssueSummary & { body: string | null; assignees: string[] };
+export type GhIssueComment = { id: number; author: string; body: string | null; createdAt: string };
+/** The issue-detail route response: the detail plus up to 100 comments. */
+export type GhIssueWithComments = GhIssueDetail & { comments: GhIssueComment[] };
 
 export type Skill = { name: string; description: string; source: "global" | "repo"; manualOnly: boolean };
 

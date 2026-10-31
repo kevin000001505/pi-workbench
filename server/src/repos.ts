@@ -22,6 +22,13 @@ export function getRepo(db: Db, id: string): RepoRow | undefined {
   return db.prepare("SELECT * FROM repos WHERE id = ?").get(id) as RepoRow | undefined;
 }
 
+/** Like `getRepo`, but for callers that must fail: untracked repos get a clear 404. */
+export function requireTrackedRepo(db: Db, id: string): RepoRow {
+  const repo = getRepo(db, id);
+  if (!repo) throw Object.assign(new Error(`Unknown repo ${id}`), { status: 404 });
+  return repo;
+}
+
 /** Clone on first use, fetch afterwards. The clone is only a source for worktrees; nobody works in it. */
 export async function syncClone(repo: RepoRow, env: GitEnv) {
   const dir = clonePath(repo);

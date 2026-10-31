@@ -135,3 +135,16 @@ test("a stopped session resumes its conversation from pi's session file", { skip
   await mgr.send(id, "hello again");
   await waitFor(async () => (await mgr.snapshot(id)).transcript.messages.length >= count + 2);
 });
+
+test("an issue session persists its origin issue on the summary; plain sessions stay null", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const s = await mgr.create({
+    repoId: "me/demo",
+    title: "Solve issue 42",
+    prompt: "Solve GitHub issue #42: demo",
+    mode: "direct",
+    issueRef: "me/demo#42",
+  });
+  assert.equal(s.issueRef, "me/demo#42");
+  const p = await mgr.create({ repoId: "me/demo", title: "Plain", prompt: "Tidy the demo", mode: "direct" });
+  assert.equal(p.issueRef, null);
+});

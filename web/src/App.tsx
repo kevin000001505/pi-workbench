@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Home } from "./pages/Home.tsx";
+import { Issues } from "./pages/Issues.tsx";
 import { NewSession } from "./pages/NewSession.tsx";
 import { Repos } from "./pages/Repos.tsx";
 import { Secrets } from "./pages/Secrets.tsx";
@@ -11,18 +12,43 @@ import { useStore } from "./store.tsx";
 export type Route =
   | { page: "home" }
   | { page: "session"; id: string }
-  | { page: "new"; repoId?: string }
+  | {
+      page: "new";
+      repoId?: string;
+      /** `owner/name#123`; when set the New Session form is pre-filled for that issue and its repo is locked. */
+      issueRef?: string;
+      prefillTitle?: string;
+      prefillPrompt?: string;
+      prefillBase?: string;
+    }
   | { page: "repos" }
   | { page: "secrets" }
-  | { page: "settings" };
+  | { page: "settings" }
+  | { page: "issues"; repoId?: string; number?: number };
 
 function parse(hash: string): Route {
-  const [, page, arg] = hash.replace(/^#/, "").split("/");
+  const [path, query] = hash.replace(/^#/, "").split("?");
+  const params = new URLSearchParams(query ?? "");
+  const parts = path.split("/").filter(Boolean);
+  const [page, a, b] = parts;
   switch (page) {
     case "session":
-      return arg ? { page: "session", id: arg } : { page: "home" };
+      return a ? { page: "session", id: a } : { page: "home" };
     case "new":
-      return { page: "new", repoId: arg ? decodeURIComponent(arg) : undefined };
+      return {
+        page: "new",
+        repoId: a ? decodeURIComponent(a) : undefined,
+        issueRef: params.get("issue") ?? undefined,
+        prefillTitle: params.get("title") ?? undefined,
+        prefillPrompt: params.get("prompt") ?? undefined,
+        prefillBase: params.get("base") ?? undefined,
+      };
+    case "issues":
+      return {
+        page: "issues",
+        repoId: a ? decodeURIComponent(a) : undefined,
+        number: b && /^\d+$/.test(b) ? Number(b) : undefined,
+      };
     case "repos":
     case "secrets":
     case "settings":
@@ -61,10 +87,20 @@ export function App() {
       <main className="main">
         {route.page === "home" && <Home />}
         {route.page === "session" && <SessionView key={route.id} id={route.id} />}
-        {route.page === "new" && <NewSession repoId={route.repoId} />}
+        {route.page === "new" && (
+          <NewSession
+            key={JSON.stringify(route)}
+            repoId={route.repoId}
+            issueRef={route.issueRef}
+            prefillTitle={route.prefillTitle}
+            prefillPrompt={route.prefillPrompt}
+            prefillBase={route.prefillBase}
+          />
+        )}
         {route.page === "repos" && <Repos />}
         {route.page === "secrets" && <Secrets />}
         {route.page === "settings" && <Settings />}
+        {route.page === "issues" && <Issues repoId={route.repoId} number={route.number} />}
       </main>
       <div className="toasts" role="status">
         {toasts.map((t) => (

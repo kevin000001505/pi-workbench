@@ -78,6 +78,8 @@ export type SessionSummary = {
   grillSummary: string | null;
   spec: string | null;
   specRef: string | null;
+  /** The GitHub issue this session solves, e.g. `owner/name#123`; null for plain sessions. */
+  issueRef: string | null;
   tickets: Ticket[];
   /** The conversation on screen; ticket runs each have their own. */
   activeRun: string;
@@ -223,6 +225,7 @@ export class SessionManager extends EventEmitter {
       grillSummary: row.grill_summary,
       spec: row.spec,
       specRef: row.spec_ref,
+      issueRef: row.issue_ref,
       tickets,
       activeRun: this.runOf(row),
       runs: [
@@ -267,12 +270,13 @@ export class SessionManager extends EventEmitter {
     s.loaded = true;
   }
 
-  async create(input: { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string }) {
+  async create(input: { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string }) {
     const repo = getRepo(this.db, input.repoId);
     if (!repo) throw Object.assign(new Error(`Unknown repo ${input.repoId}`), { status: 404 });
     const mode = input.mode === "direct" ? "direct" : "pipeline";
     const task = input.prompt.trim();
     if (mode === "pipeline" && !task) throw Object.assign(new Error("Describe what you want built; grill-me starts from it"), { status: 400 });
+    const issueRef = input.issueRef?.trim() || null;
     const id = crypto.randomUUID();
     const title = input.title.trim() || task.split("\n")[0].slice(0, 60) || "New session";
     const base = input.baseBranch?.trim() || repo.default_branch;
@@ -283,10 +287,10 @@ export class SessionManager extends EventEmitter {
     const phase: Phase = needsSetup ? "setup" : mode === "pipeline" ? "grill" : "direct";
     this.db
       .prepare(
-        `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt, mode, phase, active_run)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt, mode, phase, active_run, issue_ref)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup && task ? input.prompt : null, mode, phase, id);
+      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup && task ? input.prompt : null, mode, phase, id, issueRef);
     const s = this.state(id);
     s.loaded = true;
     await this.start(id);

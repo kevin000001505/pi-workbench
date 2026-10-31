@@ -73,6 +73,9 @@ export function Sidebar({ route, onClose }: { route: Route; onClose: () => void 
         </div>
 
         <nav className="side-nav">
+          <a href="#/issues" className={route.page === "issues" ? "active" : ""}>
+            Issues
+          </a>
           <a href="#/repos" className={route.page === "repos" ? "active" : ""}>
             Repositories
           </a>
