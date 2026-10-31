@@ -1,6 +1,6 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { applyEvent, emptyTranscript, type RpcEvent, type Transcript } from "../../shared/transcript.ts";
-import type { SessionSummary } from "./types.ts";
+import { type SessionSummary, waitingOn } from "./types.ts";
 
 type Toast = { id: number; text: string; level: "info" | "warning" | "error" };
 
@@ -79,7 +79,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const upsert = useCallback((s: SessionSummary) => {
-    for (const req of s.pending) {
+    // A permission under review notifies only once it leaves review and waits on the user.
+    for (const req of waitingOn(s)) {
       if (!seenPending.current.has(req.id)) {
         seenPending.current.add(req.id);
         notify(
@@ -123,7 +124,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             const next: Record<string, SessionSummary> = {};
             for (const s of msg.sessions as SessionSummary[]) {
               next[s.id] = s;
-              for (const r of s.pending) seenPending.current.add(r.id);
+              for (const r of waitingOn(s)) seenPending.current.add(r.id);
               lastState.current.set(s.id, `${s.attention ?? ""}|${s.phase}`);
             }
             setSessions(next);
@@ -186,7 +187,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   // Tab title shows how many sessions wait on you.
   useEffect(() => {
-    const waiting = Object.values(sessions).filter((s) => s.pending.length > 0 || s.attention).length;
+    const waiting = Object.values(sessions).filter((s) => waitingOn(s).length > 0 || s.attention).length;
     document.title = waiting ? `(${waiting}) pi workbench` : "pi workbench";
   }, [sessions]);
 

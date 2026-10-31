@@ -1,11 +1,12 @@
 import { phaseLabel } from "../session/PipelinePanel.tsx";
 import { useStore } from "../store.tsx";
+import { waitingOn } from "../types.ts";
 import { ago, Empty, PageHeader, StatusPill, issueUrl, parseIssueRef } from "../ui.tsx";
 
 export function Home() {
   const { sessions } = useStore();
   const all = Object.values(sessions).sort((a, b) => b.updatedAt - a.updatedAt);
-  const waiting = all.filter((s) => s.pending.length > 0 || s.attention);
+  const waiting = all.filter((s) => waitingOn(s).length > 0 || s.attention);
   const running = all.filter((s) => s.status === "running" || s.status === "starting");
 
   if (all.length === 0) {
@@ -37,8 +38,9 @@ export function Home() {
       <div className="cards">
         {all.map((s) => {
           const issue = parseIssueRef(s.issueRef);
+          const pending = waitingOn(s);
           return (
-            <a key={s.id} href={`#/session/${s.id}`} className={`card session-card ${s.pending.length || s.attention ? "card-attn" : ""}`}>
+            <a key={s.id} href={`#/session/${s.id}`} className={`card session-card ${pending.length || s.attention ? "card-attn" : ""}`}>
               <div className="row between">
                 <StatusPill status={s.status} />
                 <span className="muted small">{ago(s.updatedAt)}</span>
@@ -48,10 +50,10 @@ export function Home() {
                 {s.repoId} · {s.branch}
               </p>
               <p className="card-activity ellipsis">
-                {s.pending.length > 0
-                  ? s.pending[0].kind === "permission"
-                    ? `⚠ Wants to run: ${s.pending[0].subject}`
-                    : `❓ ${s.pending[0].title}`
+                {pending.length > 0
+                  ? pending[0].kind === "permission"
+                    ? `⚠ Wants to run: ${pending[0].subject}`
+                    : `❓ ${pending[0].title}`
                   : s.attention
                     ? `⚠ ${s.attention}`
                     : s.heldPrompt

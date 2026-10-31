@@ -1,26 +1,27 @@
 import type { Route } from "./App.tsx";
 import { useStore } from "./store.tsx";
-import type { SessionSummary } from "./types.ts";
+import { type SessionSummary, waitingOn } from "./types.ts";
 import { phaseLabel } from "./session/PipelinePanel.tsx";
 import { StatusDot } from "./ui.tsx";
 
 function SessionLink({ s, active }: { s: SessionSummary; active: boolean }) {
+  const pending = waitingOn(s);
   return (
     <a href={`#/session/${s.id}`} className={`side-item ${active ? "active" : ""}`}>
       <StatusDot status={s.status} />
       <span className="side-item-main">
         <span className="side-item-title">{s.title}</span>
         <span className="side-item-sub">
-          {s.pending.length > 0
-            ? s.pending[0].kind === "permission"
-              ? `Permission: ${s.pending[0].tool}`
+          {pending.length > 0
+            ? pending[0].kind === "permission"
+              ? `Permission: ${pending[0].tool}`
               : "Decision needed"
             : s.attention
               ? "Pipeline needs you"
               : s.activity || phaseLabel(s) || (s.prNumber ? `PR #${s.prNumber}` : s.branch)}
         </span>
       </span>
-      {(s.pending.length > 0 || s.attention) && <span className="badge">{s.pending.length || "!"}</span>}
+      {(pending.length > 0 || s.attention) && <span className="badge">{pending.length || "!"}</span>}
     </a>
   );
 }
@@ -28,7 +29,7 @@ function SessionLink({ s, active }: { s: SessionSummary; active: boolean }) {
 export function Sidebar({ route, onClose }: { route: Route; onClose: () => void }) {
   const { sessions, connected } = useStore();
   const all = Object.values(sessions).sort((a, b) => b.updatedAt - a.updatedAt);
-  const waiting = all.filter((s) => s.pending.length > 0 || s.attention);
+  const waiting = all.filter((s) => waitingOn(s).length > 0 || s.attention);
   const byRepo = new Map<string, SessionSummary[]>();
   for (const s of all) byRepo.set(s.repoId, [...(byRepo.get(s.repoId) ?? []), s]);
   const activeId = route.page === "session" ? route.id : null;

@@ -6,6 +6,7 @@ import { config } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { GitEnv } from "./git.ts";
 import { GitHub, GitHubError } from "./github.ts";
+import { AUTO_APPROVE_SCOPE, autoApproveKeys, autoApproveView, getAutoApproveSettings, saveAutoApproveSettings, setAutoApproveKey, testJudge } from "./autoapprove.ts";
 import { checkRequestOrigin, type Ctx, HttpError, readJson, Router, sendJson, serveStatic } from "./http.ts";
 import { listModels, probeEndpoint } from "./llm.ts";
 import { draftPr, openPr, changes } from "./prs.ts";
@@ -227,7 +228,19 @@ const router = new Router()
   })
 
   // --- settings & secrets ---------------------------------------------------------------
-  .on("GET", "/api/settings", () => ({ model: getModelSettings(db), approval: getApprovalSettings(db) }))
+  .on("GET", "/api/settings", () => ({ model: getModelSettings(db), approval: getApprovalSettings(db), autoApprove: autoApproveView(db, secrets) }))
+  .on("PUT", "/api/settings/auto-approve", ({ body }) => {
+    saveAutoApproveSettings(db, body);
+    return autoApproveView(db, secrets);
+  })
+  .on("PUT", "/api/settings/auto-approve/keys", ({ body }) => {
+    // Keys are write-only: set with a value, cleared with null; the answer only says which are set.
+    if (body.key !== "jevToken") throw new HttpError(400, `Unknown key ${body.key}`);
+    if (body.value !== null && (typeof body.value !== "string" || !body.value.trim())) throw new HttpError(400, "Value is empty");
+    setAutoApproveKey(secrets, body.key, body.value === null ? null : body.value.trim());
+    return autoApproveView(db, secrets);
+  })
+  .on("POST", "/api/settings/auto-approve/test", () => testJudge(getAutoApproveSettings(db), autoApproveKeys(secrets)))
   .on("PUT", "/api/settings/model", ({ body }) => {
     const model = saveModelSettings(db, body);
     writePiConfig(db);
@@ -251,7 +264,8 @@ const router = new Router()
     );
   })
   .on("GET", "/api/ssh", () => sshView(db, secrets))
-  .on("GET", "/api/secrets", () => secrets.list())
+  // The auto-approve keys have their own scope and routes; the Secrets page never sees them.
+  .on("GET", "/api/secrets", () => secrets.list().filter((s) => s.scope !== AUTO_APPROVE_SCOPE))
   .on("PUT", "/api/secrets", ({ body }) => {
     const scope = String(body.scope ?? GLOBAL_SCOPE);
     if (scope !== GLOBAL_SCOPE && !getRepo(db, scope)) throw new HttpError(400, `Unknown scope ${scope}`);
@@ -265,6 +279,7 @@ const router = new Router()
     // scope may itself contain a slash (owner/name), so the name is the last segment.
     const parts = params.scope.split("/");
     const name = parts.pop()!;
+    if (parts.join("/") === AUTO_APPROVE_SCOPE) throw new HttpError(400, `Unknown scope ${AUTO_APPROVE_SCOPE}`);
     secrets.delete(parts.join("/"), name);
     if (parts.join("/") === GLOBAL_SCOPE) applySsh(db, secrets, config.agentHome, config.piAgentDir);
     return { ok: true };

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { applyEvent, emptyTranscript, withMessages } from "../../shared/transcript.ts";
+import { autoApproveView, getAutoApproveSettings, saveAutoApproveSettings, setAutoApproveKey } from "../src/autoapprove.ts";
 import { openDb } from "../src/db.ts";
 import { redact } from "../src/git.ts";
 import { checkRequestOrigin, Router } from "../src/http.ts";
@@ -279,4 +280,33 @@ test("every pipeline prompt starts with a /skill: command pi will expand", async
     // pi needs an argument after the skill name on the first line.
     assert.match(prompt.split("\n")[0], /^\/skill:[\w-]+ \S/);
   }
+});
+
+test("auto-approve settings: off by default, validated on save", () => {
+  const db = tmpDb();
+  const s = getAutoApproveSettings(db);
+  assert.equal(s.enabled, false);
+  assert.equal(s.judge.jevBaseUrl, "https://api.typesafe.ai/v1");
+  assert.equal(s.judge.safeThreshold, 0.8);
+  assert.throws(() => saveAutoApproveSettings(db, { judge: { kind: "jev", jevBaseUrl: "ftp://x", safeThreshold: 0.8 } }), /Jev URL/);
+  for (const t of [0, -0.1, 1.5, Number.NaN]) {
+    assert.throws(() => saveAutoApproveSettings(db, { judge: { kind: "jev", jevBaseUrl: "https://j.example/v1", safeThreshold: t } }), /threshold/);
+  }
+  assert.equal(saveAutoApproveSettings(db, { judge: { kind: "jev", jevBaseUrl: "https://j.example/v1", safeThreshold: 1 } }).judge.safeThreshold, 1);
+  assert.equal(saveAutoApproveSettings(db, { enabled: true }).judge.jevBaseUrl, "https://j.example/v1");
+  assert.equal(getAutoApproveSettings(db).enabled, true);
+});
+
+test("the Jev token is write-only and never reaches a pi environment", () => {
+  const db = tmpDb();
+  const store = new SecretStore(db, "test-master-key-0123456789");
+  store.set("global", "OTHER", "x");
+  setAutoApproveKey(store, "jevToken", "jev-very-secret");
+  assert.ok(!JSON.stringify(store.envFor()).includes("jev-very-secret"));
+  assert.ok(!JSON.stringify(store.envFor("me/app")).includes("jev-very-secret"));
+  const view = autoApproveView(db, store);
+  assert.equal(view.keys.jevToken, true);
+  assert.ok(!JSON.stringify(view).includes("jev-very-secret"));
+  setAutoApproveKey(store, "jevToken", null);
+  assert.equal(autoApproveView(db, store).keys.jevToken, false);
 });
