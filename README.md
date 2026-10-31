@@ -21,6 +21,7 @@ A self-hosted web UI for the [pi coding agent](https://github.com/earendil-works
 - **Skills.** Matt Pocock's engineering and productivity skills are built into the image, plus any `.agents/skills` or `.pi/skills` in the repo. Type `/` in the prompt box, or click **✦ Skills**, to pick one.
 - **Setup on every repo.** A repo's first session runs `/setup-matt-pocock-skills` before your task. Its questions come to you as decision cards, it commits the result on the session branch, and then your task goes out.
 - **GitHub.** **Create repo** makes a new GitHub repo and clones it. **Create PR**: the model drafts a title and body from the diff, you edit them, then the server pushes the branch and opens the PR. After that, the session header shows the PR's state and CI.
+- **Solve issues.** The **Issues** page lists the open issues of a tracked repo — search by keyword, filter by label — and opens any issue with its discussion (the body and comments, rendered as markdown). **Start session** opens the New session form pre-filled with the issue's title and body; one session solves one issue, its PR body carries a `Closes #n` line, and merging the PR closes the issue.
 - **Secrets.** Environment variables for sessions, global or per repo. They are encrypted at rest (AES-256-GCM) and write-only from the browser.
 - **Model settings.** Base URL, model ID (listed from the endpoint's `/v1/models`), context window, and output limit. The default is `Qwen3.8-27B-radiance` with 256K (262144) tokens. **Test** makes the same chat call a session makes and reports the URL, status, and likely cause when it fails (wrong service, missing `/v1`, unknown model, missing key, unreachable host).
 
@@ -66,7 +67,7 @@ docker compose up -d --build
 
 Open `http://<BIND_ADDR>:<PORT>` and do these three things once:
 
-1. **Secrets → GITHUB_TOKEN**: add a fine-grained PAT. It needs *Contents* and *Pull requests* read/write on the repos you use. Add *Administration* write if you want **Create repo** to work.
+1. **Secrets → GITHUB_TOKEN**: add a fine-grained PAT. It needs *Contents* and *Pull requests* read/write and *Issues* read on the repos you use. Add *Administration* write if you want **Create repo** to work.
 2. **Settings → Model**: check the base URL. **Test** lists the model IDs the endpoint serves.
 3. **Repositories**: add an existing repo or create one. Then start a **New session**.
 

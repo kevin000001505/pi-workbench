@@ -236,6 +236,37 @@ test("old databases gain the pipeline columns", async () => {
   assert.deepEqual({ ...row }, { mode: "direct", phase: "direct", active_run: null, attention: null, issue_ref: null });
 });
 
+test("README documents the issues feature for a fresh setup", () => {
+  const readme = fs.readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+  const section = (title: string) => {
+    const i = readme.indexOf(`## ${title}`);
+    assert.ok(i >= 0, `README has a "${title}" section`);
+    const rest = readme.slice(i);
+    const j = rest.indexOf("\n## ", 1);
+    return rest.slice(0, j === -1 ? undefined : j);
+  };
+
+  // Fresh setup: the PAT instructions list an Issues read scope, and not Issues write (the feature posts no comments).
+  const token = section("Deploy").split("\n").find((l) => l.includes("GITHUB_TOKEN"));
+  assert.ok(token, "token instructions line");
+  assert.ok(token!.includes("Issues"), "token instructions mention the Issues scope");
+  const clause = token!.slice(token!.indexOf("Issues")).split(/[.;]/)[0];
+  assert.match(clause, /read/i);
+  assert.doesNotMatch(clause, /write/i);
+
+  // Features: the Issues page browses and searches the open issues of a tracked repo, reads the discussion, and starts a pre-filled session.
+  const features = section("What you get");
+  assert.match(features, /Issues\*{0,2} page/i);
+  assert.match(features, /open issues/);
+  assert.match(features, /search/i);
+  assert.match(features, /discussion|comment/i);
+  assert.match(features, /pre-?filled/i);
+
+  // Solve flow: the PR body carries Closes #n, and merging the PR closes the issue.
+  assert.match(features, /Closes #/);
+  assert.match(features, /merg/i);
+});
+
 test("every pipeline prompt starts with a /skill: command pi will expand", async () => {
   const p = await import("../src/pipeline.ts");
   const t = { num: 1, title: "T", body: "b", blockedBy: [], trackerRef: null, status: "ready", note: null, runId: null } as any;
