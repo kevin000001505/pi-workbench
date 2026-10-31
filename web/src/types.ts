@@ -26,7 +26,7 @@ export type AutoApproveSettings = {
   enabled: boolean;
   judge: { baseUrl: string; model: string; protocol: JudgeProtocol; yesAbove: number; noBelow: number };
   /** Whether each write-only key is set; values never come back. */
-  keys: { judgeToken: boolean };
+  keys: { judgeToken: boolean; tokenOrigin?: string };
 };
 
 /** What the judge URL speaks, read from its model list: TypeSafe System One or OpenAI-compatible chat. */

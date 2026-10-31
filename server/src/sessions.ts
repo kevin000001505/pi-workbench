@@ -107,11 +107,16 @@ type Live = {
   lastSettleAborted: boolean;
 };
 
-/** What the agent is working on: the latest user message, cut to what a judge needs to read. */
-function latestTask(t: Transcript): string {
+/**
+ * What the agent is working on: the latest user message. pi expands `/skill:name args` into the
+ * skill's whole body followed by the args; the args are the task, so the body is left out.
+ */
+function latestTask(t: Transcript): { task: string; skill?: string } {
   const m = t.messages.findLast((x) => x.role === "user");
   const text = typeof m?.content === "string" ? m.content : Array.isArray(m?.content) ? m.content.map((b) => (b.type === "text" ? b.text : "")).join("") : "";
-  return text.length > 2000 ? `${text.slice(0, 2000)}…` : text;
+  const expanded = /^<skill name="([\w-]+)"[^>]*>[\s\S]*?<\/skill>\s*/.exec(text);
+  const task = expanded ? text.slice(expanded[0].length) : text;
+  return { task: task.length > 2000 ? `${task.slice(0, 2000)}…` : task, ...(expanded ? { skill: expanded[1] } : {}) };
 }
 
 const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs automatically on this repository's first pi-workbench session. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push.`;
@@ -517,7 +522,7 @@ export class SessionManager extends EventEmitter {
     const ticket = this.tickets(id).find((t) => t.status === "running");
     const session = {
       title: row.title,
-      task: latestTask(s.transcript),
+      ...latestTask(s.transcript),
       repo: row.repo_id,
       worktree: row.worktree,
       ...(ticket ? { ticket: `#${ticket.num} ${ticket.title}` } : {}),

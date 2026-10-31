@@ -6,7 +6,7 @@ import { config } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { GitEnv } from "./git.ts";
 import { GitHub, GitHubError } from "./github.ts";
-import { autoApproveKeys, autoApproveView, configureAutoApprove, getAutoApproveSettings, listJudgeModels, saveAutoApproveKey, testJudge } from "./autoapprove.ts";
+import { autoApproveKeys, autoApproveView, configureAutoApprove, getAutoApproveSettings, listModelsFor, saveAutoApproveKey, testJudge } from "./autoapprove.ts";
 import { checkRequestOrigin, type Ctx, HttpError, readJson, Router, sendJson, serveStatic } from "./http.ts";
 import { listModels, probeEndpoint } from "./llm.ts";
 import { draftPr, openPr, changes } from "./prs.ts";
@@ -237,10 +237,9 @@ const router = new Router()
     saveAutoApproveKey(secrets, body);
     return autoApproveView(db, secrets);
   })
-  // The judge URL's model list (with the saved token): it also tells which protocol the judge speaks.
-  .on("GET", "/api/settings/auto-approve/models", ({ query }) =>
-    listJudgeModels(query.get("baseUrl") || getAutoApproveSettings(db).judge.baseUrl, autoApproveKeys(secrets).judgeToken),
-  )
+  // The judge URL's model list, which also tells the protocol. A POST, so it passes the write-route
+  // checks: it calls out to a URL the request names (the token goes only to its own origin).
+  .on("POST", "/api/settings/auto-approve/models", ({ body }) => listModelsFor(db, secrets, body.baseUrl))
   .on("POST", "/api/settings/auto-approve/test", () => testJudge(getAutoApproveSettings(db), autoApproveKeys(secrets)))
   .on("PUT", "/api/settings/model", ({ body }) => {
     const model = saveModelSettings(db, body);

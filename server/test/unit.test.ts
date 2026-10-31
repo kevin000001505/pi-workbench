@@ -317,14 +317,24 @@ test("the judge token is write-only and never reaches a pi environment", () => {
   const db = tmpDb();
   const store = new SecretStore(db, "test-master-key-0123456789");
   store.set("global", "OTHER", "x");
-  saveAutoApproveKey(store, { key: "judgeToken", value: "  jev-very-secret  " });
+  saveAutoApproveKey(store, { key: "judgeToken", value: "  jev-very-secret  ", baseUrl: "https://api.typesafe.ai/v1" });
   assert.equal(autoApproveKeys(store).judgeToken, "jev-very-secret");
+  assert.equal(autoApproveKeys(store).tokenOrigin, "https://api.typesafe.ai", "the token is bound to the origin it was saved for");
   assert.ok(!JSON.stringify(store.envFor()).includes("jev-very-secret"));
   assert.ok(!JSON.stringify(store.envFor("me/app")).includes("jev-very-secret"));
   const view = autoApproveView(db, store);
   assert.equal(view.keys.judgeToken, true);
+  assert.equal(view.keys.tokenOrigin, "https://api.typesafe.ai");
   assert.ok(!JSON.stringify(view).includes("jev-very-secret"));
-  for (const bad of [{ key: "masterKey", value: "x" }, { key: "judgeToken", value: "" }, { key: "judgeToken", value: "  " }, { key: "judgeToken", value: 5 }]) {
+  const url = "https://api.typesafe.ai/v1";
+  for (const bad of [
+    { key: "masterKey", value: "x", baseUrl: url },
+    { key: "judgeToken", value: "", baseUrl: url },
+    { key: "judgeToken", value: "  ", baseUrl: url },
+    { key: "judgeToken", value: 5, baseUrl: url },
+    { key: "judgeToken", value: "t" },
+    { key: "judgeToken", value: "t", baseUrl: "ftp://x" },
+  ]) {
     assert.throws(() => saveAutoApproveKey(store, bad), (e: any) => e.status === 400, JSON.stringify(bad));
   }
   saveAutoApproveKey(store, { key: "judgeToken", value: null });
@@ -335,7 +345,7 @@ test("the Secrets page cannot see, set, or delete the auto-approve scope", () =>
   const db = tmpDb();
   const store = new SecretStore(db, "test-master-key-0123456789");
   store.set("global", "A", "1");
-  saveAutoApproveKey(store, { key: "judgeToken", value: "t" });
+  saveAutoApproveKey(store, { key: "judgeToken", value: "t", baseUrl: "https://api.typesafe.ai/v1" });
   assert.deepEqual(userSecrets(store).map((s) => s.scope), ["global"]);
   const isRepo = (scope: string) => scope === "me/app";
   assert.doesNotThrow(() => assertUserScope("global", isRepo));

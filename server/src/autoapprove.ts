@@ -1,13 +1,14 @@
 import { config } from "./config.ts";
 import type { Db } from "./db.ts";
 import { getSetting, putSetting } from "./db.ts";
+import { complete } from "./llm.ts";
 import type { SecretStore } from "./secrets.ts";
 
 /**
  * Auto-approve (GLOSSARY.md, ADR 0002): a permission goes to the risk judge before the user. The
  * judge is one URL; its `GET /models` answer says which protocol it speaks:
  * - TypeSafe System One (Jev): atomic yes/no questions (Nouls) about the call, and the rule below
- *   turns their answers into safe / risky / dangerous ("judgments from Jev, decisions in code");
+ *   turns their answers into safe / risky / dangerous (Jev judges, code rates: the TypeSafe skill);
  * - OpenAI-compatible chat (llama-swap, any local server): the model answers with one word.
  * A safe rating answers Allow for that one call; anything else, including a judge failure, waits
  * for the user with a note on why. All question wording and the rule live in this module.
@@ -15,7 +16,9 @@ import type { SecretStore } from "./secrets.ts";
 
 /** Keys live in their own SecretStore scope: `envFor` reads only global and repo scopes, so they never reach pi. */
 export const AUTO_APPROVE_SCOPE = "wb:auto-approve";
-const KEY_NAMES = { judgeToken: "JUDGE_TOKEN" } as const;
+const KEY_NAMES = { judgeToken: "JUDGE_TOKEN", tokenOrigin: "JUDGE_TOKEN_ORIGIN" } as const;
+/** The judge token and the origin it was saved for: it is only ever sent to that origin. */
+export type JudgeKeys = { judgeToken?: string; tokenOrigin?: string };
 
 export type JudgeProtocol = "systemone" | "openai";
 export type AutoApproveSettings = {
@@ -73,25 +76,36 @@ function validateJudge(j: AutoApproveSettings["judge"]) {
 }
 
 /**
- * Settings → Save: when the judge changes, list the URL's models (with the saved token), store the
- * protocol that list implies, and refuse a model the URL does not serve.
+ * Settings → Save: when the judge URL or model changes, list the URL's models, store the protocol
+ * that list implies, and refuse a model the URL does not serve. An unchanged judge is not asked, so
+ * the switch can always be turned off, even while the judge is down.
  */
 export async function configureAutoApprove(db: Db, secrets: SecretStore, input: Partial<AutoApproveSettings>) {
-  if (!input.judge) return saveAutoApproveSettings(db, input);
-  const judge = pickJudge({ ...getAutoApproveSettings(db).judge, ...input.judge, protocol: "systemone" });
+  const saved = getAutoApproveSettings(db).judge;
+  if (!input.judge || (input.judge.baseUrl === saved.baseUrl && input.judge.model === saved.model)) {
+    return saveAutoApproveSettings(db, { ...input, judge: input.judge && { ...input.judge, protocol: saved.protocol } });
+  }
+  const judge = pickJudge({ ...saved, ...input.judge, protocol: "systemone" });
   validateJudge(judge);
-  const { protocol, models } = await listJudgeModels(judge.baseUrl, autoApproveKeys(secrets).judgeToken);
+  const { protocol, models } = await listJudgeModels(judge.baseUrl, autoApproveKeys(secrets));
   if (!models.includes(judge.model)) throw bad(`${judge.model} is not served at ${judge.baseUrl} (it serves: ${models.join(", ") || "nothing"})`);
   return saveAutoApproveSettings(db, { ...input, judge: { ...judge, protocol } });
 }
 
+/** Settings → List models: the given URL's list, or the saved judge's when none is given. */
+export function listModelsFor(db: Db, secrets: SecretStore, baseUrl: unknown) {
+  const url = typeof baseUrl === "string" && baseUrl.trim() ? baseUrl.trim() : getAutoApproveSettings(db).judge.baseUrl;
+  if (!/^https?:\/\//.test(url)) throw bad("The judge URL must start with http:// or https://");
+  return listJudgeModels(url, autoApproveKeys(secrets));
+}
+
 /** `GET <url>/models`: TypeSafe answers `{ models: [{ name }] }`, an OpenAI-compatible server `{ data: [{ id }] }`. */
-export async function listJudgeModels(baseUrl: string, token: string | undefined): Promise<{ protocol: JudgeProtocol; models: string[] }> {
+export async function listJudgeModels(baseUrl: string, keys: JudgeKeys): Promise<{ protocol: JudgeProtocol; models: string[] }> {
   const url = `${baseUrl.replace(/\/+$/, "")}/models`;
   let res: Response;
   let body: any;
   try {
-    res = await fetch(url, { headers: authHeaders(token), signal: AbortSignal.timeout(10_000) });
+    res = await fetch(url, { headers: authHeaders(tokenFor(url, keys)), signal: AbortSignal.timeout(10_000) });
     body = await res.json().catch(() => undefined);
   } catch (err) {
     throw bad(`Can't list models at ${url}: ${why(err)}`);
@@ -102,21 +116,33 @@ export async function listJudgeModels(baseUrl: string, token: string | undefined
   throw bad(`${url} did not answer with a TypeSafe or OpenAI-compatible model list`);
 }
 
-export function autoApproveKeys(secrets: SecretStore): { judgeToken?: string } {
-  return { judgeToken: secrets.get(AUTO_APPROVE_SCOPE, KEY_NAMES.judgeToken) };
+export function autoApproveKeys(secrets: SecretStore): JudgeKeys {
+  return { judgeToken: secrets.get(AUTO_APPROVE_SCOPE, KEY_NAMES.judgeToken), tokenOrigin: secrets.get(AUTO_APPROVE_SCOPE, KEY_NAMES.tokenOrigin) };
 }
 
-/** Keys are write-only: set with a value, cleared with null. */
-export function saveAutoApproveKey(secrets: SecretStore, body: { key?: unknown; value?: unknown }) {
+/** The token for a request to `url`: only when the URL is on the origin the token was saved for. */
+function tokenFor(url: string, keys: JudgeKeys): string | undefined {
+  try {
+    return keys.judgeToken && new URL(url).origin === keys.tokenOrigin ? keys.judgeToken : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Keys are write-only: set with a value and the judge URL it belongs to, cleared with null. */
+export function saveAutoApproveKey(secrets: SecretStore, body: { key?: unknown; value?: unknown; baseUrl?: unknown }) {
   if (body.key !== "judgeToken") throw bad(`Unknown key ${String(body.key)}`);
   if (body.value === null) return secrets.delete(AUTO_APPROVE_SCOPE, KEY_NAMES.judgeToken);
   if (typeof body.value !== "string" || !body.value.trim()) throw bad("Value is empty");
+  if (typeof body.baseUrl !== "string" || !/^https?:\/\//.test(body.baseUrl)) throw bad("Say which judge URL the token is for");
   secrets.set(AUTO_APPROVE_SCOPE, KEY_NAMES.judgeToken, body.value.trim());
+  secrets.set(AUTO_APPROVE_SCOPE, KEY_NAMES.tokenOrigin, new URL(body.baseUrl).origin);
 }
 
-/** What Settings shows: the settings and whether each key is set, never a key's value. */
+/** What Settings shows: the settings, whether the token is set and for which origin, never its value. */
 export function autoApproveView(db: Db, secrets: SecretStore) {
-  return { ...getAutoApproveSettings(db), keys: { judgeToken: !!autoApproveKeys(secrets).judgeToken } };
+  const keys = autoApproveKeys(secrets);
+  return { ...getAutoApproveSettings(db), keys: { judgeToken: !!keys.judgeToken, tokenOrigin: keys.judgeToken ? keys.tokenOrigin : undefined } };
 }
 
 // --- judging -------------------------------------------------------------------------------
@@ -126,7 +152,7 @@ export type Permission = {
   tool: string;
   subject: string;
   reasons: string[];
-  session: { title: string; task: string; repo: string; worktree: string; ticket?: string };
+  session: { title: string; task: string; repo: string; worktree: string; skill?: string; ticket?: string };
 };
 
 export type Level = "safe" | "risky" | "dangerous";
@@ -164,10 +190,13 @@ const QUESTIONS = {
 } as const;
 type Answers = Record<keyof typeof QUESTIONS, number>;
 
-/** The decision, in code: safe only when every risk is a clear no and the task fit a clear yes. */
+/**
+ * The rating, in code. Safe: a clear no to deleting data and to being hard to undo, and a clear yes
+ * to fitting the task. Reaching outside alone (a push, an install, a curl) does not block safe; with
+ * a hard-to-undo effect it is dangerous.
+ */
 function rate(a: Answers, j: AutoApproveSettings["judge"]): Level {
-  const risks = [a.deletes_data, a.reaches_outside, a.hard_to_undo];
-  if (risks.every((p) => p < j.noBelow) && a.fits_task > j.yesAbove) return "safe";
+  if (a.deletes_data < j.noBelow && a.hard_to_undo < j.noBelow && a.fits_task > j.yesAbove) return "safe";
   if (a.hard_to_undo > j.yesAbove && (a.deletes_data > j.yesAbove || a.reaches_outside > j.yesAbove)) return "dangerous";
   return "risky";
 }
@@ -187,32 +216,30 @@ const stateOf = (p: Permission) => ({
 });
 
 /** Ask the risk judge about one permission. Never throws: a failure is a verdict too. */
-export async function judgePermission(p: Permission, settings: AutoApproveSettings, keys: { judgeToken?: string }): Promise<Verdict> {
+export async function judgePermission(p: Permission, settings: AutoApproveSettings, keys: JudgeKeys): Promise<Verdict> {
   const j = settings.judge;
   const by = j.model;
-  const base = j.baseUrl.replace(/\/+$/, "");
-  const call =
-    j.protocol === "systemone"
-      ? { url: `${base}/systemone`, body: { model: j.model, state: stateOf(p), questions: QUESTIONS } }
-      : {
-          url: `${base}/chat/completions`,
-          body: {
-            model: j.model,
-            temperature: 0,
-            max_tokens: 1024,
-            messages: [
-              { role: "system", content: CHAT_PROMPT },
-              { role: "user", content: JSON.stringify(stateOf(p), null, 2) },
-            ],
-          },
-        };
+  const token = tokenFor(j.baseUrl, keys);
+  if (j.protocol === "openai") {
+    let reply: string;
+    try {
+      reply = await complete({ baseUrl: j.baseUrl, modelId: j.model }, token, CHAT_PROMPT, JSON.stringify(stateOf(p), null, 2), 1024, config.autoApproveTimeoutMs);
+    } catch (err) {
+      return { outcome: "failed", by, note: `${by} failed: ${why(err)}` };
+    }
+    const word = readWord(reply);
+    if (!word) return { outcome: "failed", by, note: `${by} failed: the answer was not SAFE, RISKY or DANGEROUS` };
+    if (word === "safe") return { outcome: "allow", by, detail: "SAFE" };
+    return { outcome: "user", by, rating: word, detail: word.toUpperCase(), note: `${by} rated this ${word}.` };
+  }
+
   let res: Response;
   let text: string;
   try {
-    res = await fetch(call.url, {
+    res = await fetch(`${j.baseUrl.replace(/\/+$/, "")}/systemone`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders(keys.judgeToken) },
-      body: JSON.stringify(call.body),
+      headers: { "Content-Type": "application/json", ...authHeaders(token) },
+      body: JSON.stringify({ model: j.model, state: stateOf(p), questions: QUESTIONS }),
       signal: AbortSignal.timeout(config.autoApproveTimeoutMs),
     });
     text = await res.text();
@@ -220,13 +247,6 @@ export async function judgePermission(p: Permission, settings: AutoApproveSettin
     return { outcome: "failed", by, note: `${by} failed: ${why(err)}` };
   }
   if (!res.ok) return { outcome: "failed", by, note: `${by} failed: HTTP ${res.status}` };
-
-  if (j.protocol === "openai") {
-    const word = readWord(text);
-    if (!word) return { outcome: "failed", by, note: `${by} failed: the answer was not SAFE, RISKY or DANGEROUS` };
-    if (word === "safe") return { outcome: "allow", by, detail: "SAFE" };
-    return { outcome: "user", by, rating: word, detail: word.toUpperCase(), note: `${by} rated this ${word}.` };
-  }
   const answers = readNouls(text);
   if (!answers) return { outcome: "failed", by, note: `${by} failed: the answer was unreadable (expected a probability from 0 to 1 for each question)` };
   const detail = (Object.keys(QUESTIONS) as (keyof Answers)[]).map((k) => `${k} ${answers[k].toFixed(2)}`).join(" · ");
@@ -250,17 +270,10 @@ function readNouls(text: string): Answers | undefined {
   }
 }
 
-function readWord(text: string): Level | undefined {
-  try {
-    const content = JSON.parse(text)?.choices?.[0]?.message?.content;
-    if (typeof content !== "string") return undefined;
-    // Thinking models put their reasoning first; only the answer after it counts.
-    const answer = content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
-    const m = /^\W*(SAFE|RISKY|DANGEROUS)\b/i.exec(answer);
-    return m ? (m[1].toLowerCase() as Level) : undefined;
-  } catch {
-    return undefined;
-  }
+/** The reply must be the one word (markdown or a full stop around it is fine); a hedge is no answer. */
+function readWord(reply: string): Level | undefined {
+  const m = /^\W*(SAFE|RISKY|DANGEROUS)\W*$/i.exec(reply);
+  return m ? (m[1].toLowerCase() as Level) : undefined;
 }
 
 const authHeaders = (token: string | undefined): Record<string, string> => (token ? { Authorization: `Bearer ${token}` } : {});
@@ -272,7 +285,7 @@ function why(err: unknown) {
 }
 
 /** Settings → Test: ask the saved judge about a harmless call and report whether it answered. */
-export async function testJudge(settings: AutoApproveSettings, keys: { judgeToken?: string }) {
+export async function testJudge(settings: AutoApproveSettings, keys: JudgeKeys) {
   const v = await judgePermission(
     {
       tool: "bash",
