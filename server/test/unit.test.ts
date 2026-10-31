@@ -7,6 +7,7 @@ import { applyEvent, emptyTranscript, withMessages } from "../../shared/transcri
 import { openDb } from "../src/db.ts";
 import { redact } from "../src/git.ts";
 import { checkRequestOrigin, Router } from "../src/http.ts";
+import { requireTrackedRepo } from "../src/repos.ts";
 import { SecretStore } from "../src/secrets.ts";
 import { DEFAULT_RULES, getApprovalSettings, saveApprovalSettings, saveModelSettings } from "../src/settings.ts";
 import { listSkills, parseFrontmatter } from "../src/skills.ts";
@@ -192,6 +193,21 @@ test("pipeline: ticket validation, frontier order and prompts", async () => {
   assert.match(section, /- \[x\] #1 T1 \(Closes #12\)/);
   assert.match(section, /- \[ \] #2 T2 \(Closes #13\)/);
   assert.match(section, /- \[x\] #3 T3 \(`\.scratch\/x\/issues\/03\.md`\)/);
+});
+
+test("requireTrackedRepo resolves tracked repos and rejects the rest", () => {
+  const db = tmpDb();
+  db.prepare("INSERT INTO repos (id, owner, name, default_branch, private, added_at) VALUES ('me/app','me','app','main',1,0)").run();
+  assert.equal(requireTrackedRepo(db, "me/app").name, "app");
+  let err: unknown;
+  try {
+    requireTrackedRepo(db, "other/repo");
+  } catch (e) {
+    err = e;
+  }
+  assert.ok(err instanceof Error);
+  assert.equal((err as { status: number }).status, 404);
+  assert.match((err as Error).message, /Unknown repo other\/repo/);
 });
 
 test("old databases gain the pipeline columns", async () => {

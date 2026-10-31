@@ -10,6 +10,8 @@ import path from "node:path";
  */
 export function startMockGitHub(root: string, login = "kevin") {
   const pulls: any[] = [];
+  const issues: any[] = []; // repo-scoped: { owner, name, ...issue }; the issues feed carries pull-request entries too
+  const comments: any[] = []; // { owner, name, issueNumber, ...comment }
   const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
 
   const createBare = (owner: string, name: string) => {
@@ -37,6 +39,39 @@ export function startMockGitHub(root: string, login = "kevin") {
     fs.existsSync(path.join(root, login))
       ? fs.readdirSync(path.join(root, login)).filter((d) => d.endsWith(".git")).map((d) => repoJson(login, d.slice(0, -4)))
       : [];
+  /** A tracked repo's issues; a PR entry sits in the feed, like GitHub's issues API returns. */
+  const seedIssues = (owner: string, name: string) => {
+    const base = `https://github.com/${owner}/${name}`;
+    issues.push(
+      {
+        owner, name, number: 1, title: "Add dark mode", body: "Support a dark theme for the UI.", state: "open",
+        labels: [{ name: "enhancement" }], assignees: [{ login, id: 42, name: "Kevin" }],
+        updated_at: "2025-01-03T00:00:00Z", html_url: `${base}/issues/1`,
+      },
+      {
+        owner, name, number: 2, title: "Fix login Crash", body: "The app crashes when the login page is reloaded.", state: "open",
+        labels: [{ name: "bug" }], assignees: [], updated_at: "2025-01-02T00:00:00Z", html_url: `${base}/issues/2`,
+      },
+      {
+        owner, name, number: 3, title: "Docs: setup guide", body: "Write a setup guide for fresh installs.", state: "open",
+        labels: [{ name: "documentation" }], assignees: [], updated_at: "2025-01-01T00:00:00Z", html_url: `${base}/issues/3`,
+      },
+      {
+        owner, name, number: 9, title: "A pull request, not an issue", body: "This entry carries a pull_request key.", state: "open",
+        labels: [], assignees: [], updated_at: "2025-01-04T00:00:00Z", html_url: `${base}/pull/9`,
+        pull_request: { url: `${base}/pulls/9` },
+      },
+    );
+    comments.push(
+      { owner, name, issueNumber: 1, id: 101, user: { login, id: 42, name: "Kevin" }, body: "I agree, this would be great.", created_at: "2025-01-03T01:00:00Z" },
+      { owner, name, issueNumber: 1, id: 102, user: { login: "other", id: 43, name: null }, body: "Anyone working on this?", created_at: "2025-01-03T02:00:00Z" },
+    );
+  };
+  const repoIssues = (owner: string, name: string): any[] | null => {
+    if (!fs.existsSync(path.join(root, owner, `${name}.git`))) return null;
+    if (!issues.some((i) => i.owner === owner && i.name === name)) seedIssues(owner, name);
+    return issues.filter((i) => i.owner === owner && i.name === name);
+  };
 
   const server = http.createServer(async (req, res) => {
     let raw = "";
@@ -71,6 +106,21 @@ export function startMockGitHub(root: string, login = "kevin") {
       pulls.push(pr);
       return send(201, pr);
     }
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues$/.exec(p)) && req.method === "GET") {
+      const all = repoIssues(m[1], m[2]);
+      return all ? send(200, all) : send(404, { message: "Not Found" });
+    }
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/.exec(p)) && req.method === "GET") {
+      const all = repoIssues(m[1], m[2]);
+      if (!all) return send(404, { message: "Not Found" });
+      const issue = all.find((i) => i.number === Number(m[3]));
+      return issue ? send(200, issue) : send(404, { message: "Not Found" });
+    }
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)\/comments$/.exec(p)) && req.method === "GET") {
+      const all = repoIssues(m[1], m[2]);
+      if (!all) return send(404, { message: "Not Found" });
+      return send(200, comments.filter((c) => c.owner === m[1] && c.name === m[2] && c.issueNumber === Number(m[3])));
+    }
     if ((m = /^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(p))) {
       const pr = pulls[Number(m[1]) - 1];
       return pr
@@ -83,10 +133,17 @@ export function startMockGitHub(root: string, login = "kevin") {
     send(404, { message: `mock has no ${req.method} ${p}` });
   });
 
-  return new Promise<{ url: string; pulls: any[]; createBare: typeof createBare; close: () => Promise<void> }>((resolve) => {
+  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; createBare: typeof createBare; close: () => Promise<void> }>((resolve) => {
     server.listen(Number(process.env.MOCK_GH_PORT ?? 0), "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
-      resolve({ url: `http://127.0.0.1:${port}`, pulls, createBare, close: () => new Promise((r) => server.close(() => r())) });
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        pulls,
+        issues,
+        comments,
+        createBare,
+        close: () => new Promise((r) => server.close(() => r())),
+      });
     });
   });
 }

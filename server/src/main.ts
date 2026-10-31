@@ -9,7 +9,7 @@ import { GitHub, GitHubError } from "./github.ts";
 import { checkRequestOrigin, type Ctx, HttpError, readJson, Router, sendJson, serveStatic } from "./http.ts";
 import { listModels, probeEndpoint } from "./llm.ts";
 import { draftPr, openPr, changes } from "./prs.ts";
-import { addRepo, assertRepoName, clonePath, getRepo, listRepos, repoNeedsSetup } from "./repos.ts";
+import { addRepo, assertRepoName, clonePath, getRepo, listRepos, repoNeedsSetup, requireTrackedRepo } from "./repos.ts";
 import { GLOBAL_SCOPE, SecretStore } from "./secrets.ts";
 import { SessionManager } from "./sessions.ts";
 import {
@@ -92,6 +92,22 @@ const router = new Router()
       pushedAt: r.pushed_at,
     })),
   )
+  .on("GET", "/api/github/issues", async ({ query }) => {
+    const repo = requireTrackedRepo(db, query.get("repo") ?? "");
+    return github().listIssues(repo.owner, repo.name, {
+      label: query.get("label") ?? undefined,
+      q: query.get("q") ?? undefined,
+    });
+  })
+  .on("GET", "/api/github/issues/:owner/:name/:number", async ({ params }) => {
+    const repo = requireTrackedRepo(db, `${params.owner}/${params.name}`);
+    const number = Number(params.number);
+    const [issue, comments] = await Promise.all([
+      github().getIssue(repo.owner, repo.name, number),
+      github().listIssueComments(repo.owner, repo.name, number),
+    ]);
+    return { ...issue, comments };
+  })
   .on("POST", "/api/repos", async ({ body }) => {
     const [owner, name] = String(body.id ?? "").split("/");
     assertRepoName(owner ?? "", name ?? "");
