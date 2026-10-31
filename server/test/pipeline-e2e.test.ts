@@ -8,6 +8,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import { startMockLlm } from "./mock-llm.ts";
 
@@ -18,6 +19,9 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wb-pipe-"));
 process.env.DATA_DIR = path.join(tmp, "data");
 process.env.WORKBENCH_MASTER_KEY = "pipeline-master-key-0123456789";
 process.env.SKILLS_DIR = path.join(tmp, "skills");
+// A deployment may export PI_EXTENSION (the installed copy); the test must load this repo's
+// extension, so the assertions cover the code under test.
+process.env.PI_EXTENSION = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "pi-extension", "workbench.ts");
 
 let mock: Awaited<ReturnType<typeof startMockLlm>>;
 let mgr: any;
