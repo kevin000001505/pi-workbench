@@ -94,7 +94,8 @@ export type SecretMeta = { scope: string; name: string; updatedAt: number };
 
 export type SshKeyMeta = { name: string; updatedAt: number };
 export type SshHost = { alias: string; user: string; hostname: string; port?: number; keyName: string };
-export type SshView = { keys: SshKeyMeta[]; hosts: SshHost[] };
+export type SshHostView = SshHost & { keyMissing: boolean };
+export type SshView = { keys: SshKeyMeta[]; hosts: SshHostView[] };
 
 export type Changes = {
   log: string;
