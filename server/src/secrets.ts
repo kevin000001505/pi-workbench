@@ -74,3 +74,14 @@ export class SecretStore {
     return Buffer.concat([decipher.update(Buffer.from(row.data, "base64")), decipher.final()]).toString("utf8");
   }
 }
+
+/** Scopes the workbench keeps for itself (`wb:…`, e.g. the auto-approve keys): the Secrets page never sees them. */
+const isReserved = (scope: string) => scope.startsWith("wb:");
+
+/** The secrets the Secrets page lists: names only, reserved scopes left out. */
+export const userSecrets = (store: SecretStore) => store.list().filter((s) => !isReserved(s.scope));
+
+/** The Secrets page may write or delete only the global scope and tracked repos' scopes. */
+export function assertUserScope(scope: string, isRepo: (scope: string) => boolean) {
+  if (isReserved(scope) || (scope !== GLOBAL_SCOPE && !isRepo(scope))) throw Object.assign(new Error(`Unknown scope ${scope}`), { status: 400 });
+}

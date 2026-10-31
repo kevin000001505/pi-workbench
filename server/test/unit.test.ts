@@ -4,12 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { applyEvent, emptyTranscript, withMessages } from "../../shared/transcript.ts";
-import { autoApproveView, getAutoApproveSettings, saveAutoApproveSettings, setAutoApproveKey } from "../src/autoapprove.ts";
+import { autoApproveKeys, autoApproveView, getAutoApproveSettings, saveAutoApproveKey, saveAutoApproveSettings } from "../src/autoapprove.ts";
 import { openDb } from "../src/db.ts";
 import { redact } from "../src/git.ts";
 import { checkRequestOrigin, Router } from "../src/http.ts";
 import { requireTrackedRepo } from "../src/repos.ts";
-import { SecretStore } from "../src/secrets.ts";
+import { assertUserScope, SecretStore, userSecrets } from "../src/secrets.ts";
 import { DEFAULT_RULES, getApprovalSettings, saveApprovalSettings, saveModelSettings } from "../src/settings.ts";
 import { listSkills, parseFrontmatter } from "../src/skills.ts";
 
@@ -286,33 +286,64 @@ test("auto-approve settings: off by default, validated on save", () => {
   const db = tmpDb();
   const s = getAutoApproveSettings(db);
   assert.equal(s.enabled, false);
-  assert.equal(s.judge.jevBaseUrl, "https://api.typesafe.ai/v1");
-  assert.equal(s.judge.safeThreshold, 0.8);
-  assert.throws(() => saveAutoApproveSettings(db, { judge: { kind: "jev", jevBaseUrl: "ftp://x", safeThreshold: 0.8 } }), /Jev URL/);
-  for (const t of [0, -0.1, 1.5, Number.NaN]) {
-    assert.throws(() => saveAutoApproveSettings(db, { judge: { kind: "jev", jevBaseUrl: "https://j.example/v1", safeThreshold: t } }), /threshold/);
+  assert.deepEqual(s.judge, { baseUrl: "https://api.typesafe.ai/v1", model: "jev-latest", protocol: "systemone", yesAbove: 0.7, noBelow: 0.3 });
+  const judge = (patch: Record<string, unknown>) => ({ judge: { ...getAutoApproveSettings(db).judge, ...patch } }) as any;
+  for (const baseUrl of ["ftp://x", ["https://j.example/v1"], 42]) assert.throws(() => saveAutoApproveSettings(db, judge({ baseUrl })), /judge URL/);
+  for (const model of ["", "  ", 7]) assert.throws(() => saveAutoApproveSettings(db, judge({ model })), /model/);
+  assert.throws(() => saveAutoApproveSettings(db, judge({ protocol: "grpc" })), /protocol/);
+  for (const [noBelow, yesAbove] of [[0, 0.7], [0.3, 1], [0.7, 0.3], [0.5, 0.5], [Number.NaN, 0.7], ["0.3", 0.7]]) {
+    assert.throws(() => saveAutoApproveSettings(db, judge({ noBelow, yesAbove })), /cut-off/);
   }
-  assert.equal(saveAutoApproveSettings(db, { judge: { kind: "jev", jevBaseUrl: "https://j.example/v1", safeThreshold: 1 } }).judge.safeThreshold, 1);
-  assert.equal(saveAutoApproveSettings(db, { enabled: true }).judge.jevBaseUrl, "https://j.example/v1");
-  assert.equal(getAutoApproveSettings(db).enabled, true);
+  assert.equal(saveAutoApproveSettings(db, judge({ noBelow: 0.01, yesAbove: 0.99 })).judge.yesAbove, 0.99);
+  saveAutoApproveSettings(db, { enabled: true });
+  assert.equal(getAutoApproveSettings(db).judge.yesAbove, 0.99, "saving only the switch keeps the judge");
   for (const enabled of ["false", 0, 1, null]) {
     assert.throws(() => saveAutoApproveSettings(db, { enabled } as any), /on or off/);
   }
   assert.equal(getAutoApproveSettings(db).enabled, true, "a rejected save changes nothing");
-  saveAutoApproveSettings(db, { judge: { kind: "jev", jevBaseUrl: "https://j.example/v1", safeThreshold: 0.8, extra: "x" } as any });
-  assert.deepEqual(Object.keys(getAutoApproveSettings(db).judge).sort(), ["jevBaseUrl", "kind", "safeThreshold"]);
+  saveAutoApproveSettings(db, judge({ extra: "x" }));
+  assert.deepEqual(Object.keys(getAutoApproveSettings(db).judge).sort(), ["baseUrl", "model", "noBelow", "protocol", "yesAbove"]);
 });
 
-test("the Jev token is write-only and never reaches a pi environment", () => {
+test("a stored auto-approve switch that is not exactly true reads as off", () => {
+  const db = tmpDb();
+  for (const enabled of ["false", "true", 1]) {
+    db.prepare("INSERT INTO settings (key, value) VALUES ('autoApprove', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify({ enabled }));
+    assert.equal(getAutoApproveSettings(db).enabled, false, JSON.stringify(enabled));
+  }
+});
+
+test("the judge token is write-only and never reaches a pi environment", () => {
   const db = tmpDb();
   const store = new SecretStore(db, "test-master-key-0123456789");
   store.set("global", "OTHER", "x");
-  setAutoApproveKey(store, "jevToken", "jev-very-secret");
+  saveAutoApproveKey(store, { key: "judgeToken", value: "  jev-very-secret  " });
+  assert.equal(autoApproveKeys(store).judgeToken, "jev-very-secret");
   assert.ok(!JSON.stringify(store.envFor()).includes("jev-very-secret"));
   assert.ok(!JSON.stringify(store.envFor("me/app")).includes("jev-very-secret"));
   const view = autoApproveView(db, store);
-  assert.equal(view.keys.jevToken, true);
+  assert.equal(view.keys.judgeToken, true);
   assert.ok(!JSON.stringify(view).includes("jev-very-secret"));
-  setAutoApproveKey(store, "jevToken", null);
-  assert.equal(autoApproveView(db, store).keys.jevToken, false);
+  for (const bad of [{ key: "masterKey", value: "x" }, { key: "judgeToken", value: "" }, { key: "judgeToken", value: "  " }, { key: "judgeToken", value: 5 }]) {
+    assert.throws(() => saveAutoApproveKey(store, bad), (e: any) => e.status === 400, JSON.stringify(bad));
+  }
+  saveAutoApproveKey(store, { key: "judgeToken", value: null });
+  assert.equal(autoApproveView(db, store).keys.judgeToken, false);
+});
+
+test("the Secrets page cannot see, set, or delete the auto-approve scope", () => {
+  const db = tmpDb();
+  const store = new SecretStore(db, "test-master-key-0123456789");
+  store.set("global", "A", "1");
+  saveAutoApproveKey(store, { key: "judgeToken", value: "t" });
+  assert.deepEqual(userSecrets(store).map((s) => s.scope), ["global"]);
+  const isRepo = (scope: string) => scope === "me/app";
+  assert.doesNotThrow(() => assertUserScope("global", isRepo));
+  assert.doesNotThrow(() => assertUserScope("me/app", isRepo));
+  for (const scope of ["wb:auto-approve", "wb:anything", "other/repo"]) {
+    assert.throws(() => assertUserScope(scope, isRepo), (e: any) => e.status === 400, scope);
+  }
+  // Deleting accepts any listed scope (a removed repo's too), but never a reserved one.
+  assert.doesNotThrow(() => assertUserScope("gone/repo", () => true));
+  assert.throws(() => assertUserScope("wb:auto-approve", () => true), (e: any) => e.status === 400);
 });

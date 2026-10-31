@@ -15,7 +15,7 @@ export type UiRequest = {
   subject?: string;
   reasons?: string[];
   /** permission under auto-approve: the risk judge's rating, then why it still waits for the user. */
-  judge?: { state: "judging" | "waiting" | "failed"; by: "jev"; rating?: string; pSafe?: number; note?: string };
+  judge?: { state: "judging" | "waiting" | "failed"; by: string; rating?: string; note?: string };
   createdAt: number;
 };
 
@@ -24,10 +24,14 @@ export const waitingOn = (s: { pending: UiRequest[] }) => s.pending.filter(waits
 
 export type AutoApproveSettings = {
   enabled: boolean;
-  judge: { kind: "jev"; jevBaseUrl: string; safeThreshold: number };
+  judge: { baseUrl: string; model: string; protocol: JudgeProtocol; yesAbove: number; noBelow: number };
   /** Whether each write-only key is set; values never come back. */
-  keys: { jevToken: boolean };
+  keys: { judgeToken: boolean };
 };
+
+/** What the judge URL speaks, read from its model list: TypeSafe System One or OpenAI-compatible chat. */
+export type JudgeProtocol = "systemone" | "openai";
+export type JudgeModels = { protocol: JudgeProtocol; models: string[] };
 
 export type SessionSummary = {
   id: string;
