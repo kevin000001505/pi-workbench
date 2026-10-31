@@ -6,7 +6,8 @@ const NAME_RE = /^[A-Za-z_][A-Za-z0-9._-]{0,127}$/;
 
 /**
  * Env-variable store, encrypted at rest with AES-256-GCM. Values go in and never come back out over
- * the API: only `envFor()` decrypts, to build a pi process environment.
+ * the API: `envFor()` is the only decrypting path to a pi process environment; `get()` also decrypts
+ * for the LLM key and for ssh key materialization into `~/.ssh` (see ssh.ts, ADR 0001).
  */
 export class SecretStore {
   private key: Buffer;
