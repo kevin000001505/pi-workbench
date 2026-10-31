@@ -6,13 +6,27 @@ import { useStore } from "../store.tsx";
 import type { Repo, SessionSummary, Skill } from "../types.ts";
 import { Empty, PageHeader, Spinner } from "../ui.tsx";
 
-export function NewSession({ repoId }: { repoId?: string }) {
+export function NewSession({
+  repoId,
+  issueRef,
+  prefillTitle,
+  prefillPrompt,
+  prefillBase,
+}: {
+  repoId?: string;
+  /** `owner/name#123`; pre-fills the form for that issue and locks the repo to it. */
+  issueRef?: string;
+  prefillTitle?: string;
+  prefillPrompt?: string;
+  prefillBase?: string;
+}) {
   const { toast, upsert } = useStore();
   const [repos, setRepos] = useState<Repo[] | null>(null);
-  const [repo, setRepo] = useState(repoId ?? "");
-  const [base, setBase] = useState("");
-  const [title, setTitle] = useState("");
-  const [prompt, setPrompt] = useState("");
+  const fromIssue = issueRef ? issueRef.split("#") : undefined; // [repoId, number]
+  const [repo, setRepo] = useState(fromIssue?.[0] ?? repoId ?? "");
+  const [base, setBase] = useState(prefillBase ?? "");
+  const [title, setTitle] = useState(prefillTitle ?? "");
+  const [prompt, setPrompt] = useState(prefillPrompt ?? "");
   const [picker, setPicker] = useState(false);
   const [mode, setMode] = useState<"pipeline" | "direct">("pipeline");
   const [creating, setCreating] = useState(false);
@@ -23,7 +37,7 @@ export function NewSession({ repoId }: { repoId?: string }) {
       .get<Repo[]>("/api/repos")
       .then((r) => {
         setRepos(r);
-        if (!repoId && r[0]) setRepo(r[0].id);
+        if (!repo && r[0]) setRepo(r[0].id);
       })
       .catch((e) => toast(e.message, "error"));
   }, [repoId, toast]);
@@ -33,7 +47,14 @@ export function NewSession({ repoId }: { repoId?: string }) {
   const create = async () => {
     setCreating(true);
     try {
-      const s = await api.post<SessionSummary>("/api/sessions", { repoId: repo, title, baseBranch: base || undefined, prompt, mode });
+      const s = await api.post<SessionSummary>("/api/sessions", {
+        repoId: repo,
+        title,
+        baseBranch: base || undefined,
+        prompt,
+        mode,
+        issueRef: fromIssue ? issueRef : undefined,
+      });
       upsert(s);
       go(`#/session/${s.id}`);
     } catch (e) {
@@ -61,10 +82,20 @@ export function NewSession({ repoId }: { repoId?: string }) {
         <Spinner />
       ) : (
         <div className="form card">
+          {fromIssue && (
+            <div className="alert alert-info">
+              Solving{" "}
+              <a className="mono" href={`#/issues/${encodeURIComponent(fromIssue[0])}/${fromIssue[1]}`}>
+                {fromIssue[0]}#{fromIssue[1]}
+              </a>
+              {" "}
+              — the repository is locked to it.
+            </div>
+          )}
           <div className="grid2">
             <label>
               Repository
-              <select className="input" value={repo} onChange={(e) => setRepo(e.target.value)}>
+              <select className="input" value={repo} disabled={!!fromIssue} onChange={(e) => setRepo(e.target.value)}>
                 {repos.map((r) => (
                   <option key={r.id} value={r.id}>
                     {r.id}

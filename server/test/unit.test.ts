@@ -220,8 +220,8 @@ test("old databases gain the pipeline columns", async () => {
   old.prepare("INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at) VALUES ('s','r','t','b','main','/w',0,0)").run();
   old.close();
   const db = openDb(file);
-  const row = db.prepare("SELECT mode, phase, active_run, attention FROM sessions").get() as any;
-  assert.deepEqual({ ...row }, { mode: "direct", phase: "direct", active_run: null, attention: null });
+  const row = db.prepare("SELECT mode, phase, active_run, attention, issue_ref FROM sessions").get() as any;
+  assert.deepEqual({ ...row }, { mode: "direct", phase: "direct", active_run: null, attention: null, issue_ref: null });
 });
 
 test("every pipeline prompt starts with a /skill: command pi will expand", async () => {

@@ -39,6 +39,7 @@ export type SessionSummary = {
   grillSummary: string | null;
   spec: string | null;
   specRef: string | null;
+  issueRef: string | null;
   tickets: Ticket[];
   activeRun: string;
   runs: { id: string; label: string }[];

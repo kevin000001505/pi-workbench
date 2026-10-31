@@ -40,6 +40,8 @@ export type SessionRow = {
   active_run: string | null;
   /** Why the pipeline stopped and waits for the user; null while it may proceed. */
   attention: string | null;
+  /** The GitHub issue this session solves, e.g. `owner/name#123`; null for plain sessions. */
+  issue_ref: string | null;
 };
 
 export type TicketRow = {
@@ -111,6 +113,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ["sessions", "spec", "TEXT"],
   ["sessions", "spec_ref", "TEXT"],
   ["sessions", "review_run", "TEXT"],
+  ["sessions", "issue_ref", "TEXT"],
 ];
 
 function migrate(db: DatabaseSync) {

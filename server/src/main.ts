@@ -146,6 +146,7 @@ const router = new Router()
       baseBranch: body.baseBranch ? String(body.baseBranch) : undefined,
       prompt: String(body.prompt ?? ""),
       mode: body.mode === "direct" ? "direct" : "pipeline",
+      issueRef: body.issueRef ? String(body.issueRef) : undefined,
     }),
   )
   .on("GET", "/api/sessions/:id", ({ params }) => sessions.snapshot(params.id))

@@ -103,10 +103,29 @@ function PermissionHint() {
 }
 
 /** The full issue: markdown body, labels, assignees, up to 100 markdown comments, and a GitHub link. */
-function IssueDetail({ repoId, number, refresh }: { repoId: string; number: number; refresh: number }) {
-  const { toast } = useStore();
+function IssueDetail({
+  repoId,
+  number,
+  defaultBranch,
+  refresh,
+}: {
+  repoId: string;
+  number: number;
+  defaultBranch: string;
+  refresh: number;
+}) {
   const [data, setData] = useState<GhIssueWithComments | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  /** Pre-fill New Session for this issue: repo locked, title, prompt, default base branch. */
+  const startSession = () => {
+    if (!data) return;
+    const first = `Solve GitHub issue #${number}: ${data.title}`;
+    const prompt = data.body ? `${first}\n\n${data.body}` : first;
+    const params = new URLSearchParams({ issue: `${repoId}#${number}`, title: data.title, prompt });
+    if (defaultBranch) params.set("base", defaultBranch);
+    go(`#/new?${params.toString()}`);
+  };
 
   const load = useCallback(() => {
     const [owner, name] = repoId.split("/");
@@ -152,11 +171,7 @@ function IssueDetail({ repoId, number, refresh }: { repoId: string; number: numb
           Updated {ago(Date.parse(data.updatedAt))}
         </p>
         <div className="row gap">
-          <button
-            className="btn btn-primary"
-            title="Wired up in the next update"
-            onClick={() => toast("Starting a session from an issue lands in the next update.")}
-          >
+          <button className="btn btn-primary" onClick={startSession}>
             Start session
           </button>
           <a className="btn btn-ghost" href={data.htmlUrl} target="_blank" rel="noopener">
@@ -229,7 +244,13 @@ export function Issues({ repoId, number }: { repoId?: string; number?: number })
         </button>
       </PageHeader>
       {number !== undefined && repoId ? (
-        <IssueDetail key={`${repoId}-${number}`} repoId={repoId} number={number} refresh={refresh} />
+        <IssueDetail
+          key={`${repoId}-${number}`}
+          repoId={repoId}
+          number={number}
+          defaultBranch={repos?.find((r) => r.id === repoId)?.defaultBranch ?? ""}
+          refresh={refresh}
+        />
       ) : repo ? (
         <IssueList key={repo} repoId={repo} refresh={refresh} />
       ) : !repos ? (
