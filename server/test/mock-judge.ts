@@ -1,75 +1,84 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 
-/** One scripted answer: Jev's three level probabilities, or a broken reply. */
+/** One scripted answer: Jev's Noul probabilities or a chat model's reply text, or a broken reply. */
 export type JudgeReply = {
-  /** P(safe), P(risky), P(dangerous); the score is their index-weighted mean. */
-  probabilities?: [number, number, number];
+  /** System One: P(yes) per question name. */
+  nouls?: Record<string, number>;
+  /** OpenAI-compatible: the assistant's reply text. */
+  text?: string;
   status?: number;
-  /** A raw body to send instead of a Jev answer (unreadable answers). */
+  /** A raw body to send instead of a well-formed answer (unreadable answers). */
   body?: string;
   delayMs?: number;
 };
 
+export const SAFE = { deletes_data: 0.04, reaches_outside: 0.05, hard_to_undo: 0.03, fits_task: 0.92 };
+export const RISKY = { deletes_data: 0.9, reaches_outside: 0.1, hard_to_undo: 0.6, fits_task: 0.8 };
+
 /**
- * A scripted Jev (`POST /v1/systemone`) for the auto-approve tests. Queued `replies` answer first;
- * otherwise it answers by the subject in the state: "push" is safe, "rm" risky, "ssh" dangerous.
+ * A scripted risk judge for the auto-approve tests, speaking one protocol:
+ * - "systemone": TypeSafe's `GET /v1/models` ({ models: [{ name }] }) and `POST /v1/systemone` (Nouls);
+ * - "openai": an OpenAI-compatible `GET /v1/models` ({ data: [{ id }] }) and `POST /v1/chat/completions`.
+ * Queued `replies` answer first; otherwise it answers by the call in the state: `rm ` is risky,
+ * anything else safe. With `token`, every request without that bearer token gets 403, like TypeSafe.
  */
-export function startMockJudge(port = 0): Promise<{
+export function startMockJudge(opts: { protocol: "systemone" | "openai"; model: string; token?: string }): Promise<{
   url: string;
-  requests: { auth?: string; body: any }[];
+  requests: { path: string; auth?: string; body: any }[];
   replies: JudgeReply[];
+  /** Judge calls answered so far (one per finished POST), for tests that wait on a late verdict. */
+  answered: () => number;
   close: () => Promise<void>;
 }> {
-  const requests: { auth?: string; body: any }[] = [];
+  const requests: { path: string; auth?: string; body: any }[] = [];
   const replies: JudgeReply[] = [];
+  let answered = 0;
+  const send = (res: http.ServerResponse, status: number, body: unknown) => {
+    res.writeHead(status, { "Content-Type": "application/json" });
+    res.end(typeof body === "string" ? body : JSON.stringify(body));
+  };
   const server = http.createServer(async (req, res) => {
     let raw = "";
     for await (const c of req) raw += c;
-    if (req.method !== "POST" || !req.url?.endsWith("/systemone")) {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "not found" }));
-      return;
+    const path = new URL(req.url ?? "/", "http://x").pathname;
+    const body = raw ? JSON.parse(raw) : {};
+    requests.push({ path, auth: req.headers.authorization, body });
+    if (opts.token && req.headers.authorization !== `Bearer ${opts.token}`) return send(res, 403, { detail: "Not authenticated" });
+    if (req.method === "GET" && path === "/v1/models") {
+      return send(
+        res,
+        200,
+        opts.protocol === "systemone"
+          ? { models: [{ name: opts.model, description: "mock", release_date: "2026-09-15" }] }
+          : { object: "list", data: [{ id: opts.model, object: "model" }] },
+      );
     }
-    const body = JSON.parse(raw || "{}");
-    requests.push({ auth: req.headers.authorization, body });
-    const reply = replies.shift() ?? byKeyword(String(body.state ?? ""));
+    const route = opts.protocol === "systemone" ? "/v1/systemone" : "/v1/chat/completions";
+    if (req.method !== "POST" || path !== route) return send(res, 404, { error: "not found" });
+
+    const state = JSON.stringify(opts.protocol === "systemone" ? body.state : body.messages);
+    const risky = state.includes("rm ");
+    const reply = replies.shift() ?? (opts.protocol === "systemone" ? { nouls: risky ? RISKY : SAFE } : { text: risky ? "RISKY" : "SAFE" });
     if (reply.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs));
+    answered++;
     if (res.destroyed) return;
-    if (reply.status && reply.status !== 200) {
-      res.writeHead(reply.status, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "mock failure" }));
-      return;
+    if (reply.status && reply.status !== 200) return send(res, reply.status, { error: "mock failure" });
+    if (reply.body !== undefined) return send(res, 200, reply.body);
+    if (opts.protocol === "systemone") {
+      const answers = Object.fromEntries(Object.entries(reply.nouls!).map(([k, v]) => [k, { type: "noul", noul: v }]));
+      return send(res, 200, { model: "jev-1.14.0", answers, usage: { input_tokens: 300, output_tokens: 8 } });
     }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    if (reply.body !== undefined) {
-      res.end(reply.body);
-      return;
-    }
-    const [p0, p1, p2] = reply.probabilities!;
-    res.end(
-      JSON.stringify({
-        model: "jev-1.13.0",
-        answers: {
-          risk: {
-            type: "score",
-            score: p1 + 2 * p2,
-            confidence: Math.max(p0, p1, p2),
-            legend: { "0": "safe", "1": "risky", "2": "dangerous" },
-            probabilities: { "0": p0, "1": p1, "2": p2 },
-          },
-        },
-        usage: { input_tokens: 300, output_tokens: 18 },
-      }),
-    );
+    send(res, 200, { id: "mock", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: reply.text }, finish_reason: "stop" }] });
   });
   return new Promise((resolve) => {
-    server.listen(port, "127.0.0.1", () => {
-      const { port: p } = server.address() as AddressInfo;
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
       resolve({
-        url: `http://127.0.0.1:${p}/v1`,
+        url: `http://127.0.0.1:${port}/v1`,
         requests,
         replies,
+        answered: () => answered,
         close: () =>
           new Promise<void>((r) => {
             server.closeAllConnections();
@@ -78,10 +87,4 @@ export function startMockJudge(port = 0): Promise<{
       });
     });
   });
-}
-
-function byKeyword(state: string): JudgeReply {
-  if (state.includes("ssh")) return { probabilities: [0.02, 0.18, 0.8] };
-  if (state.includes("rm ")) return { probabilities: [0.1, 0.7, 0.2] };
-  return { probabilities: [0.95, 0.04, 0.01] };
 }

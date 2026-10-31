@@ -1,3 +1,5 @@
+import { waitsOnUser } from "../../shared/pending.ts";
+
 export type SessionStatus = "stopped" | "starting" | "running" | "waiting" | "idle" | "error";
 
 export type UiRequest = {
@@ -12,20 +14,24 @@ export type UiRequest = {
   tool?: string;
   subject?: string;
   reasons?: string[];
-  /** permission under auto-approve: the risk judge's review, then why it still waits for the user. */
-  review?: { state: "reviewing" | "waiting" | "failed"; by: "jev"; rating?: string; pSafe?: number; note?: string };
+  /** permission under auto-approve: the risk judge's rating, then why it still waits for the user. */
+  judge?: { state: "judging" | "waiting" | "failed"; by: string; rating?: string; note?: string };
   createdAt: number;
 };
 
-/** Requests that wait on the user: a permission the risk judge is still reviewing does not. */
-export const waitingOn = (s: { pending: UiRequest[] }) => s.pending.filter((r) => r.review?.state !== "reviewing");
+/** The session's requests that wait on the user (see shared/pending.ts). */
+export const waitingOn = (s: { pending: UiRequest[] }) => s.pending.filter(waitsOnUser);
 
 export type AutoApproveSettings = {
   enabled: boolean;
-  judge: { kind: "jev"; jevBaseUrl: string; safeThreshold: number };
+  judge: { baseUrl: string; model: string; protocol: JudgeProtocol; yesAbove: number; noBelow: number };
   /** Whether each write-only key is set; values never come back. */
-  keys: { jevToken: boolean };
+  keys: { judgeToken: boolean };
 };
+
+/** What the judge URL speaks, read from its model list: TypeSafe System One or OpenAI-compatible chat. */
+export type JudgeProtocol = "systemone" | "openai";
+export type JudgeModels = { protocol: JudgeProtocol; models: string[] };
 
 export type SessionSummary = {
   id: string;

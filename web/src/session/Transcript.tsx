@@ -168,14 +168,11 @@ function Message({ m, results, running }: { m: AgentMessage; results: Map<string
       </div>
     );
   }
-  if (m.role === "autoDecision") {
-    const by = m.by === "jev" ? "Jev" : String(m.by);
-    const how = m.decision === "allow" ? `allowed by ${by}` : `denied by ${by}`;
+  if (m.role === "autoAnswer") {
     return (
       <div className="msg msg-note">
-        <span className="tag tag-ok">auto-approve</span> <code>{String(m.subject ?? m.tool)}</code>: {how}
-        {typeof m.pSafe === "number" && ` (P(safe)=${m.pSafe.toFixed(2)})`}
-        {typeof m.reason === "string" && m.reason && `: ${m.reason}`}
+        <span className="tag tag-ok">auto-approve</span> <code>{String(m.subject ?? m.tool)}</code>: allowed by {String(m.by)}
+        {typeof m.detail === "string" && m.detail && <span className="muted small"> ({m.detail})</span>}
       </div>
     );
   }

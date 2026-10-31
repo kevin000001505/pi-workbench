@@ -1,15 +1,19 @@
 /**
- * Auto-approve (issue #17): permissions go to the risk judge (a scripted Jev) before the user.
- * A real `pi --mode rpc` process against the mock LLM, driven through SessionManager, like e2e.test.ts.
+ * Auto-approve (issue #17): permissions go to the risk judge before the user. The judge is one URL;
+ * its `GET /models` answer picks the protocol: TypeSafe System One (Jev, atomic Nouls) or an
+ * OpenAI-compatible chat model (one word). A real `pi --mode rpc` process against the mock LLM,
+ * driven through SessionManager, like e2e.test.ts; both judges are scripted mocks.
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { after, before, test } from "node:test";
-import { startMockJudge } from "./mock-judge.ts";
+import { after, before, beforeEach, test } from "node:test";
+import { RISKY, SAFE, startMockJudge } from "./mock-judge.ts";
 import { startMockLlm } from "./mock-llm.ts";
 
 const piBin = process.env.PI_BIN ?? "pi";
@@ -24,8 +28,10 @@ process.env.HOME = path.join(tmp, "agent-home");
 process.env.AUTO_APPROVE_TIMEOUT_MS = "1500";
 process.env.PI_EXTENSION = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "pi-extension", "workbench.ts");
 
+const TOKEN = "jev-secret-token";
 let mock: Awaited<ReturnType<typeof startMockLlm>>;
-let judge: Awaited<ReturnType<typeof startMockJudge>>;
+let jev: Awaited<ReturnType<typeof startMockJudge>>;
+let chat: Awaited<ReturnType<typeof startMockJudge>>;
 let mgr: any;
 let db: any;
 let secrets: any;
@@ -45,10 +51,11 @@ async function waitFor<T>(fn: () => T | undefined | false | Promise<T | undefine
   }
 }
 
-const enable = (patch: Record<string, unknown> = {}) =>
-  auto.saveAutoApproveSettings(db, { enabled: true, judge: { kind: "jev", jevBaseUrl: judge.url, safeThreshold: 0.8 }, ...patch });
+const JEV = { baseUrl: () => jev.url, model: "jev-latest" };
+/** Turn auto-approve on against Jev (or another judge), as Settings → Save does. */
+const enable = (judge: Record<string, unknown> = {}) =>
+  auto.configureAutoApprove(db, secrets, { enabled: true, judge: { baseUrl: JEV.baseUrl(), model: JEV.model, yesAbove: 0.7, noBelow: 0.3, ...judge } });
 
-/** Send a prompt and wait until the run settles with nothing pending. */
 async function settle(id: string) {
   await waitFor(() => mgr.summary(id).status === "idle");
 }
@@ -64,10 +71,23 @@ async function run(id: string, prompt: string) {
   });
 }
 
+/** Send a prompt and resolve with the permission card it raises. */
+async function cardFor(id: string, prompt: string, until: (req: any) => boolean = () => true) {
+  await mgr.send(id, prompt);
+  return waitFor(() => mgr.summary(id).pending.find((r: any) => r.kind === "permission" && until(r)));
+}
+const judged = (r: any) => r.judge?.state !== "judging";
+
+async function deny(id: string, req: any) {
+  mgr.respond(id, req.id, { value: "Deny" });
+  await settle(id);
+}
+
 before(async () => {
   if (!hasPi) return;
   mock = await startMockLlm();
-  judge = await startMockJudge();
+  jev = await startMockJudge({ protocol: "systemone", model: "jev-latest", token: TOKEN });
+  chat = await startMockJudge({ protocol: "openai", model: "mock-judge" });
   const { config } = await import("../src/config.ts");
   const { openDb } = await import("../src/db.ts");
   const { SecretStore } = await import("../src/secrets.ts");
@@ -93,7 +113,7 @@ before(async () => {
   db.prepare("INSERT INTO repos (id, owner, name, default_branch, private, added_at) VALUES ('me/demo','me','demo','main',1,0)").run();
 
   secrets = new SecretStore(db, process.env.WORKBENCH_MASTER_KEY!);
-  auto.setAutoApproveKey(secrets, "jevToken", "jev-secret-token");
+  auto.saveAutoApproveKey(secrets, { key: "judgeToken", value: TOKEN });
   mgr = new SessionManager(db, secrets, async () => ({
     GIT_AUTHOR_NAME: "t",
     GIT_AUTHOR_EMAIL: "t@t",
@@ -107,149 +127,235 @@ before(async () => {
   await settle(sessionId);
 });
 
+beforeEach(() => {
+  if (!hasPi) return;
+  // A test that fails before its scripted reply is used must not leave it for the next one.
+  jev.replies.length = 0;
+  chat.replies.length = 0;
+});
+
 after(async () => {
   if (!hasPi) return;
   await mgr.shutdown();
   await mock.close();
-  await judge.close();
+  await jev.close();
+  await chat.close();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-test("a permission Jev rates safe runs without the user, with an allowed-by-Jev transcript line", { skip }, async () => {
-  enable();
-  const before = judge.requests.length;
-  const added = await run(sessionId, "please push");
-  const result = added.find((m: any) => m.role === "toolResult");
-  assert.ok(!result.isError || !JSON.stringify(result.content).includes("denied"), "the call was not blocked");
-  const line = added.find((m: any) => m.role === "autoDecision");
-  assert.equal(line.decision, "allow");
-  assert.equal(line.by, "jev");
-  assert.equal(line.subject, "git push origin HEAD");
-  assert.equal(line.pSafe, 0.95);
-  assert.equal(judge.requests.length, before + 1);
-  assert.equal(judge.requests.at(-1)!.auth, "Bearer jev-secret-token");
-  await settle(sessionId);
+test("the judge URL's model list picks the protocol: TypeSafe System One or OpenAI-compatible chat", { skip }, async () => {
+  assert.deepEqual(await auto.listJudgeModels(jev.url, TOKEN), { protocol: "systemone", models: ["jev-latest"] });
+  assert.deepEqual(await auto.listJudgeModels(chat.url, undefined), { protocol: "openai", models: ["mock-judge"] });
+  await assert.rejects(auto.listJudgeModels(jev.url, undefined), /HTTP 403/);
+  await assert.rejects(auto.listJudgeModels(chat.url.replace(/\/v1$/, "/nothing"), undefined), /HTTP 404/);
 });
 
-/** Send a prompt and resolve with the permission card it raises. */
-async function cardFor(id: string, prompt: string, until: (req: any) => boolean = () => true) {
-  await mgr.send(id, prompt);
-  return waitFor(() => mgr.summary(id).pending.find((r: any) => r.kind === "permission" && until(r)));
-}
+test("saving the judge checks the URL and model, and stores the detected protocol", { skip }, async () => {
+  const saved = await enable();
+  assert.equal(saved.judge.protocol, "systemone");
+  await assert.rejects(enable({ model: "jev-typo" }), /jev-typo.*not served/);
+  const c = await enable({ baseUrl: chat.url, model: "mock-judge" });
+  assert.equal(c.judge.protocol, "openai");
+  await enable();
+  assert.equal(auto.getAutoApproveSettings(db).judge.protocol, "systemone", "a rejected save changes nothing");
+});
 
-/** Deny the card and wait for the run to finish. */
-async function deny(id: string, req: any) {
-  mgr.respond(id, req.id, { value: "Deny" });
-  await settle(id);
-}
+test("a permission Jev judges safe runs without the user, with an allowed-by line", { skip }, async () => {
+  await enable();
+  const before = jev.requests.length;
+  const added = await run(sessionId, "please push");
+  const result = added.find((m: any) => m.role === "toolResult");
+  assert.ok(!JSON.stringify(result.content).includes("denied"), "the call was not blocked");
+  const line = added.find((m: any) => m.role === "autoAnswer");
+  assert.equal(line.answer, "allow");
+  assert.equal(line.by, "jev-latest");
+  assert.equal(line.subject, "git push origin HEAD");
+  assert.match(line.detail, /fits_task 0\.92/);
+  const req = jev.requests.slice(before).find((r) => r.path === "/v1/systemone")!;
+  assert.equal(req.auth, `Bearer ${TOKEN}`);
+  assert.equal(req.body.model, "jev-latest");
+  // State is an object with named fields, and carries the task the criteria judge against.
+  assert.equal(req.body.state.call.command, "git push origin HEAD");
+  assert.deepEqual(req.body.state.rule_reasons, ["git push"]);
+  assert.equal(req.body.state.session.title, "Auto");
+  assert.match(req.body.state.session.task, /please push/);
+  assert.deepEqual(Object.keys(req.body.questions).sort(), ["deletes_data", "fits_task", "hard_to_undo", "reaches_outside"]);
+  assert.ok(Object.values(req.body.questions).every((q: any) => q.type === "noul"));
+});
 
-test("while Jev reviews, the card shows reviewing and the session is not waiting on the user", { skip }, async () => {
-  enable();
-  judge.replies.push({ probabilities: [0.95, 0.04, 0.01], delayMs: 800 });
+test("while the judge rates, the card shows judging and the session is not waiting on the user", { skip }, async () => {
+  await enable();
+  jev.replies.push({ nouls: SAFE, delayMs: 800 });
   const req = await cardFor(sessionId, "please push");
-  assert.equal(req.review.state, "reviewing");
+  assert.equal(req.judge.state, "judging");
   assert.notEqual(mgr.summary(sessionId).status, "waiting");
   await settle(sessionId);
   assert.equal(mgr.summary(sessionId).pending.length, 0);
 });
 
-test("a call below the safe threshold waits for the user with Jev's rating", { skip }, async () => {
-  enable();
-  const req = await cardFor(sessionId, "please rm the build dir", (r) => r.review?.state !== "reviewing");
-  assert.equal(req.review.state, "waiting");
-  assert.equal(req.review.rating, "risky");
-  assert.equal(req.review.pSafe, 0.1);
-  assert.match(req.review.note, /risky/);
+test("a call that deletes data waits for the user, rated risky, with Jev's answers", { skip }, async () => {
+  await enable();
+  const req = await cardFor(sessionId, "please rm the build dir", judged);
+  assert.equal(req.judge.state, "waiting");
+  assert.equal(req.judge.rating, "risky");
+  assert.match(req.judge.note, /risky/);
+  assert.match(req.judge.note, /deletes_data 0\.90/);
   assert.equal(mgr.summary(sessionId).status, "waiting");
   await deny(sessionId, req);
 });
 
-test("a dangerous rating names the dangerous level", { skip }, async () => {
-  enable();
-  judge.replies.push({ probabilities: [0.05, 0.15, 0.8] });
-  const req = await cardFor(sessionId, "please rm the build dir", (r) => r.review?.state !== "reviewing");
-  assert.equal(req.review.rating, "dangerous");
+test("hard to undo plus deleting data or reaching outside is dangerous", { skip }, async () => {
+  await enable();
+  for (const nouls of [
+    { deletes_data: 0.9, reaches_outside: 0.1, hard_to_undo: 0.9, fits_task: 0.5 },
+    { deletes_data: 0.1, reaches_outside: 0.9, hard_to_undo: 0.9, fits_task: 0.5 },
+  ]) {
+    jev.replies.push({ nouls });
+    const req = await cardFor(sessionId, "please push", judged);
+    assert.equal(req.judge.rating, "dangerous");
+    await deny(sessionId, req);
+  }
+  jev.replies.push({ nouls: { deletes_data: 0.1, reaches_outside: 0.1, hard_to_undo: 0.9, fits_task: 0.9 } });
+  const req = await cardFor(sessionId, "please push", judged);
+  assert.equal(req.judge.rating, "risky", "hard to undo alone is risky");
   await deny(sessionId, req);
 });
 
-test("the safe threshold is the user's setting", { skip }, async () => {
-  enable({ judge: { kind: "jev", jevBaseUrl: judge.url, safeThreshold: 0.99 } });
-  const req = await cardFor(sessionId, "please push", (r) => r.review?.state !== "reviewing");
-  assert.equal(req.review.state, "waiting");
-  assert.equal(req.review.pSafe, 0.95);
-  await deny(sessionId, req);
-  enable({ judge: { kind: "jev", jevBaseUrl: judge.url, safeThreshold: 0.95 } });
+test("safe needs every risk below the no cut-off and the task fit above the yes cut-off", { skip }, async () => {
+  await enable();
+  for (const [name, nouls] of [
+    ["an unsettled risk", { ...SAFE, reaches_outside: 0.35 }],
+    ["an unsettled task fit", { ...SAFE, fits_task: 0.65 }],
+  ] as const) {
+    jev.replies.push({ nouls });
+    const req = await cardFor(sessionId, "please push", judged);
+    assert.equal(req.judge.state, "waiting", name);
+    await deny(sessionId, req);
+  }
+  // The cut-offs are the user's settings.
+  await enable({ noBelow: 0.4, yesAbove: 0.6 });
+  jev.replies.push({ nouls: { ...SAFE, reaches_outside: 0.35, fits_task: 0.65 } });
   const added = await run(sessionId, "please push");
-  assert.ok(added.some((m: any) => m.role === "autoDecision"), "P(safe) equal to the threshold passes");
+  assert.ok(added.some((m: any) => m.role === "autoAnswer"), "inside the user's cut-offs it is safe");
 });
 
 for (const [name, reply, why] of [
   ["an HTTP error", { status: 500 }, /HTTP 500/],
-  ["a timeout", { probabilities: [0.95, 0.04, 0.01], delayMs: 3000 }, /no answer within/],
-  ["an unreadable answer", { body: "<html>nope</html>" }, /no risk probabilities/],
-  ["an out-of-range answer", { body: '{"answers":{"risk":{"probabilities":{"0":1e999,"1":0,"2":0}}}}' }, /no risk probabilities/],
+  ["a timeout", { nouls: SAFE, delayMs: 3000 }, /no answer within/],
+  ["an unreadable answer", { body: "<html>nope</html>" }, /unreadable/],
+  ["a missing answer", { nouls: { deletes_data: 0.1, reaches_outside: 0.1, hard_to_undo: 0.1 } }, /unreadable/],
+  ["a probability above 1", { nouls: { ...SAFE, fits_task: 1.2 } }, /unreadable/],
+  ["a negative probability", { nouls: { ...SAFE, deletes_data: -0.1 } }, /unreadable/],
 ] as const) {
   test(`when Jev fails with ${name}, the card waits for the user with a failure note`, { skip }, async () => {
-    enable();
-    judge.replies.push(reply);
-    const req = await cardFor(sessionId, "please push", (r) => r.review?.state !== "reviewing");
-    assert.equal(req.review.state, "failed");
-    assert.match(req.review.note, why);
+    await enable();
+    jev.replies.push(reply);
+    const req = await cardFor(sessionId, "please push", judged);
+    assert.equal(req.judge.state, "failed");
+    assert.match(req.judge.note, why);
     assert.equal(mgr.summary(sessionId).status, "waiting");
     await deny(sessionId, req);
   });
 }
 
-test("when Jev is unreachable, the card waits for the user", { skip }, async () => {
-  enable({ judge: { kind: "jev", jevBaseUrl: "http://127.0.0.1:9/v1", safeThreshold: 0.8 } });
-  const req = await cardFor(sessionId, "please push", (r) => r.review?.state !== "reviewing");
-  assert.equal(req.review.state, "failed");
-  assert.match(req.review.note, /^Jev failed/);
+test("when the judge is unreachable, the card waits for the user and says why", { skip }, async () => {
+  await enable();
+  // Point the saved settings at a port that was just free: nothing listens, so the connection is refused.
+  const closed = http.createServer();
+  await new Promise<void>((r) => closed.listen(0, "127.0.0.1", () => r()));
+  const port = (closed.address() as AddressInfo).port;
+  await new Promise((r) => closed.close(r));
+  auto.saveAutoApproveSettings(db, { judge: { ...auto.getAutoApproveSettings(db).judge, baseUrl: `http://127.0.0.1:${port}/v1` } });
+  const req = await cardFor(sessionId, "please push", judged);
+  assert.equal(req.judge.state, "failed");
+  assert.match(req.judge.note, /failed: .*ECONNREFUSED/);
   await deny(sessionId, req);
 });
 
-test("the user's answer during a review wins and the late verdict is dropped", { skip }, async () => {
-  enable();
-  judge.replies.push({ probabilities: [0.95, 0.04, 0.01], delayMs: 1000 });
+test("the user's answer during judging wins: pi gets exactly one answer and no late allow", { skip }, async () => {
+  await enable();
+  jev.replies.push({ nouls: SAFE, delayMs: 1000 });
   const req = await cardFor(sessionId, "please push");
-  assert.equal(req.review.state, "reviewing");
+  assert.equal(req.judge.state, "judging");
+  // Watch what reaches pi for this request.
+  const proc = mgr.live.get(sessionId).proc;
+  const writes: any[] = [];
+  const write = proc.write.bind(proc);
+  proc.write = (rec: any) => {
+    if (rec.id === req.id) writes.push(rec);
+    return write(rec);
+  };
   const from = events.length;
+  const answeredBefore = jev.answered();
   await deny(sessionId, req);
-  await new Promise((r) => setTimeout(r, 1300));
-  assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_decision"), "no automatic answer after the user's");
-  const t = (await mgr.snapshot(sessionId)).transcript;
-  assert.ok(JSON.stringify(t.messages.findLast((m: any) => m.role === "toolResult").content).includes("denied"));
+  // Wait for the judge to deliver its late verdict, then let the server handle it.
+  await waitFor(() => jev.answered() > answeredBefore);
+  await new Promise((r) => setTimeout(r, 200));
+  proc.write = write;
+  assert.deepEqual(writes.map((w) => w.value), ["Deny"]);
+  assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"), "no automatic answer after the user's");
 });
 
 test("decisions are never sent to the risk judge", { skip }, async () => {
-  enable();
-  const before = judge.requests.length;
+  await enable();
+  const before = jev.requests.length;
   await mgr.send(sessionId, "ask me something");
   const req = await waitFor(() => mgr.summary(sessionId).pending[0]);
   assert.equal(req.kind, "decision");
-  assert.equal(req.review, undefined);
+  assert.equal(req.judge, undefined);
   mgr.respond(sessionId, req.id, { value: "Postgres" });
   await settle(sessionId);
-  assert.equal(judge.requests.length, before);
+  assert.equal(jev.requests.length, before);
 });
 
-test("with auto-approve off, permissions wait for the user and Jev is not asked", { skip }, async () => {
+test("with auto-approve off, permissions wait for the user and the judge is not asked", { skip }, async () => {
   auto.saveAutoApproveSettings(db, { enabled: false });
-  const before = judge.requests.length;
+  const before = jev.requests.length;
   const req = await cardFor(sessionId, "please push");
-  assert.equal(req.review, undefined);
+  assert.equal(req.judge, undefined);
   assert.equal(mgr.summary(sessionId).status, "waiting");
   await deny(sessionId, req);
-  assert.equal(judge.requests.length, before);
+  assert.equal(jev.requests.length, before);
 });
 
-test("Settings → Test reports whether Jev answers with the saved URL and token", { skip }, async () => {
-  enable();
+test("an OpenAI-compatible judge answers with one word: only SAFE allows", { skip }, async () => {
+  await enable({ baseUrl: chat.url, model: "mock-judge" });
+  const added = await run(sessionId, "please push");
+  const line = added.find((m: any) => m.role === "autoAnswer");
+  assert.equal(line.by, "mock-judge");
+  const req = chat.requests.findLast((r) => r.path === "/v1/chat/completions")!;
+  assert.equal(req.body.model, "mock-judge");
+  assert.match(JSON.stringify(req.body.messages), /git push origin HEAD/);
+
+  const risky = await cardFor(sessionId, "please rm the build dir", judged);
+  assert.equal(risky.judge.rating, "risky");
+  await deny(sessionId, risky);
+  chat.replies.push({ text: "<think>it deletes things</think>\nDANGEROUS" });
+  const dangerous = await cardFor(sessionId, "please push", judged);
+  assert.equal(dangerous.judge.rating, "dangerous");
+  await deny(sessionId, dangerous);
+  chat.replies.push({ text: "Probably fine, I think." });
+  const unclear = await cardFor(sessionId, "please push", judged);
+  assert.equal(unclear.judge.state, "failed");
+  assert.match(unclear.judge.note, /SAFE, RISKY or DANGEROUS/);
+  await deny(sessionId, unclear);
+});
+
+test("Settings → Test reports whether the saved judge answers", { skip }, async () => {
+  await enable();
   const ok = await auto.testJudge(auto.getAutoApproveSettings(db), auto.autoApproveKeys(secrets));
   assert.equal(ok.ok, true);
-  assert.match(ok.message, /P\(safe\)=0\.95/);
-  judge.replies.push({ status: 401 });
+  assert.match(ok.message, /jev-latest/);
+  jev.replies.push({ status: 401 });
   const bad = await auto.testJudge(auto.getAutoApproveSettings(db), auto.autoApproveKeys(secrets));
   assert.equal(bad.ok, false);
   assert.match(bad.message, /HTTP 401/);
+});
+
+test("the judge token never reaches pi: not its environment, not the model's requests", { skip }, async () => {
+  const pid = mgr.live.get(sessionId).proc.pid;
+  const environ = fs.readFileSync(`/proc/${pid}/environ`, "utf8");
+  assert.ok(environ.length > 0);
+  assert.ok(!environ.includes(TOKEN));
+  assert.ok(!JSON.stringify(mock.requests).includes(TOKEN));
 });

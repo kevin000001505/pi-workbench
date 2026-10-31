@@ -26,7 +26,8 @@ import {
   ticketsPrompt,
   validateTickets,
 } from "./pipeline.ts";
-import { autoApproveKeys, getAutoApproveSettings, reviewPermission } from "./autoapprove.ts";
+import { waitsOnUser } from "../../shared/pending.ts";
+import { autoApproveKeys, getAutoApproveSettings, judgePermission } from "./autoapprove.ts";
 import { createWorktree, getRepo, removeWorktree, slugify, worktreeNeedsSetup } from "./repos.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
@@ -47,8 +48,8 @@ export type UiRequest = {
   tool?: string;
   subject?: string;
   reasons?: string[];
-  /** permission under auto-approve: the risk judge's review, then why it still waits for the user. */
-  review?: { state: "reviewing" | "waiting" | "failed"; by: "jev"; rating?: string; pSafe?: number; note?: string };
+  /** permission under auto-approve: the risk judge's rating, then why it still waits for the user. */
+  judge?: { state: "judging" | "waiting" | "failed"; by: string; rating?: string; note?: string };
   createdAt: number;
 };
 
@@ -105,6 +106,13 @@ type Live = {
   finished?: { status: "done" | "blocked"; note: string };
   lastSettleAborted: boolean;
 };
+
+/** What the agent is working on: the latest user message, cut to what a judge needs to read. */
+function latestTask(t: Transcript): string {
+  const m = t.messages.findLast((x) => x.role === "user");
+  const text = typeof m?.content === "string" ? m.content : Array.isArray(m?.content) ? m.content.map((b) => (b.type === "text" ? b.text : "")).join("") : "";
+  return text.length > 2000 ? `${text.slice(0, 2000)}…` : text;
+}
 
 const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs automatically on this repository's first pi-workbench session. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push.`;
 
@@ -205,7 +213,7 @@ export class SessionManager extends EventEmitter {
   private status(s: Live): SessionStatus {
     if (s.starting) return "starting";
     if (!s.proc || s.proc.exited) return s.error ? "error" : "stopped";
-    if ([...s.pending.values()].some((r) => r.review?.state !== "reviewing")) return "waiting";
+    if ([...s.pending.values()].some(waitsOnUser)) return "waiting";
     return s.transcript.busy ? "running" : "idle";
   }
 
@@ -495,8 +503,8 @@ export class SessionManager extends EventEmitter {
       Object.assign(req, { kind: "decision", title: String(envelope.question ?? "") });
     }
     if (req.kind === "permission" && getAutoApproveSettings(this.db).enabled) {
-      req.review = { state: "reviewing", by: "jev" };
-      void this.autoReview(id, s, req);
+      req.judge = { state: "judging", by: getAutoApproveSettings(this.db).judge.model };
+      void this.autoJudge(id, s, req);
     }
     s.pending.set(req.id, req);
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
@@ -504,30 +512,38 @@ export class SessionManager extends EventEmitter {
   }
 
   /** Put a permission to the risk judge; answer it when it is safe, otherwise leave it for the user. */
-  private async autoReview(id: string, s: Live, req: UiRequest) {
+  private async autoJudge(id: string, s: Live, req: UiRequest) {
     const row = this.row(id);
-    const verdict = await reviewPermission(
-      { tool: req.tool ?? "", subject: req.subject ?? "", reasons: req.reasons ?? [], cwd: row.worktree, repo: row.repo_id },
+    const ticket = this.tickets(id).find((t) => t.status === "running");
+    const session = {
+      title: row.title,
+      task: latestTask(s.transcript),
+      repo: row.repo_id,
+      worktree: row.worktree,
+      ...(ticket ? { ticket: `#${ticket.num} ${ticket.title}` } : {}),
+    };
+    const verdict = await judgePermission(
+      { tool: req.tool ?? "", subject: req.subject ?? "", reasons: req.reasons ?? [], session },
       getAutoApproveSettings(this.db),
       autoApproveKeys(this.secrets),
     );
     // Answered by the user, or dropped with its process or run: the verdict is stale.
     if (!s.pending.has(req.id)) return;
-    if (verdict.decision === "allow") {
-      const ev = { type: "wb_auto_decision", requestId: req.id, tool: req.tool, subject: req.subject, decision: "allow", by: verdict.by, pSafe: verdict.pSafe, timestamp: Date.now() };
+    if (verdict.outcome === "allow") {
+      const ev = { type: "wb_auto_answer", requestId: req.id, tool: req.tool, subject: req.subject, answer: "allow", by: verdict.by, detail: verdict.detail, timestamp: Date.now() };
       applyEvent(s.transcript, ev);
       this.emit("event", id, ev);
       this.answer(id, s, req, { type: "extension_ui_response", id: req.id, value: "Allow" });
       return;
     }
-    req.review = verdict.decision === "user"
-      ? { state: "waiting", by: verdict.by, rating: verdict.rating, pSafe: verdict.pSafe, note: verdict.note }
+    req.judge = verdict.outcome === "user"
+      ? { state: "waiting", by: verdict.by, rating: verdict.rating, note: verdict.note }
       : { state: "failed", by: verdict.by, note: verdict.note };
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
     this.emitSummary(id, true);
   }
 
-  /** Write the answer to pi and drop the request; a review still running for it finds it gone. */
+  /** Write the answer to pi and drop the request; a judgement still running for it finds it gone. */
   private answer(id: string, s: Live, req: UiRequest, record: RpcRecord) {
     s.proc!.write(record);
     s.pending.delete(req.id);

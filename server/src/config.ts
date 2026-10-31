@@ -26,6 +26,8 @@ export const config = {
   extensionPath: path.resolve(process.env.PI_EXTENSION ?? path.join(appRoot, "pi-extension", "workbench.ts")),
   webDir: path.resolve(process.env.WEB_DIR ?? path.join(appRoot, "web", "dist")),
   masterKey: process.env.WORKBENCH_MASTER_KEY ?? "",
+  /** How long the risk judge may take before a permission falls back to the user. */
+  autoApproveTimeoutMs: Number(process.env.AUTO_APPROVE_TIMEOUT_MS ?? 60_000),
   githubApi: process.env.GITHUB_API_URL ?? "https://api.github.com",
   /** Where repos are cloned from; tests point it at local bare repos. */
   githubCloneBase: process.env.GITHUB_CLONE_BASE ?? "https://github.com",

@@ -6,12 +6,12 @@ import { config } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { GitEnv } from "./git.ts";
 import { GitHub, GitHubError } from "./github.ts";
-import { AUTO_APPROVE_SCOPE, autoApproveKeys, autoApproveView, getAutoApproveSettings, saveAutoApproveSettings, setAutoApproveKey, testJudge } from "./autoapprove.ts";
+import { autoApproveKeys, autoApproveView, configureAutoApprove, getAutoApproveSettings, listJudgeModels, saveAutoApproveKey, testJudge } from "./autoapprove.ts";
 import { checkRequestOrigin, type Ctx, HttpError, readJson, Router, sendJson, serveStatic } from "./http.ts";
 import { listModels, probeEndpoint } from "./llm.ts";
 import { draftPr, openPr, changes } from "./prs.ts";
 import { addRepo, assertRepoName, clonePath, getRepo, listRepos, repoNeedsSetup, requireTrackedRepo } from "./repos.ts";
-import { GLOBAL_SCOPE, SecretStore } from "./secrets.ts";
+import { assertUserScope, GLOBAL_SCOPE, SecretStore, userSecrets } from "./secrets.ts";
 import { SessionManager } from "./sessions.ts";
 import { applySsh, saveSshHosts, sshView, testSshHost } from "./ssh.ts";
 import {
@@ -229,17 +229,18 @@ const router = new Router()
 
   // --- settings & secrets ---------------------------------------------------------------
   .on("GET", "/api/settings", () => ({ model: getModelSettings(db), approval: getApprovalSettings(db), autoApprove: autoApproveView(db, secrets) }))
-  .on("PUT", "/api/settings/auto-approve", ({ body }) => {
-    saveAutoApproveSettings(db, body);
+  .on("PUT", "/api/settings/auto-approve", async ({ body }) => {
+    await configureAutoApprove(db, secrets, body);
     return autoApproveView(db, secrets);
   })
   .on("PUT", "/api/settings/auto-approve/keys", ({ body }) => {
-    // Keys are write-only: set with a value, cleared with null; the answer only says which are set.
-    if (body.key !== "jevToken") throw new HttpError(400, `Unknown key ${body.key}`);
-    if (body.value !== null && (typeof body.value !== "string" || !body.value.trim())) throw new HttpError(400, "Value is empty");
-    setAutoApproveKey(secrets, body.key, body.value === null ? null : body.value.trim());
+    saveAutoApproveKey(secrets, body);
     return autoApproveView(db, secrets);
   })
+  // The judge URL's model list (with the saved token): it also tells which protocol the judge speaks.
+  .on("GET", "/api/settings/auto-approve/models", ({ query }) =>
+    listJudgeModels(query.get("baseUrl") || getAutoApproveSettings(db).judge.baseUrl, autoApproveKeys(secrets).judgeToken),
+  )
   .on("POST", "/api/settings/auto-approve/test", () => testJudge(getAutoApproveSettings(db), autoApproveKeys(secrets)))
   .on("PUT", "/api/settings/model", ({ body }) => {
     const model = saveModelSettings(db, body);
@@ -264,11 +265,11 @@ const router = new Router()
     );
   })
   .on("GET", "/api/ssh", () => sshView(db, secrets))
-  // The auto-approve keys have their own scope and routes; the Secrets page never sees them.
-  .on("GET", "/api/secrets", () => secrets.list().filter((s) => s.scope !== AUTO_APPROVE_SCOPE))
+  // Reserved scopes (the auto-approve keys) have their own routes; the Secrets page never sees them.
+  .on("GET", "/api/secrets", () => userSecrets(secrets))
   .on("PUT", "/api/secrets", ({ body }) => {
     const scope = String(body.scope ?? GLOBAL_SCOPE);
-    if (scope !== GLOBAL_SCOPE && !getRepo(db, scope)) throw new HttpError(400, `Unknown scope ${scope}`);
+    assertUserScope(scope, (s) => !!getRepo(db, s));
     if (typeof body.value !== "string" || body.value === "") throw new HttpError(400, "Value is empty");
     secrets.set(scope, String(body.name ?? ""), body.value);
     if (body.name === "GITHUB_TOKEN") identity = undefined;
@@ -279,7 +280,8 @@ const router = new Router()
     // scope may itself contain a slash (owner/name), so the name is the last segment.
     const parts = params.scope.split("/");
     const name = parts.pop()!;
-    if (parts.join("/") === AUTO_APPROVE_SCOPE) throw new HttpError(400, `Unknown scope ${AUTO_APPROVE_SCOPE}`);
+    // Any listed scope may be cleaned up (even a removed repo's), but never a reserved one.
+    assertUserScope(parts.join("/"), () => true);
     secrets.delete(parts.join("/"), name);
     if (parts.join("/") === GLOBAL_SCOPE) applySsh(db, secrets, config.agentHome, config.piAgentDir);
     return { ok: true };

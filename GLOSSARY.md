@@ -39,7 +39,7 @@ The mode in which permissions are answered by the risk judge and the reviewer in
 _Avoid_: autopilot, YOLO mode
 
 **Risk judge**:
-The model that rates a permission as safe, risky, or dangerous: Jev, or a local model on the agent's own endpoint.
+The model at the judge URL that rates a permission as safe, risky, or dangerous: Jev through TypeSafe's API, or any OpenAI-compatible model, such as a local one.
 _Avoid_: decision model, classifier
 
 **Reviewer**:

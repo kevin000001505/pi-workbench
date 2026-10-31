@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.ts";
 import { notificationsEnabled, setNotifications, useStore } from "../store.tsx";
-import type { ApprovalRule, ApprovalSettings, AutoApproveSettings, ModelSettings, ProbeResult } from "../types.ts";
+import type { ApprovalRule, ApprovalSettings, AutoApproveSettings, JudgeModels, JudgeProtocol, ModelSettings, ProbeResult } from "../types.ts";
 import { PageHeader, Spinner } from "../ui.tsx";
 
 const THINKING_FORMATS = ["", "qwen-chat-template", "qwen", "chat-template", "openai", "deepseek"];
@@ -211,22 +211,47 @@ function RulesForm() {
   );
 }
 
+const PROTOCOL_LABEL: Record<JudgeProtocol, string> = {
+  systemone: "TypeSafe System One (Jev): yes/no questions, rated in code",
+  openai: "OpenAI-compatible chat: the model answers SAFE, RISKY or DANGEROUS",
+};
+
 function AutoApproveForm() {
   const { toast } = useStore();
   const [a, setA] = useState<AutoApproveSettings | null>(null);
   const [token, setToken] = useState("");
+  const [list, setList] = useState<JudgeModels | string | null>(null);
   const [test, setTest] = useState<{ ok: boolean; message: string } | "running" | null>(null);
   useEffect(() => {
     api.get<{ autoApprove: AutoApproveSettings }>("/api/settings").then((s) => setA(s.autoApprove)).catch((e) => toast(e.message, "error"));
   }, [toast]);
+
+  /** The URL's model list also says which protocol it speaks; the saved token is sent with it. */
+  const listModels = async (baseUrl: string) => {
+    setList("Listing models…");
+    try {
+      setList(await api.get<JudgeModels>(`/api/settings/auto-approve/models?baseUrl=${encodeURIComponent(baseUrl)}`));
+    } catch (e) {
+      setList((e as Error).message);
+    }
+  };
+  useEffect(() => {
+    if (a) void listModels(a.judge.baseUrl);
+    // List once on load; afterwards on demand.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [a === null]);
+
   if (!a) return <Spinner />;
   const setJudge = (patch: Partial<AutoApproveSettings["judge"]>) => setA({ ...a, judge: { ...a.judge, ...patch } });
+  const listed = list && typeof list === "object" ? list : null;
+  const protocol = listed?.protocol ?? a.judge.protocol;
 
   const saveToken = async (value: string | null) => {
     try {
-      setA(await api.put<AutoApproveSettings>("/api/settings/auto-approve/keys", { key: "jevToken", value }));
+      setA(await api.put<AutoApproveSettings>("/api/settings/auto-approve/keys", { key: "judgeToken", value }));
       setToken("");
-      toast(value ? "Jev token saved." : "Jev token removed.");
+      toast(value ? "Judge token saved." : "Judge token removed.");
+      void listModels(a.judge.baseUrl);
     } catch (err) {
       toast((err as Error).message, "error");
     }
@@ -265,30 +290,51 @@ function AutoApproveForm() {
         permissions in every session
       </label>
       <label>
-        Jev base URL
+        Risk judge URL
         <div className="row gap">
-          <input className="input mono grow" value={a.judge.jevBaseUrl} onChange={(e) => setJudge({ jevBaseUrl: e.target.value })} />
-          <button type="button" className="btn btn-sm" disabled={test === "running"} onClick={runTest} title="Tests the saved URL and token">
-            {test === "running" ? <Spinner small /> : null} Test
+          <input
+            className="input mono grow"
+            value={a.judge.baseUrl}
+            placeholder="https://api.typesafe.ai/v1 or http://llama-swap:8080/v1"
+            onChange={(e) => setJudge({ baseUrl: e.target.value })}
+          />
+          <button type="button" className="btn btn-sm" onClick={() => listModels(a.judge.baseUrl)}>
+            List models
           </button>
         </div>
-        {test && test !== "running" && <span className={`small ${test.ok ? "muted" : "text-error"}`}>{test.message}</span>}
+        {typeof list === "string" && <span className={`small ${list.endsWith("…") ? "muted" : "text-error"}`}>{list}</span>}
+        {listed && <span className="muted small">{PROTOCOL_LABEL[listed.protocol]}</span>}
       </label>
       <label>
-        Jev token {a.keys.jevToken ? <span className="tag tag-ok">set</span> : <span className="tag tag-warn">not set</span>}
+        Model
+        {listed && listed.models.length > 0 ? (
+          <select className="input mono" value={a.judge.model} onChange={(e) => setJudge({ model: e.target.value })}>
+            {!listed.models.includes(a.judge.model) && <option value={a.judge.model}>{a.judge.model} (not served here)</option>}
+            {listed.models.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input className="input mono" value={a.judge.model} onChange={(e) => setJudge({ model: e.target.value })} />
+        )}
+      </label>
+      <label>
+        Token {a.keys.judgeToken ? <span className="tag tag-ok">set</span> : <span className="tag">not set</span>}
         <div className="row gap">
           <input
             className="input mono grow"
             type="password"
             autoComplete="off"
-            placeholder={a.keys.jevToken ? "Enter a new token to replace it" : "TypeSafe API key"}
+            placeholder={a.keys.judgeToken ? "Enter a new token to replace it" : "TypeSafe API key; leave empty for a local server"}
             value={token}
             onChange={(e) => setToken(e.target.value)}
           />
           <button type="button" className="btn btn-sm" disabled={!token.trim()} onClick={() => saveToken(token.trim())}>
             Save token
           </button>
-          {a.keys.jevToken && (
+          {a.keys.judgeToken && (
             <button type="button" className="btn btn-sm btn-ghost" onClick={() => saveToken(null)}>
               Remove
             </button>
@@ -296,20 +342,27 @@ function AutoApproveForm() {
         </div>
         <span className="muted small">Stored encrypted and never shown again. It is never given to the agent.</span>
       </label>
-      <label>
-        Safe threshold
-        <input
-          className="input mono"
-          type="number"
-          min={0.01}
-          max={1}
-          step={0.01}
-          value={a.judge.safeThreshold}
-          onChange={(e) => setJudge({ safeThreshold: Number(e.target.value) })}
-        />
-        <span className="muted small">A call runs without you only when Jev’s P(safe) is at least this value.</span>
-      </label>
-      <div className="row end">
+      {protocol === "systemone" && (
+        <div className="row gap wrap">
+          <label>
+            Yes above
+            <input className="input mono" type="number" min={0.01} max={0.99} step={0.01} value={a.judge.yesAbove} onChange={(e) => setJudge({ yesAbove: Number(e.target.value) })} />
+          </label>
+          <label>
+            No below
+            <input className="input mono" type="number" min={0.01} max={0.99} step={0.01} value={a.judge.noBelow} onChange={(e) => setJudge({ noBelow: Number(e.target.value) })} />
+          </label>
+          <span className="muted small grow">
+            Jev answers four yes/no questions. A call is safe only when “deletes data”, “reaches outside” and “hard to undo” are all
+            below the no cut-off, and “fits the task” is above the yes cut-off.
+          </span>
+        </div>
+      )}
+      <div className="row gap end">
+        {test && test !== "running" && <span className={`small grow ${test.ok ? "muted" : "text-error"}`}>{test.message}</span>}
+        <button type="button" className="btn" disabled={test === "running"} onClick={runTest} title="Tests the saved settings and token">
+          {test === "running" ? <Spinner small /> : null} Test saved judge
+        </button>
         <button className="btn btn-primary">Save auto-approve</button>
       </div>
     </form>

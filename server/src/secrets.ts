@@ -7,7 +7,8 @@ const NAME_RE = /^[A-Za-z_][A-Za-z0-9._-]{0,127}$/;
 /**
  * Env-variable store, encrypted at rest with AES-256-GCM. Values go in and never come back out over
  * the API: `envFor()` is the only decrypting path to a pi process environment; `get()` also decrypts
- * for the LLM key and for ssh key materialization into `~/.ssh` (see ssh.ts, ADR 0001).
+ * for the LLM key, for ssh key materialization into `~/.ssh` (see ssh.ts, ADR 0001), and for the
+ * auto-approve keys in their own scope, which `envFor()` never reads (see autoapprove.ts, ADR 0002).
  */
 export class SecretStore {
   private key: Buffer;
@@ -72,4 +73,15 @@ export class SecretStore {
     decipher.setAuthTag(Buffer.from(row.tag, "base64"));
     return Buffer.concat([decipher.update(Buffer.from(row.data, "base64")), decipher.final()]).toString("utf8");
   }
+}
+
+/** Scopes the workbench keeps for itself (`wb:…`, e.g. the auto-approve keys): the Secrets page never sees them. */
+const isReserved = (scope: string) => scope.startsWith("wb:");
+
+/** The secrets the Secrets page lists: names only, reserved scopes left out. */
+export const userSecrets = (store: SecretStore) => store.list().filter((s) => !isReserved(s.scope));
+
+/** The Secrets page may write or delete only the global scope and tracked repos' scopes. */
+export function assertUserScope(scope: string, isRepo: (scope: string) => boolean) {
+  if (isReserved(scope) || (scope !== GLOBAL_SCOPE && !isRepo(scope))) throw Object.assign(new Error(`Unknown scope ${scope}`), { status: 400 });
 }
