@@ -105,6 +105,14 @@ type Live = {
 
 const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs automatically on this repository's first pi-workbench session. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push.`;
 
+/** Standing instruction appended to every pi system prompt: explanations follow the asd-ste100 skill. */
+const EXPLAIN_PROMPT =
+  "When you explain, answer, or summarize for the user, write in Simplified Technical English " +
+  "following the asd-ste100 skill (load it with the Skill tool, or read its SKILL.md if the tool " +
+  "cannot find it) and follow its rules: short active-voice sentences, one idea per sentence, " +
+  "one name per thing, no undefined jargon, keep every hedge. " +
+  "Code, tool output, and text the user asked for verbatim are exempt.";
+
 const toTicket = (r: TicketRow): Ticket => ({
   num: r.num,
   title: r.title,
@@ -338,6 +346,7 @@ export class SessionManager extends EventEmitter {
         "--name", `${row.title}${label}`,
         "--approve", "--offline",
         "--provider", PROVIDER_ID, "--model", m.modelId,
+        "--append-system-prompt", EXPLAIN_PROMPT,
       ],
       { cwd: row.worktree, env },
     );
