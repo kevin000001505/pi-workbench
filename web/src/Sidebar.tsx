@@ -82,6 +82,9 @@ export function Sidebar({ route, onClose }: { route: Route; onClose: () => void 
           <a href="#/secrets" className={route.page === "secrets" ? "active" : ""}>
             Secrets
           </a>
+          <a href="#/ssh" className={route.page === "ssh" ? "active" : ""}>
+            SSH
+          </a>
           <a href="#/settings" className={route.page === "settings" ? "active" : ""}>
             Settings
           </a>

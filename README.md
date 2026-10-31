@@ -23,6 +23,7 @@ A self-hosted web UI for the [pi coding agent](https://github.com/earendil-works
 - **GitHub.** **Create repo** makes a new GitHub repo and clones it. **Create PR**: the model drafts a title and body from the diff, you edit them, then the server pushes the branch and opens the PR. After that, the session header shows the PR's state and CI.
 - **Solve issues.** The **Issues** page lists the open issues of a tracked repo — search by keyword, filter by label — and opens any issue with its discussion (the body and comments, rendered as markdown). **Start session** opens the New session form pre-filled with the issue's title and body; one session solves one issue, its PR body carries a `Closes #n` line, and merging the PR closes the issue.
 - **Secrets.** Environment variables for sessions, global or per repo. They are encrypted at rest (AES-256-GCM) and write-only from the browser.
+- **SSH keys.** Paste a machine's private key on the SSH page. It is stored encrypted like any other secret (never shown again) and materialized in the agent's home as `~/.ssh/<name>` — a 0600 file in a 0700 directory — so the agent can `ssh` to your machines.
 - **Model settings.** Base URL, model ID (listed from the endpoint's `/v1/models`), context window, and output limit. The default is `Qwen3.8-27B-radiance` with 256K (262144) tokens. **Test** makes the same chat call a session makes and reports the URL, status, and likely cause when it fails (wrong service, missing `/v1`, unknown model, missing key, unreachable host).
 
 ## The pipeline

@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import type { Db, SecretRow } from "./db.ts";
 
 export const GLOBAL_SCOPE = "global";
-const NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const NAME_RE = /^[A-Za-z_][A-Za-z0-9._-]{0,127}$/;
 
 /**
  * Env-variable store, encrypted at rest with AES-256-GCM. Values go in and never come back out over

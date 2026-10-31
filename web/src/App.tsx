@@ -5,6 +5,7 @@ import { NewSession } from "./pages/NewSession.tsx";
 import { Repos } from "./pages/Repos.tsx";
 import { Secrets } from "./pages/Secrets.tsx";
 import { Settings } from "./pages/Settings.tsx";
+import { Ssh } from "./pages/Ssh.tsx";
 import { SessionView } from "./session/SessionView.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { useStore } from "./store.tsx";
@@ -23,6 +24,7 @@ export type Route =
     }
   | { page: "repos" }
   | { page: "secrets" }
+  | { page: "ssh" }
   | { page: "settings" }
   | { page: "issues"; repoId?: string; number?: number };
 
@@ -51,6 +53,7 @@ function parse(hash: string): Route {
       };
     case "repos":
     case "secrets":
+    case "ssh":
     case "settings":
       return { page };
     default:
@@ -99,6 +102,7 @@ export function App() {
         )}
         {route.page === "repos" && <Repos />}
         {route.page === "secrets" && <Secrets />}
+        {route.page === "ssh" && <Ssh />}
         {route.page === "settings" && <Settings />}
         {route.page === "issues" && <Issues repoId={route.repoId} number={route.number} />}
       </main>
