@@ -81,6 +81,23 @@ export async function listModels(m: ModelSettings, apiKey?: string): Promise<str
   return (body.data ?? []).map((d) => d.id).sort();
 }
 
+/**
+ * Settings → Model's list for a URL the request names. The key goes only to the saved base URL's
+ * origin, so a request that names another host cannot make the server send the key there.
+ */
+export function listModelsAt(saved: ModelSettings, baseUrl: unknown, apiKey?: string): Promise<string[]> {
+  const url = typeof baseUrl === "string" && baseUrl ? baseUrl : saved.baseUrl;
+  return listModels({ ...saved, baseUrl: url }, sameOrigin(url, saved.baseUrl) ? apiKey : undefined);
+}
+
+function sameOrigin(a: string, b: string) {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return false;
+  }
+}
+
 /** One non-streaming chat completion; returns the assistant text with any <think> block removed. */
 export async function complete(m: ModelSettings, apiKey: string | undefined, system: string, user: string, maxTokens = 4000) {
   const res = await fetch(`${m.baseUrl.replace(/\/+$/, "")}/chat/completions`, {

@@ -4,7 +4,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { excerpt, explainFailure, explainModelError, looksLikeHtml } from "../../shared/endpoint.ts";
-import { probeEndpoint } from "../src/llm.ts";
+import { listModelsAt, probeEndpoint } from "../src/llm.ts";
 import { startMockLlm } from "./mock-llm.ts";
 
 // The page a user's endpoint returned for POST /v1/chat/completions.
@@ -88,4 +88,30 @@ test("explainFailure covers auth, server errors, DNS and timeouts", () => {
   assert.match(explainFailure({ url, error: "TypeError fetch failed ENOTFOUND" }), /doesn't resolve.*host\.docker\.internal/);
   assert.match(explainFailure({ url, error: "TimeoutError The operation was aborted due to timeout" }), /still be loading/);
   assert.equal(excerpt("a".repeat(300)).length, 201);
+});
+
+test("the model list sends the LLM key only to the saved base URL's origin", async () => {
+  // Two endpoints that record the Authorization header they get: the saved one and another host.
+  const seen: Record<string, (string | undefined)[]> = { saved: [], other: [] };
+  const listen = async (name: string) => {
+    const s = http.createServer((req, res) => {
+      seen[name].push(req.headers.authorization);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ data: [{ id: `${name}-model` }] }));
+    });
+    await new Promise<void>((r) => s.listen(0, "127.0.0.1", r));
+    return { s, url: `http://127.0.0.1:${(s.address() as AddressInfo).port}/v1` };
+  };
+  const saved = await listen("saved");
+  const other = await listen("other");
+  try {
+    const m = settings(saved.url);
+    assert.deepEqual(await listModelsAt(m, undefined, "sk-secret"), ["saved-model"]);
+    assert.deepEqual(await listModelsAt(m, `${saved.url}/`, "sk-secret"), ["saved-model"]);
+    assert.deepEqual(await listModelsAt(m, other.url, "sk-secret"), ["other-model"]);
+    assert.deepEqual(seen, { saved: ["Bearer sk-secret", "Bearer sk-secret"], other: [undefined] });
+  } finally {
+    await new Promise((r) => saved.s.close(r));
+    await new Promise((r) => other.s.close(r));
+  }
 });

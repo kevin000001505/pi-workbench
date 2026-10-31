@@ -21,7 +21,7 @@ function ModelForm() {
   const fetchModels = async (baseUrl: string) => {
     setProbe("Checking…");
     try {
-      const ids = await api.get<string[]>(`/api/models?baseUrl=${encodeURIComponent(baseUrl)}`);
+      const ids = await api.post<string[]>("/api/models", { baseUrl });
       setModels(ids);
       setProbe(`${ids.length} model${ids.length === 1 ? "" : "s"} at this endpoint`);
     } catch (e) {
