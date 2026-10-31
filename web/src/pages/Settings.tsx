@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.ts";
 import { notificationsEnabled, setNotifications, useStore } from "../store.tsx";
-import type { ApprovalRule, ApprovalSettings, ModelSettings, ProbeResult } from "../types.ts";
+import type { ApprovalRule, ApprovalSettings, AutoApproveSettings, ModelSettings, ProbeResult } from "../types.ts";
 import { PageHeader, Spinner } from "../ui.tsx";
 
 const THINKING_FORMATS = ["", "qwen-chat-template", "qwen", "chat-template", "openai", "deepseek"];
@@ -211,6 +211,111 @@ function RulesForm() {
   );
 }
 
+function AutoApproveForm() {
+  const { toast } = useStore();
+  const [a, setA] = useState<AutoApproveSettings | null>(null);
+  const [token, setToken] = useState("");
+  const [test, setTest] = useState<{ ok: boolean; message: string } | "running" | null>(null);
+  useEffect(() => {
+    api.get<{ autoApprove: AutoApproveSettings }>("/api/settings").then((s) => setA(s.autoApprove)).catch((e) => toast(e.message, "error"));
+  }, [toast]);
+  if (!a) return <Spinner />;
+  const setJudge = (patch: Partial<AutoApproveSettings["judge"]>) => setA({ ...a, judge: { ...a.judge, ...patch } });
+
+  const saveToken = async (value: string | null) => {
+    try {
+      setA(await api.put<AutoApproveSettings>("/api/settings/auto-approve/keys", { key: "jevToken", value }));
+      setToken("");
+      toast(value ? "Jev token saved." : "Jev token removed.");
+    } catch (err) {
+      toast((err as Error).message, "error");
+    }
+  };
+
+  const runTest = async () => {
+    setTest("running");
+    try {
+      setTest(await api.post<{ ok: boolean; message: string }>("/api/settings/auto-approve/test", {}));
+    } catch (e) {
+      setTest(null);
+      toast((e as Error).message, "error");
+    }
+  };
+
+  return (
+    <form
+      className="card form"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        try {
+          setA(await api.put<AutoApproveSettings>("/api/settings/auto-approve", { enabled: a.enabled, judge: a.judge }));
+          toast("Auto-approve saved. It applies to the next permission.");
+        } catch (err) {
+          toast((err as Error).message, "error");
+        }
+      }}
+    >
+      <h3>Auto-approve</h3>
+      <p className="muted small">
+        Permissions go to the risk judge first. A call it rates safe runs without you; any other call, or a judge failure, waits
+        for you with the judge’s note. Decisions (questions the agent asks you) always come to you.
+      </p>
+      <label className="check">
+        <input type="checkbox" checked={a.enabled} onChange={(e) => setA({ ...a, enabled: e.target.checked })} /> Auto-approve
+        permissions in every session
+      </label>
+      <label>
+        Jev base URL
+        <div className="row gap">
+          <input className="input mono grow" value={a.judge.jevBaseUrl} onChange={(e) => setJudge({ jevBaseUrl: e.target.value })} />
+          <button type="button" className="btn btn-sm" disabled={test === "running"} onClick={runTest} title="Tests the saved URL and token">
+            {test === "running" ? <Spinner small /> : null} Test
+          </button>
+        </div>
+        {test && test !== "running" && <span className={`small ${test.ok ? "muted" : "text-error"}`}>{test.message}</span>}
+      </label>
+      <label>
+        Jev token {a.keys.jevToken ? <span className="tag tag-ok">set</span> : <span className="tag tag-warn">not set</span>}
+        <div className="row gap">
+          <input
+            className="input mono grow"
+            type="password"
+            autoComplete="off"
+            placeholder={a.keys.jevToken ? "Enter a new token to replace it" : "TypeSafe API key"}
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+          />
+          <button type="button" className="btn btn-sm" disabled={!token.trim()} onClick={() => saveToken(token.trim())}>
+            Save token
+          </button>
+          {a.keys.jevToken && (
+            <button type="button" className="btn btn-sm btn-ghost" onClick={() => saveToken(null)}>
+              Remove
+            </button>
+          )}
+        </div>
+        <span className="muted small">Stored encrypted and never shown again. It is never given to the agent.</span>
+      </label>
+      <label>
+        Safe threshold
+        <input
+          className="input mono"
+          type="number"
+          min={0.01}
+          max={1}
+          step={0.01}
+          value={a.judge.safeThreshold}
+          onChange={(e) => setJudge({ safeThreshold: Number(e.target.value) })}
+        />
+        <span className="muted small">A call runs without you only when Jev’s P(safe) is at least this value.</span>
+      </label>
+      <div className="row end">
+        <button className="btn btn-primary">Save auto-approve</button>
+      </div>
+    </form>
+  );
+}
+
 function NotificationsCard() {
   const [on, setOn] = useState(notificationsEnabled());
   const supported = "Notification" in window;
@@ -246,6 +351,7 @@ export function Settings() {
       <PageHeader title="Settings" />
       <ModelForm />
       <RulesForm />
+      <AutoApproveForm />
       <NotificationsCard />
     </div>
   );

@@ -150,6 +150,12 @@ export function applyEvent(t: Transcript, ev: RpcEvent): Transcript {
     case "tool_execution_end":
       delete t.tools[ev.toolCallId];
       break;
+    case "wb_auto_decision": {
+      // A permission auto-approve answered without the user: kept inline as an audit line.
+      const { type: _type, ...fields } = ev;
+      t.messages.push({ role: "autoDecision", content: "", ...fields });
+      break;
+    }
     case "compaction_end":
       if (ev.result?.estimatedTokensAfter) t.contextTokens = ev.result.estimatedTokensAfter;
       break;

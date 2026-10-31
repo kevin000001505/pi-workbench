@@ -12,7 +12,19 @@ export type UiRequest = {
   tool?: string;
   subject?: string;
   reasons?: string[];
+  /** permission under auto-approve: the risk judge's review, then why it still waits for the user. */
+  review?: { state: "reviewing" | "waiting" | "failed"; by: "jev"; rating?: string; pSafe?: number; note?: string };
   createdAt: number;
+};
+
+/** Requests that wait on the user: a permission the risk judge is still reviewing does not. */
+export const waitingOn = (s: { pending: UiRequest[] }) => s.pending.filter((r) => r.review?.state !== "reviewing");
+
+export type AutoApproveSettings = {
+  enabled: boolean;
+  judge: { kind: "jev"; jevBaseUrl: string; safeThreshold: number };
+  /** Whether each write-only key is set; values never come back. */
+  keys: { jevToken: boolean };
 };
 
 export type SessionSummary = {

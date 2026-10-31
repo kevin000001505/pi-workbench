@@ -26,6 +26,7 @@ import {
   ticketsPrompt,
   validateTickets,
 } from "./pipeline.ts";
+import { autoApproveKeys, getAutoApproveSettings, reviewPermission } from "./autoapprove.ts";
 import { createWorktree, getRepo, removeWorktree, slugify, worktreeNeedsSetup } from "./repos.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
@@ -46,6 +47,8 @@ export type UiRequest = {
   tool?: string;
   subject?: string;
   reasons?: string[];
+  /** permission under auto-approve: the risk judge's review, then why it still waits for the user. */
+  review?: { state: "reviewing" | "waiting" | "failed"; by: "jev"; rating?: string; pSafe?: number; note?: string };
   createdAt: number;
 };
 
@@ -202,7 +205,7 @@ export class SessionManager extends EventEmitter {
   private status(s: Live): SessionStatus {
     if (s.starting) return "starting";
     if (!s.proc || s.proc.exited) return s.error ? "error" : "stopped";
-    if (s.pending.size > 0) return "waiting";
+    if ([...s.pending.values()].some((r) => r.review?.state !== "reviewing")) return "waiting";
     return s.transcript.busy ? "running" : "idle";
   }
 
@@ -491,7 +494,43 @@ export class SessionManager extends EventEmitter {
     } else if (envelope?.wb === "decision") {
       Object.assign(req, { kind: "decision", title: String(envelope.question ?? "") });
     }
+    if (req.kind === "permission" && getAutoApproveSettings(this.db).enabled) {
+      req.review = { state: "reviewing", by: "jev" };
+      void this.autoReview(id, s, req);
+    }
     s.pending.set(req.id, req);
+    this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
+    this.emitSummary(id, true);
+  }
+
+  /** Put a permission to the risk judge; answer it when it is safe, otherwise leave it for the user. */
+  private async autoReview(id: string, s: Live, req: UiRequest) {
+    const row = this.row(id);
+    const verdict = await reviewPermission(
+      { tool: req.tool ?? "", subject: req.subject ?? "", reasons: req.reasons ?? [], cwd: row.worktree, repo: row.repo_id },
+      getAutoApproveSettings(this.db),
+      autoApproveKeys(this.secrets),
+    );
+    // Answered by the user, or dropped with its process or run: the verdict is stale.
+    if (!s.pending.has(req.id)) return;
+    if (verdict.decision === "allow") {
+      const ev = { type: "wb_auto_decision", requestId: req.id, tool: req.tool, subject: req.subject, decision: "allow", by: verdict.by, pSafe: verdict.pSafe, timestamp: Date.now() };
+      applyEvent(s.transcript, ev);
+      this.emit("event", id, ev);
+      this.answer(id, s, req, { type: "extension_ui_response", id: req.id, value: "Allow" });
+      return;
+    }
+    req.review = verdict.decision === "user"
+      ? { state: "waiting", by: verdict.by, rating: verdict.rating, pSafe: verdict.pSafe, note: verdict.note }
+      : { state: "failed", by: verdict.by, note: verdict.note };
+    this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
+    this.emitSummary(id, true);
+  }
+
+  /** Write the answer to pi and drop the request; a review still running for it finds it gone. */
+  private answer(id: string, s: Live, req: UiRequest, record: RpcRecord) {
+    s.proc!.write(record);
+    s.pending.delete(req.id);
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
     this.emitSummary(id, true);
   }
@@ -504,10 +543,7 @@ export class SessionManager extends EventEmitter {
     if (response.cancelled) record.cancelled = true;
     else if (req.method === "confirm") record.confirmed = !!response.confirmed;
     else record.value = response.value ?? "";
-    s.proc.write(record);
-    s.pending.delete(requestId);
-    this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
-    this.emitSummary(id, true);
+    this.answer(id, s, req, record);
   }
 
   /** Send user text. While the agent runs it steers (or follows up) instead of starting a new run. */
