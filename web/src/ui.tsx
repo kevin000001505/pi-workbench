@@ -87,10 +87,19 @@ export const ago = (ts: number) => {
   return `${Math.round(s / 86400)}d ago`;
 };
 
+/** The repo id and issue number out of an `owner/name#123` issue ref; null when the ref is malformed. */
+export function parseIssueRef(issueRef: string | null | undefined): { repoId: string; number: string } | null {
+  if (!issueRef) return null;
+  const i = issueRef.lastIndexOf("#");
+  const number = i >= 0 ? issueRef.slice(i + 1) : "";
+  if (i < 1 || !/^\d+$/.test(number)) return null;
+  return { repoId: issueRef.slice(0, i), number };
+}
+
 /** The issue-detail hash link for an `owner/name#123` ref. */
-export const issueUrl = (issueRef: string) => {
-  const [repoId, number] = issueRef.split("#");
-  return `#/issues/${encodeURIComponent(repoId)}/${number}`;
+export const issueUrl = (issueRef: string | null | undefined) => {
+  const p = parseIssueRef(issueRef);
+  return p ? `#/issues/${encodeURIComponent(p.repoId)}/${p.number}` : "#/issues";
 };
 
 export const kTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}K` : String(n));

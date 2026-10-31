@@ -4,7 +4,7 @@ import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import type { Transcript as TranscriptT } from "../../../shared/transcript.ts";
 import type { PrStatus } from "../types.ts";
-import { Empty, kTokens, Spinner, StatusPill, issueUrl } from "../ui.tsx";
+import { Empty, kTokens, Spinner, StatusPill, issueUrl, parseIssueRef } from "../ui.tsx";
 import { ChangesModal } from "./ChangesModal.tsx";
 import { Composer } from "./Composer.tsx";
 import { PendingCard } from "./PendingCard.tsx";
@@ -43,6 +43,7 @@ export function SessionView({ id }: { id: string }) {
   const store = useStore();
   const { sessions, watch, toast, version } = store;
   const s = sessions[id];
+  const issue = parseIssueRef(s?.issueRef);
   const t = store.transcript(id);
   const [pr, setPr] = useState(false);
   const [changes, setChanges] = useState(false);
@@ -123,9 +124,9 @@ export function SessionView({ id }: { id: string }) {
             <span className="mono small muted ellipsis">
               {s.repoId} · {s.branch}
             </span>
-            {s.issueRef && (
+            {issue && (
               <a className="mono small muted" href={issueUrl(s.issueRef)} title={`Solving ${s.issueRef}`}>
-                Issue #{s.issueRef.split("#")[1]}
+                Issue #{issue.number}
               </a>
             )}
             {s.contextTokens > 0 && (

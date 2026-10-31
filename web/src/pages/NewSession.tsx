@@ -4,7 +4,7 @@ import { api } from "../api.ts";
 import { SkillPicker, useSkills } from "../session/Composer.tsx";
 import { useStore } from "../store.tsx";
 import type { Repo, SessionSummary, Skill } from "../types.ts";
-import { Empty, PageHeader, Spinner } from "../ui.tsx";
+import { Empty, PageHeader, Spinner, issueUrl, parseIssueRef } from "../ui.tsx";
 
 export function NewSession({
   repoId,
@@ -22,8 +22,8 @@ export function NewSession({
 }) {
   const { toast, upsert } = useStore();
   const [repos, setRepos] = useState<Repo[] | null>(null);
-  const fromIssue = issueRef ? issueRef.split("#") : undefined; // [repoId, number]
-  const [repo, setRepo] = useState(fromIssue?.[0] ?? repoId ?? "");
+  const fromIssue = parseIssueRef(issueRef); // the origin issue's repo id + number, or null
+  const [repo, setRepo] = useState(fromIssue?.repoId ?? repoId ?? "");
   const [base, setBase] = useState(prefillBase ?? "");
   const [title, setTitle] = useState(prefillTitle ?? "");
   const [prompt, setPrompt] = useState(prefillPrompt ?? "");
@@ -85,8 +85,8 @@ export function NewSession({
           {fromIssue && (
             <div className="alert alert-info">
               Solving{" "}
-              <a className="mono" href={`#/issues/${encodeURIComponent(fromIssue[0])}/${fromIssue[1]}`}>
-                {fromIssue[0]}#{fromIssue[1]}
+              <a className="mono" href={issueUrl(issueRef)}>
+                {fromIssue.repoId}#{fromIssue.number}
               </a>
               {" "}
               — the repository is locked to it.

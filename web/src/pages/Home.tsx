@@ -1,6 +1,6 @@
 import { phaseLabel } from "../session/PipelinePanel.tsx";
 import { useStore } from "../store.tsx";
-import { ago, Empty, PageHeader, StatusPill, issueUrl } from "../ui.tsx";
+import { ago, Empty, PageHeader, StatusPill, issueUrl, parseIssueRef } from "../ui.tsx";
 
 export function Home() {
   const { sessions } = useStore();
@@ -35,38 +35,41 @@ export function Home() {
         </a>
       </PageHeader>
       <div className="cards">
-        {all.map((s) => (
-          <a key={s.id} href={`#/session/${s.id}`} className={`card session-card ${s.pending.length || s.attention ? "card-attn" : ""}`}>
-            <div className="row between">
-              <StatusPill status={s.status} />
-              <span className="muted small">{ago(s.updatedAt)}</span>
-            </div>
-            <h3>{s.title}</h3>
-            <p className="muted small mono ellipsis">
-              {s.repoId} · {s.branch}
-            </p>
-            <p className="card-activity ellipsis">
-              {s.pending.length > 0
-                ? s.pending[0].kind === "permission"
-                  ? `⚠ Wants to run: ${s.pending[0].subject}`
-                  : `❓ ${s.pending[0].title}`
-                : s.attention
-                  ? `⚠ ${s.attention}`
-                  : s.heldPrompt
-                    ? "Setting up skills; your task is queued"
-                    : s.activity || (s.error ? s.error : "Idle")}
-            </p>
-            {s.mode === "pipeline" && <p className="small phase-line">{phaseLabel(s)}</p>}
-            <div className="row gap">
-              {s.issueRef && (
-                <a className="tag" href={issueUrl(s.issueRef)} title={`Solving ${s.issueRef}`}>
-                  Issue #{s.issueRef.split("#")[1]}
-                </a>
-              )}
-              {s.prUrl && <span className="tag">PR #{s.prNumber}</span>}
-            </div>
-          </a>
-        ))}
+        {all.map((s) => {
+          const issue = parseIssueRef(s.issueRef);
+          return (
+            <a key={s.id} href={`#/session/${s.id}`} className={`card session-card ${s.pending.length || s.attention ? "card-attn" : ""}`}>
+              <div className="row between">
+                <StatusPill status={s.status} />
+                <span className="muted small">{ago(s.updatedAt)}</span>
+              </div>
+              <h3>{s.title}</h3>
+              <p className="muted small mono ellipsis">
+                {s.repoId} · {s.branch}
+              </p>
+              <p className="card-activity ellipsis">
+                {s.pending.length > 0
+                  ? s.pending[0].kind === "permission"
+                    ? `⚠ Wants to run: ${s.pending[0].subject}`
+                    : `❓ ${s.pending[0].title}`
+                  : s.attention
+                    ? `⚠ ${s.attention}`
+                    : s.heldPrompt
+                      ? "Setting up skills; your task is queued"
+                      : s.activity || (s.error ? s.error : "Idle")}
+              </p>
+              {s.mode === "pipeline" && <p className="small phase-line">{phaseLabel(s)}</p>}
+              <div className="row gap">
+                {issue && (
+                  <a className="tag" href={issueUrl(s.issueRef)} title={`Solving ${s.issueRef}`}>
+                    Issue #{issue.number}
+                  </a>
+                )}
+                {s.prUrl && <span className="tag">PR #{s.prNumber}</span>}
+              </div>
+            </a>
+          );
+        })}
       </div>
     </div>
   );
