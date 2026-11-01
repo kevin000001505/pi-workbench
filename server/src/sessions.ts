@@ -27,8 +27,18 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { getAutoApproveSettings, judgePermission, savedJudgeToken } from "./autoapprove.ts";
+import {
+  getAutoApproveSettings,
+  judgePermission,
+  reviewPermission,
+  reviewerName,
+  savedJudgeToken,
+  savedReviewerKey,
+  transcriptExcerpt,
+  type ReviewContext,
+} from "./autoapprove.ts";
 import { createWorktree, getRepo, removeWorktree, slugify, worktreeNeedsSetup } from "./repos.ts";
+import { loadSshHosts } from "./ssh.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
 import { type RpcRecord, RpcProcess } from "./rpc.ts";
@@ -50,6 +60,8 @@ export type UiRequest = {
   reasons?: string[];
   /** permission under auto-approve: the risk judge's rating, then why it still waits for the user. */
   judge?: { state: "judging" | "waiting" | "failed"; by: string; rating?: string; note?: string };
+  /** permission under auto-approve: the reviewer's pass over a call the judge did not rate safe. */
+  review?: { state: "reviewing" | "escalated" | "failed"; by?: string; note?: string };
   createdAt: number;
 };
 
@@ -517,9 +529,10 @@ export class SessionManager extends EventEmitter {
     this.emitSummary(id, true);
   }
 
-  /** Put a permission to the risk judge; answer it when it is safe, otherwise leave it for the user. */
+  /** Put a permission to the risk judge; answer it when it is safe, otherwise send it to the reviewer or leave it for the user. */
   private async autoJudge(id: string, s: Live, req: UiRequest) {
     const row = this.row(id);
+    const settings = getAutoApproveSettings(this.db);
     const ticket = this.tickets(id).find((t) => t.status === "running");
     const session = {
       title: row.title,
@@ -528,11 +541,8 @@ export class SessionManager extends EventEmitter {
       worktree: row.worktree,
       ...(ticket ? { ticket: `#${ticket.num} ${ticket.title}` } : {}),
     };
-    const verdict = await judgePermission(
-      { tool: req.tool ?? "", subject: req.subject ?? "", reasons: req.reasons ?? [], session },
-      getAutoApproveSettings(this.db),
-      savedJudgeToken(this.secrets),
-    );
+    const permission = { tool: req.tool ?? "", subject: req.subject ?? "", reasons: req.reasons ?? [], session };
+    const verdict = await judgePermission(permission, settings, savedJudgeToken(this.secrets));
     // Answered by the user, or dropped with its process or run: the verdict is stale.
     if (!s.pending.has(req.id)) return;
     if (verdict.outcome === "allow") {
@@ -542,11 +552,56 @@ export class SessionManager extends EventEmitter {
       this.answer(id, s, req, { type: "extension_ui_response", id: req.id, value: "Allow" });
       return;
     }
-    req.judge = verdict.outcome === "user"
-      ? { state: "waiting", by: verdict.by, rating: verdict.rating, note: verdict.note }
-      : { state: "failed", by: verdict.by, note: verdict.note };
+    if (verdict.outcome === "failed") {
+      req.judge = { state: "failed", by: verdict.by, note: verdict.note };
+      this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
+      this.emitSummary(id, true);
+      return;
+    }
+    // The judge did not rate it safe. Without a configured reviewer the card waits with the rating, as before.
+    if (!settings.reviewer.model || !savedReviewerKey(this.secrets)) {
+      req.judge = { state: "waiting", by: verdict.by, rating: verdict.rating, note: verdict.note };
+      this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
+      this.emitSummary(id, true);
+      return;
+    }
+    req.judge = { state: "waiting", by: verdict.by, rating: verdict.rating, note: verdict.note };
+    req.review = { state: "reviewing", by: reviewerName(settings) };
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
     this.emitSummary(id, true);
+    const rv = await reviewPermission(permission, this.reviewContext(id, s, row, verdict), settings, savedReviewerKey(this.secrets));
+    // Answered by the user, or dropped with its process or run: the verdict is stale.
+    if (!s.pending.has(req.id)) return;
+    if (rv.outcome === "allow" || rv.outcome === "deny") {
+      const ev = { type: "wb_auto_answer", requestId: req.id, tool: req.tool, subject: req.subject, answer: rv.outcome, by: rv.by, detail: rv.reason, timestamp: Date.now() };
+      applyEvent(s.transcript, ev);
+      this.emit("event", id, ev);
+      // A deny answers with the envelope the extension turns into a reviewer-deny block.
+      this.answer(id, s, req, { type: "extension_ui_response", id: req.id, value: rv.outcome === "allow" ? "Allow" : JSON.stringify({ wb: "deny", by: rv.by, reason: rv.reason }) });
+      return;
+    }
+    // An escalation or a reviewer failure: the card waits for the user with the note.
+    req.review = { state: rv.outcome === "escalate" ? "escalated" : "failed", by: rv.by, note: rv.outcome === "escalate" ? rv.reason : rv.note };
+    this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
+    this.emitSummary(id, true);
+  }
+
+  /** What the reviewer sees, from what the manager already holds (ADR 0002). */
+  private reviewContext(id: string, s: Live, row: SessionRow, verdict: { rating?: string; detail?: string }): ReviewContext {
+    const ticket = this.tickets(id).find((t) => t.status === "running");
+    return {
+      title: row.title,
+      ...latestTask(s.transcript),
+      phase: row.phase,
+      ...(ticket ? { ticket: { num: ticket.num, title: ticket.title, body: ticket.body } } : {}),
+      repo: row.repo_id,
+      branch: row.branch,
+      worktree: row.worktree,
+      sshHosts: loadSshHosts(this.db).map((h) => ({ alias: h.alias, user: h.user, hostname: h.hostname })),
+      recent: transcriptExcerpt(s.transcript.messages),
+      rating: verdict.rating,
+      judgeDetail: verdict.detail,
+    };
   }
 
   /** Write the answer to pi and drop the request; a judgement still running for it finds it gone. */

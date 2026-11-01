@@ -12,14 +12,17 @@ import type { SecretStore } from "./secrets.ts";
  * - OpenAI-compatible chat (llama-swap, any local server): the model answers with one word.
  * A TypeSafe model list means System One. An OpenAI-shaped list (llama-swap) can hold either, so
  * Save asks the model one System One request.
- * A safe rating answers Allow for that one call; anything else, including a judge failure, waits
- * for the user with a note on why. All question wording and the rule live in this module.
+ * A safe rating answers Allow for that one call. Any other rating goes to the reviewer: a frontier
+ * model (Claude or OpenAI) that allows the call, denies it with a reason the agent reads, or
+ * escalates it to the user. A deny answers with the `{"wb": "deny"}` envelope the extension turns
+ * into a reviewer-deny block; an escalation and a failure leave the card for the user with a note.
+ * All question wording and the rule live in this module.
  */
 
 /** Keys live in their own SecretStore scope: `envFor` reads only global and repo scopes, so they never reach pi. */
 export const AUTO_APPROVE_SCOPE = "wb:auto-approve";
-/** Rows in that scope: the token, and the origin it was saved for. */
-const SECRET_NAMES = { judgeToken: "JUDGE_TOKEN", tokenOrigin: "JUDGE_TOKEN_ORIGIN" } as const;
+/** Rows in that scope: the token (and the origin it was saved for), and the reviewer API key. */
+const SECRET_NAMES = { judgeToken: "JUDGE_TOKEN", tokenOrigin: "JUDGE_TOKEN_ORIGIN", reviewerKey: "REVIEWER_KEY" } as const;
 /** The judge token and the origin it was saved for: it is only ever sent to that origin. */
 export type JudgeToken = { judgeToken?: string; tokenOrigin?: string };
 
@@ -35,11 +38,18 @@ export type AutoApproveSettings = {
     yesAbove: number;
     noBelow: number;
   };
+  /** The frontier model that reviews the calls the judge did not rate safe. An empty model id means the reviewer is off. */
+  reviewer: {
+    provider: "anthropic" | "openai";
+    baseUrl: string;
+    model: string;
+  };
 };
 
 const DEFAULTS: AutoApproveSettings = {
   enabled: false,
   judge: { baseUrl: "https://api.typesafe.ai/v1", model: "jev-latest", protocol: "systemone", yesAbove: 0.7, noBelow: 0.3 },
+  reviewer: { provider: "anthropic", baseUrl: "https://api.anthropic.com", model: "" },
 };
 
 const bad = (message: string) => Object.assign(new Error(message), { status: 400 });
@@ -57,7 +67,7 @@ function httpUrl(value: unknown, message: string): URL {
 export function getAutoApproveSettings(db: Db): AutoApproveSettings {
   const saved = getSetting<Partial<AutoApproveSettings>>(db, "autoApprove") ?? {};
   // A safety switch: anything stored but a real `true` reads as off.
-  return { enabled: saved.enabled === true, judge: pickJudge({ ...DEFAULTS.judge, ...saved.judge }) };
+  return { enabled: saved.enabled === true, judge: pickJudge({ ...DEFAULTS.judge, ...saved.judge }), reviewer: pickReviewer({ ...DEFAULTS.reviewer, ...saved.reviewer }) };
 }
 
 const pickJudge = (j: AutoApproveSettings["judge"]): AutoApproveSettings["judge"] => ({
@@ -68,12 +78,19 @@ const pickJudge = (j: AutoApproveSettings["judge"]): AutoApproveSettings["judge"
   noBelow: j.noBelow,
 });
 
+const pickReviewer = (r: AutoApproveSettings["reviewer"]): AutoApproveSettings["reviewer"] => ({
+  provider: r.provider,
+  baseUrl: r.baseUrl,
+  model: r.model,
+});
+
 /** Validate and store. The protocol must already be known; `configureAutoApprove` detects it. */
 export function saveAutoApproveSettings(db: Db, input: Partial<AutoApproveSettings>): AutoApproveSettings {
   const cur = getAutoApproveSettings(db);
   if (input.enabled !== undefined && typeof input.enabled !== "boolean") throw bad("Auto-approve must be on or off (true or false)");
-  const next: AutoApproveSettings = { enabled: input.enabled ?? cur.enabled, judge: pickJudge({ ...cur.judge, ...input.judge }) };
+  const next: AutoApproveSettings = { enabled: input.enabled ?? cur.enabled, judge: pickJudge({ ...cur.judge, ...input.judge }), reviewer: pickReviewer({ ...cur.reviewer, ...input.reviewer }) };
   validateJudge(next.judge);
+  validateReviewer(next.reviewer);
   putSetting(db, "autoApprove", next);
   return next;
 }
@@ -86,6 +103,13 @@ function validateJudge(j: AutoApproveSettings["judge"]) {
   if (!ok(j.noBelow) || !ok(j.yesAbove) || !(j.noBelow < j.yesAbove)) {
     throw bad("The cut-offs must be between 0 and 1, with the no cut-off below the yes cut-off");
   }
+}
+
+/** The URL must always be a valid http(s) one; an empty model id is the "not configured" state. */
+function validateReviewer(r: AutoApproveSettings["reviewer"]) {
+  httpUrl(r.baseUrl, "The reviewer URL must be an http:// or https:// URL");
+  if (r.provider !== "anthropic" && r.provider !== "openai") throw bad(`Unknown reviewer provider ${String(r.provider)}`);
+  if (typeof r.model !== "string") throw bad("The reviewer model must be a string");
 }
 
 /**
@@ -170,26 +194,39 @@ function tokenFor(url: string, saved: JudgeToken): string | undefined {
   }
 }
 
-/** Keys are write-only: set with a value and the judge URL it belongs to, cleared with null. */
+/** Keys are write-only: set with a value and, for the judge token, the URL it belongs to; cleared with null. */
 export function saveAutoApproveKey(secrets: SecretStore, body: { key?: unknown; value?: unknown; baseUrl?: unknown }) {
-  if (body.key !== "judgeToken") throw bad(`Unknown key ${String(body.key)}`);
-  if (body.value === null) {
-    secrets.delete(AUTO_APPROVE_SCOPE, SECRET_NAMES.judgeToken);
-    return secrets.delete(AUTO_APPROVE_SCOPE, SECRET_NAMES.tokenOrigin);
+  if (body.key === "judgeToken") {
+    if (body.value === null) {
+      secrets.delete(AUTO_APPROVE_SCOPE, SECRET_NAMES.judgeToken);
+      return secrets.delete(AUTO_APPROVE_SCOPE, SECRET_NAMES.tokenOrigin);
+    }
+    if (typeof body.value !== "string" || !body.value.trim()) throw bad("Value is empty");
+    // Check both values before writing either: a half-saved token could go to the old host.
+    const origin = httpUrl(body.baseUrl, "Say which judge URL (http:// or https://) the token is for").origin;
+    secrets.setAll(AUTO_APPROVE_SCOPE, [
+      [SECRET_NAMES.judgeToken, body.value.trim()],
+      [SECRET_NAMES.tokenOrigin, origin],
+    ]);
+    return;
   }
-  if (typeof body.value !== "string" || !body.value.trim()) throw bad("Value is empty");
-  // Check both values before writing either: a half-saved token could go to the old host.
-  const origin = httpUrl(body.baseUrl, "Say which judge URL (http:// or https://) the token is for").origin;
-  secrets.setAll(AUTO_APPROVE_SCOPE, [
-    [SECRET_NAMES.judgeToken, body.value.trim()],
-    [SECRET_NAMES.tokenOrigin, origin],
-  ]);
+  if (body.key === "reviewerKey") {
+    if (body.value === null) return secrets.delete(AUTO_APPROVE_SCOPE, SECRET_NAMES.reviewerKey);
+    if (typeof body.value !== "string" || !body.value.trim()) throw bad("Value is empty");
+    secrets.set(AUTO_APPROVE_SCOPE, SECRET_NAMES.reviewerKey, body.value.trim());
+    return;
+  }
+  throw bad(`Unknown key ${String(body.key)}`);
 }
 
-/** What Settings shows: the settings, whether the token is set and for which origin, never its value. */
+/** What Settings shows: the settings, whether the keys are set and for which origin, never their values. */
 export function autoApproveView(db: Db, secrets: SecretStore) {
   const saved = savedJudgeToken(secrets);
-  return { ...getAutoApproveSettings(db), keys: { judgeToken: !!saved.judgeToken, tokenOrigin: saved.judgeToken ? saved.tokenOrigin : undefined } };
+  return { ...getAutoApproveSettings(db), keys: { judgeToken: !!saved.judgeToken, tokenOrigin: saved.judgeToken ? saved.tokenOrigin : undefined, reviewerKey: !!savedReviewerKey(secrets) } };
+}
+
+export function savedReviewerKey(secrets: SecretStore): string | undefined {
+  return secrets.get(AUTO_APPROVE_SCOPE, SECRET_NAMES.reviewerKey);
 }
 
 // --- judging -------------------------------------------------------------------------------
@@ -342,6 +379,166 @@ function why(err: unknown) {
   const e = err as Error & { cause?: { message?: string } };
   if (e.name === "TimeoutError") return `no answer within ${Math.round(config.autoApproveTimeoutMs / 1000)} s`;
   return [e.message, e.cause?.message].filter(Boolean).join(": ");
+}
+
+// --- reviewing ------------------------------------------------------------------------------
+
+/** What the reviewer sees, gathered by the caller (SessionManager) from what it already holds. */
+export type ReviewContext = {
+  title: string;
+  task: string;
+  skill?: string;
+  phase: string;
+  ticket?: { num: number; title: string; body: string };
+  repo: string;
+  branch: string;
+  worktree: string;
+  /** alias, user, hostname only: never key names or key values. */
+  sshHosts: { alias: string; user: string; hostname: string }[];
+  /** The recent conversation, one line per message (see transcriptExcerpt). */
+  recent: string;
+  /** The judge's non-safe rating and its answers, attached to the call. */
+  rating?: string;
+  judgeDetail?: string;
+};
+
+export type ReviewVerdict =
+  | { outcome: "allow"; by: string; reason: string }
+  | { outcome: "deny"; by: string; reason: string }
+  | { outcome: "escalate"; by: string; reason: string }
+  | { outcome: "failed"; by: string; note: string };
+
+/** The reviewer's name the agent and the transcript see: the provider, never the model id. */
+export const reviewerName = (settings: AutoApproveSettings) => (settings.reviewer.provider === "anthropic" ? "Claude" : "OpenAI");
+
+const REVIEWER_SYSTEM = [
+  "You review one tool call that a coding agent wants to run on the user's machines.",
+  "A risk judge already rated the call (see rating); you make the final call.",
+  "Decide with the verdict tool:",
+  "- allow: the call is safe to run for this task. Routine is routine; do not escalate the ordinary.",
+  "- deny: the call is a wrong or risky approach the agent can redo differently. Give a short reason the agent will read and act on.",
+  "- escalate: the call could damage data, other machines, or services beyond the task, or you cannot judge it from the context. Give a short reason for the user.",
+  "Give a one or two sentence reason in every case.",
+].join("\n");
+
+const VERDICT_TOOL = {
+  name: "verdict",
+  description: "Your verdict on the tool call.",
+  input_schema: {
+    type: "object",
+    properties: {
+      decision: { type: "string", enum: ["allow", "deny", "escalate"] },
+      reason: { type: "string" },
+    },
+    required: ["decision", "reason"],
+  },
+};
+
+const reviewerState = (p: Permission, ctx: ReviewContext) => ({
+  call: { tool: p.tool, command: p.subject },
+  rule_reasons: p.reasons,
+  rating: ctx.rating,
+  judge: ctx.judgeDetail,
+  session: {
+    title: ctx.title,
+    task: ctx.task,
+    ...(ctx.skill ? { skill: ctx.skill } : {}),
+    phase: ctx.phase,
+    ...(ctx.ticket ? { ticket: { num: ctx.ticket.num, title: ctx.ticket.title, body: ctx.ticket.body } } : {}),
+    repo: ctx.repo,
+    branch: ctx.branch,
+    worktree: ctx.worktree,
+    ssh_hosts: ctx.sshHosts.map((h) => `${h.alias} (${h.user}@${h.hostname})`),
+  },
+  recent_transcript: ctx.recent,
+});
+
+const readVerdict = (v: unknown): { decision: "allow" | "deny" | "escalate"; reason: string } | undefined => {
+  const o = v as { decision?: unknown; reason?: unknown };
+  if (!o || (o.decision !== "allow" && o.decision !== "deny" && o.decision !== "escalate")) return undefined;
+  if (typeof o.reason !== "string" || !o.reason.trim()) return undefined;
+  return { decision: o.decision, reason: o.reason };
+};
+
+/** Ask the reviewer about a call the judge did not rate safe. Never throws: a failure is a verdict too. */
+export async function reviewPermission(p: Permission, ctx: ReviewContext, settings: AutoApproveSettings, savedKey: string | undefined): Promise<ReviewVerdict> {
+  const by = reviewerName(settings);
+  if (!settings.reviewer.model) return { outcome: "failed", by, note: `${by} has no model id set.` };
+  if (!savedKey) return { outcome: "failed", by, note: `${by} has no API key set.` };
+  const state = reviewerState(p, ctx);
+  if (settings.reviewer.provider === "anthropic") {
+    let res: Response;
+    let text: string;
+    try {
+      res = await fetch(`${settings.reviewer.baseUrl.replace(/\/+$/, "")}/v1/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": savedKey, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({
+          model: settings.reviewer.model,
+          max_tokens: 1024,
+          system: REVIEWER_SYSTEM,
+          messages: [{ role: "user", content: JSON.stringify(state) }],
+          tools: [VERDICT_TOOL],
+          tool_choice: { type: "tool", name: "verdict" },
+        }),
+        signal: AbortSignal.timeout(config.autoApproveTimeoutMs),
+      });
+      text = await res.text();
+    } catch (err) {
+      return { outcome: "failed", by, note: `${by} failed: ${why(err)}` };
+    }
+    if (!res.ok) return { outcome: "failed", by, note: `${by} failed: HTTP ${res.status}${serverSays(text)}` };
+    let parsed: any;
+    try {
+      parsed = JSON.parse(text);
+    } catch {}
+    const use = (parsed?.content ?? []).find?.((b: any) => b?.type === "tool_use");
+    const verdict = use ? readVerdict(use.input) : undefined;
+    if (!verdict) return { outcome: "failed", by, note: `${by} failed: the verdict was unreadable (expected decision allow, deny or escalate with a reason)` };
+    return { outcome: verdict.decision, by, reason: verdict.reason };
+  }
+  let reply: string;
+  try {
+    const call = { maxTokens: 1024, timeoutMs: config.autoApproveTimeoutMs, temperature: 0 };
+    reply = await complete({ baseUrl: settings.reviewer.baseUrl, modelId: settings.reviewer.model }, savedKey, `${REVIEWER_SYSTEM} Reply with one JSON object: {"decision": "allow" | "deny" | "escalate", "reason": "..."}. Nothing else.`, JSON.stringify(state, null, 2), call);
+  } catch (err) {
+    const { status, body } = err as { status?: number; body?: string };
+    return { outcome: "failed", by, note: `${by} failed: ${status ? `HTTP ${status}${serverSays(body ?? "")}` : why(err)}` };
+  }
+  let verdict: { decision: "allow" | "deny" | "escalate"; reason: string } | undefined;
+  const json = /\{[\s\S]*\}/.exec(reply)?.[0];
+  if (json) {
+    try {
+      verdict = readVerdict(JSON.parse(json));
+    } catch {}
+  }
+  if (!verdict) return { outcome: "failed", by, note: `${by} failed: the verdict was unreadable (expected decision allow, deny or escalate with a reason)` };
+  return { outcome: verdict.decision, by, reason: verdict.reason };
+}
+
+/**
+ * The recent conversation for the reviewer's context: the newest messages that fit, one line per
+ * message, tool calls as `name args`. System messages and empty lines are dropped.
+ */
+export function transcriptExcerpt(messages: { role: string; content: unknown }[], maxChars = 1500): string {
+  const lines: string[] = [];
+  for (const m of messages.filter((x) => x.role !== "system").slice(-12)) {
+    let text: string;
+    if (typeof m.content === "string") text = m.content;
+    else if (Array.isArray(m.content)) {
+      text = (m.content as any[])
+        .map((b) => (b?.type === "text" ? b.text : b?.type === "toolCall" ? `${b.name} ${JSON.stringify(b.arguments ?? {})}` : ""))
+        .join(" ");
+    } else text = "";
+    const line = `[${m.role}] ${text.replace(/\s+/g, " ").trim()}`.trim();
+    if (line.length > 4) lines.push(line.slice(0, 400));
+  }
+  let out = "";
+  for (const line of lines.reverse()) {
+    if (out && line.length + out.length + 1 > maxChars) break;
+    out = out ? `${line}\n${out}` : line;
+  }
+  return out;
 }
 
 /** The call Settings → Test and the Save probe ask about. */

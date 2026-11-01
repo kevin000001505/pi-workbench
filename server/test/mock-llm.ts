@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
  * - a tool result → "Done: <first line of the result>"
  * - user text containing "ssh" → bash `ssh Media true` (hits the approval gate)
  * - "push" → bash `git push origin HEAD` (hits the approval gate)
+ * - "nuke" → bash `rm -rf /mnt/data` (the reviewer's scripted deny)
  * - "rm" → bash `rm -rf build`
  * - "ask" → ask_user with two options
  * - "list" → bash `ls`
@@ -158,6 +159,7 @@ function script(messages: { role: string; content: unknown }[]): Reply {
   }
   if (/\bssh\b/i.test(userText)) return { tool: { name: "bash", args: { command: "ssh Media true" } } };
   if (/\bpush\b/i.test(userText)) return { tool: { name: "bash", args: { command: "git push origin HEAD" } } };
+  if (/\bnuke\b/i.test(userText)) return { tool: { name: "bash", args: { command: "rm -rf /mnt/data" } } };
   if (/\brm\b/i.test(userText)) return { tool: { name: "bash", args: { command: "rm -rf build" } } };
   if (/\bask\b/i.test(userText)) {
     return { tool: { name: "ask_user", args: { question: "Which database should I use?", options: ["SQLite (Recommended)", "Postgres"] } } };
