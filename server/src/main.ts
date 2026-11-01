@@ -8,7 +8,7 @@ import type { GitEnv } from "./git.ts";
 import { GitHub, GitHubError } from "./github.ts";
 import { autoApproveView, configureAutoApprove, getAutoApproveSettings, listModelsFor, saveAutoApproveKey, savedJudgeToken, testJudge } from "./autoapprove.ts";
 import { checkRequestOrigin, type Ctx, HttpError, readJson, Router, sendJson, serveStatic } from "./http.ts";
-import { listModels, probeEndpoint } from "./llm.ts";
+import { listModelsAt, probeEndpoint } from "./llm.ts";
 import { draftPr, openPr, changes } from "./prs.ts";
 import { addRepo, assertRepoName, clonePath, getRepo, listRepos, repoNeedsSetup, requireTrackedRepo } from "./repos.ts";
 import { assertUserScope, GLOBAL_SCOPE, SecretStore, userSecrets } from "./secrets.ts";
@@ -251,11 +251,8 @@ const router = new Router()
     writePiConfig(db);
     return approval;
   })
-  .on("GET", "/api/models", async ({ query }) => {
-    const m = getModelSettings(db);
-    const baseUrl = query.get("baseUrl");
-    return listModels(baseUrl ? { ...m, baseUrl } : m, llmKey());
-  })
+  // A POST, so it passes the write-route checks: it calls out to a URL the request names.
+  .on("POST", "/api/models", ({ body }) => listModelsAt(getModelSettings(db), body.baseUrl, llmKey()))
   .on("POST", "/api/models/test", async ({ body }) => {
     const m = getModelSettings(db);
     return probeEndpoint(
