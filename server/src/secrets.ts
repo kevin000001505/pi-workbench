@@ -46,6 +46,19 @@ export class SecretStore {
       .run(scope, name, iv.toString("base64"), cipher.getAuthTag().toString("base64"), data.toString("base64"), Date.now());
   }
 
+  /** Set several secrets in one transaction: all of them are written, or none. */
+  setAll(scope: string, entries: [string, string][]) {
+    this.db.exec("BEGIN");
+    try {
+      for (const [name, value] of entries) this.set(scope, name, value);
+      this.db.exec("COMMIT");
+    } catch (err) {
+      // SQLite may already have rolled back (full disk, I/O error); keep the real error then.
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
   delete(scope: string, name: string) {
     this.db.prepare("DELETE FROM secrets WHERE scope = ? AND name = ?").run(scope, name);
   }

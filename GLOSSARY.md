@@ -46,6 +46,10 @@ _Avoid_: decision model, classifier
 The frontier model (Claude or OpenAI) that allows, denies, or escalates a permission the risk judge did not rate safe.
 _Avoid_: frontier model (as a role name), approver
 
+**Cut-off**:
+One of the two thresholds the user sets for the risk judge's yes/no answers: above the yes cut-off an answer counts as yes, below the no cut-off as no, and between them as unsettled.
+_Avoid_: threshold (too vague; there are two), confidence
+
 **Escalation**:
 The reviewer handing a permission back to the user because it could break something beyond the task.
 _Avoid_: fallback (a failed judge or reviewer also lands with the user, but no model chose it)

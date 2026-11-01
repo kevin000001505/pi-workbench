@@ -226,11 +226,11 @@ function AutoApproveForm() {
     api.get<{ autoApprove: AutoApproveSettings }>("/api/settings").then((s) => setA(s.autoApprove)).catch((e) => toast(e.message, "error"));
   }, [toast]);
 
-  /** The URL's model list also says which protocol it speaks; the saved token is sent with it. */
+  /** The URL's model list also says which protocol it speaks; the token goes along only to its own host. */
   const listModels = async (baseUrl: string) => {
     setList("Listing models…");
     try {
-      setList(await api.get<JudgeModels>(`/api/settings/auto-approve/models?baseUrl=${encodeURIComponent(baseUrl)}`));
+      setList(await api.post<JudgeModels>("/api/settings/auto-approve/models", { baseUrl }));
     } catch (e) {
       setList((e as Error).message);
     }
@@ -248,7 +248,9 @@ function AutoApproveForm() {
 
   const saveToken = async (value: string | null) => {
     try {
-      setA(await api.put<AutoApproveSettings>("/api/settings/auto-approve/keys", { key: "judgeToken", value }));
+      const view = await api.put<AutoApproveSettings>("/api/settings/auto-approve/keys", { key: "judgeToken", value, baseUrl: a.judge.baseUrl });
+      // Keep the judge being edited: the token was bound to its URL, which Save still has to store.
+      setA({ ...view, enabled: a.enabled, judge: a.judge });
       setToken("");
       toast(value ? "Judge token saved." : "Judge token removed.");
       void listModels(a.judge.baseUrl);
@@ -321,7 +323,14 @@ function AutoApproveForm() {
         )}
       </label>
       <label>
-        Token {a.keys.judgeToken ? <span className="tag tag-ok">set</span> : <span className="tag">not set</span>}
+        Token{" "}
+        {!a.keys.judgeToken ? (
+          <span className="tag">not set</span>
+        ) : a.keys.tokenOrigin ? (
+          <span className="tag tag-ok">set for {a.keys.tokenOrigin}</span>
+        ) : (
+          <span className="tag tag-warn">set for no host: save it again</span>
+        )}
         <div className="row gap">
           <input
             className="input mono grow"
@@ -340,7 +349,9 @@ function AutoApproveForm() {
             </button>
           )}
         </div>
-        <span className="muted small">Stored encrypted and never shown again. It is never given to the agent.</span>
+        <span className="muted small">
+          Stored encrypted and never shown again. It is sent only to the host it was saved for, and never given to the agent.
+        </span>
       </label>
       {protocol === "systemone" && (
         <div className="row gap wrap">

@@ -15,13 +15,15 @@ export type JudgeReply = {
 
 export const SAFE = { deletes_data: 0.04, reaches_outside: 0.05, hard_to_undo: 0.03, fits_task: 0.92 };
 export const RISKY = { deletes_data: 0.9, reaches_outside: 0.1, hard_to_undo: 0.6, fits_task: 0.8 };
+/** What a faithful Jev answers for `git push` of the session branch: it reaches outside, nothing else. */
+export const PUSH = { deletes_data: 0.03, reaches_outside: 0.95, hard_to_undo: 0.1, fits_task: 0.9 };
 
 /**
  * A scripted risk judge for the auto-approve tests, speaking one protocol:
  * - "systemone": TypeSafe's `GET /v1/models` ({ models: [{ name }] }) and `POST /v1/systemone` (Nouls);
  * - "openai": an OpenAI-compatible `GET /v1/models` ({ data: [{ id }] }) and `POST /v1/chat/completions`.
  * Queued `replies` answer first; otherwise it answers by the call in the state: `rm ` is risky,
- * anything else safe. With `token`, every request without that bearer token gets 403, like TypeSafe.
+ * `git push` reaches outside (and is otherwise safe), anything else safe. With `token`, every request without that bearer token gets 403, like TypeSafe.
  */
 export function startMockJudge(opts: { protocol: "systemone" | "openai"; model: string; token?: string }): Promise<{
   url: string;
@@ -59,7 +61,8 @@ export function startMockJudge(opts: { protocol: "systemone" | "openai"; model: 
 
     const state = JSON.stringify(opts.protocol === "systemone" ? body.state : body.messages);
     const risky = state.includes("rm ");
-    const reply = replies.shift() ?? (opts.protocol === "systemone" ? { nouls: risky ? RISKY : SAFE } : { text: risky ? "RISKY" : "SAFE" });
+    const push = state.includes("git push");
+    const reply = replies.shift() ?? (opts.protocol === "systemone" ? { nouls: risky ? RISKY : push ? PUSH : SAFE } : { text: risky ? "RISKY" : "SAFE" });
     if (reply.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs));
     answered++;
     if (res.destroyed) return;

@@ -27,7 +27,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { autoApproveKeys, getAutoApproveSettings, judgePermission } from "./autoapprove.ts";
+import { getAutoApproveSettings, judgePermission, savedJudgeToken } from "./autoapprove.ts";
 import { createWorktree, getRepo, removeWorktree, slugify, worktreeNeedsSetup } from "./repos.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
@@ -107,11 +107,17 @@ type Live = {
   lastSettleAborted: boolean;
 };
 
-/** What the agent is working on: the latest user message, cut to what a judge needs to read. */
-function latestTask(t: Transcript): string {
+/**
+ * What the agent is working on: the latest user message. pi expands `/skill:name args` into the
+ * skill's whole body followed by the args; the args are the task, so the body is left out.
+ */
+function latestTask(t: Transcript): { task: string; skill?: string } {
   const m = t.messages.findLast((x) => x.role === "user");
   const text = typeof m?.content === "string" ? m.content : Array.isArray(m?.content) ? m.content.map((b) => (b.type === "text" ? b.text : "")).join("") : "";
-  return text.length > 2000 ? `${text.slice(0, 2000)}…` : text;
+  // Like pi's own parser, the block ends at a "</skill>" line followed by a blank line or the end.
+  const expanded = /^<skill name="([\w-]+)"[^>]*>\n[\s\S]*?\n<\/skill>(?:\n\n|$)/.exec(text);
+  const task = expanded ? text.slice(expanded[0].length) : text;
+  return { task: task.length > 2000 ? `${task.slice(0, 2000)}…` : task, ...(expanded ? { skill: expanded[1] } : {}) };
 }
 
 const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs automatically on this repository's first pi-workbench session. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push.`;
@@ -517,7 +523,7 @@ export class SessionManager extends EventEmitter {
     const ticket = this.tickets(id).find((t) => t.status === "running");
     const session = {
       title: row.title,
-      task: latestTask(s.transcript),
+      ...latestTask(s.transcript),
       repo: row.repo_id,
       worktree: row.worktree,
       ...(ticket ? { ticket: `#${ticket.num} ${ticket.title}` } : {}),
@@ -525,7 +531,7 @@ export class SessionManager extends EventEmitter {
     const verdict = await judgePermission(
       { tool: req.tool ?? "", subject: req.subject ?? "", reasons: req.reasons ?? [], session },
       getAutoApproveSettings(this.db),
-      autoApproveKeys(this.secrets),
+      savedJudgeToken(this.secrets),
     );
     // Answered by the user, or dropped with its process or run: the verdict is stale.
     if (!s.pending.has(req.id)) return;
