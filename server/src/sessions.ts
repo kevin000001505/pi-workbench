@@ -62,6 +62,8 @@ export type UiRequest = {
   judge?: { state: "judging" | "waiting" | "failed"; by: string; rating?: string; note?: string };
   /** permission under auto-approve: the reviewer's pass over a call the judge did not rate safe. */
   review?: { state: "reviewing" | "escalated" | "failed"; by?: string; note?: string };
+  /** compatibility shape used by newer UI/test paths. */
+  reviewer?: { state: "reviewing" | "waiting" | "failed"; by: string; note?: string };
   createdAt: number;
 };
 
@@ -559,7 +561,8 @@ export class SessionManager extends EventEmitter {
       return;
     }
     // The judge did not rate it safe. Without a configured reviewer the card waits with the rating, as before.
-    if (!settings.reviewer.model || !savedReviewerKey(this.secrets)) {
+    const reviewerKey = savedReviewerKey(this.secrets);
+    if (!settings.reviewer.model || !reviewerKey.reviewerKey) {
       req.judge = { state: "waiting", by: verdict.by, rating: verdict.rating, note: verdict.note };
       this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
       this.emitSummary(id, true);
@@ -567,9 +570,10 @@ export class SessionManager extends EventEmitter {
     }
     req.judge = { state: "waiting", by: verdict.by, rating: verdict.rating, note: verdict.note };
     req.review = { state: "reviewing", by: reviewerName(settings) };
+    req.reviewer = { state: "reviewing", by: reviewerName(settings) };
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
     this.emitSummary(id, true);
-    const rv = await reviewPermission(permission, this.reviewContext(id, s, row, verdict), settings, savedReviewerKey(this.secrets));
+    const rv = await reviewPermission(permission, this.reviewContext(id, s, row, verdict), settings, reviewerKey);
     // Answered by the user, or dropped with its process or run: the verdict is stale.
     if (!s.pending.has(req.id)) return;
     if (rv.outcome === "allow" || rv.outcome === "deny") {
@@ -582,6 +586,7 @@ export class SessionManager extends EventEmitter {
     }
     // An escalation or a reviewer failure: the card waits for the user with the note.
     req.review = { state: rv.outcome === "escalate" ? "escalated" : "failed", by: rv.by, note: rv.outcome === "escalate" ? rv.reason : rv.note };
+    req.reviewer = { state: rv.outcome === "escalate" ? "waiting" : "failed", by: rv.by, note: rv.outcome === "escalate" ? rv.reason : rv.note };
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
     this.emitSummary(id, true);
   }

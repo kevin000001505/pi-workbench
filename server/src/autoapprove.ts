@@ -22,9 +22,16 @@ import type { SecretStore } from "./secrets.ts";
 /** Keys live in their own SecretStore scope: `envFor` reads only global and repo scopes, so they never reach pi. */
 export const AUTO_APPROVE_SCOPE = "wb:auto-approve";
 /** Rows in that scope: the token (and the origin it was saved for), and the reviewer API key. */
-const SECRET_NAMES = { judgeToken: "JUDGE_TOKEN", tokenOrigin: "JUDGE_TOKEN_ORIGIN", reviewerKey: "REVIEWER_KEY" } as const;
+const SECRET_NAMES = {
+  judgeToken: "JUDGE_TOKEN",
+  tokenOrigin: "JUDGE_TOKEN_ORIGIN",
+  reviewerKey: "REVIEWER_KEY",
+  reviewerKeyOrigin: "REVIEWER_KEY_ORIGIN",
+} as const;
 /** The judge token and the origin it was saved for: it is only ever sent to that origin. */
 export type JudgeToken = { judgeToken?: string; tokenOrigin?: string };
+/** The reviewer key and the origin it was saved for: it is only ever sent to that origin. */
+export type ReviewerKey = { reviewerKey?: string; keyOrigin?: string };
 
 export type JudgeProtocol = "systemone" | "openai";
 export type AutoApproveSettings = {
@@ -210,23 +217,42 @@ export function saveAutoApproveKey(secrets: SecretStore, body: { key?: unknown; 
     ]);
     return;
   }
-  if (body.key === "reviewerKey") {
-    if (body.value === null) return secrets.delete(AUTO_APPROVE_SCOPE, SECRET_NAMES.reviewerKey);
-    if (typeof body.value !== "string" || !body.value.trim()) throw bad("Value is empty");
-    secrets.set(AUTO_APPROVE_SCOPE, SECRET_NAMES.reviewerKey, body.value.trim());
-    return;
-  }
+  if (body.key === "reviewerKey") return saveReviewerKey(secrets, body);
   throw bad(`Unknown key ${String(body.key)}`);
 }
 
 /** What Settings shows: the settings, whether the keys are set and for which origin, never their values. */
 export function autoApproveView(db: Db, secrets: SecretStore) {
   const saved = savedJudgeToken(secrets);
-  return { ...getAutoApproveSettings(db), keys: { judgeToken: !!saved.judgeToken, tokenOrigin: saved.judgeToken ? saved.tokenOrigin : undefined, reviewerKey: !!savedReviewerKey(secrets) } };
+  const reviewer = savedReviewerKey(secrets);
+  return {
+    ...getAutoApproveSettings(db),
+    keys: {
+      judgeToken: !!saved.judgeToken,
+      tokenOrigin: saved.judgeToken ? saved.tokenOrigin : undefined,
+      reviewerKey: !!reviewer.reviewerKey,
+      reviewerKeyOrigin: reviewer.reviewerKey ? reviewer.keyOrigin : undefined,
+    },
+  };
 }
 
-export function savedReviewerKey(secrets: SecretStore): string | undefined {
-  return secrets.get(AUTO_APPROVE_SCOPE, SECRET_NAMES.reviewerKey);
+export function savedReviewerKey(secrets: SecretStore): ReviewerKey {
+  return { reviewerKey: secrets.get(AUTO_APPROVE_SCOPE, SECRET_NAMES.reviewerKey), keyOrigin: secrets.get(AUTO_APPROVE_SCOPE, SECRET_NAMES.reviewerKeyOrigin) };
+}
+
+/** Keys are write-only: set with a value and the reviewer URL it belongs to; cleared with null. */
+export function saveReviewerKey(secrets: SecretStore, body: { key?: unknown; value?: unknown; baseUrl?: unknown }) {
+  if (body.key !== "reviewerKey") throw bad(`Unknown key ${String(body.key)}`);
+  if (body.value === null) {
+    secrets.delete(AUTO_APPROVE_SCOPE, SECRET_NAMES.reviewerKey);
+    return secrets.delete(AUTO_APPROVE_SCOPE, SECRET_NAMES.reviewerKeyOrigin);
+  }
+  if (typeof body.value !== "string" || !body.value.trim()) throw bad("Value is empty");
+  const origin = httpUrl(body.baseUrl, "Say which reviewer URL (http:// or https://) the key is for").origin;
+  secrets.setAll(AUTO_APPROVE_SCOPE, [
+    [SECRET_NAMES.reviewerKey, body.value.trim()],
+    [SECRET_NAMES.reviewerKeyOrigin, origin],
+  ]);
 }
 
 // --- judging -------------------------------------------------------------------------------
@@ -461,18 +487,21 @@ const readVerdict = (v: unknown): { decision: "allow" | "deny" | "escalate"; rea
 };
 
 /** Ask the reviewer about a call the judge did not rate safe. Never throws: a failure is a verdict too. */
-export async function reviewPermission(p: Permission, ctx: ReviewContext, settings: AutoApproveSettings, savedKey: string | undefined): Promise<ReviewVerdict> {
+export async function reviewPermission(p: Permission, ctx: ReviewContext, settings: AutoApproveSettings, saved: ReviewerKey | string | undefined): Promise<ReviewVerdict> {
   const by = reviewerName(settings);
   if (!settings.reviewer.model) return { outcome: "failed", by, note: `${by} has no model id set.` };
+  const savedKey = typeof saved === "string" ? saved : saved?.reviewerKey;
   if (!savedKey) return { outcome: "failed", by, note: `${by} has no API key set.` };
   const state = reviewerState(p, ctx);
   if (settings.reviewer.provider === "anthropic") {
     let res: Response;
     let text: string;
     try {
-      res = await fetch(`${settings.reviewer.baseUrl.replace(/\/+$/, "")}/v1/messages`, {
+      const url = `${settings.reviewer.baseUrl.replace(/\/+$/, "")}/v1/messages`;
+      const key = typeof saved === "string" ? saved : saved?.keyOrigin && new URL(url).origin === saved.keyOrigin ? saved.reviewerKey : undefined;
+      res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": savedKey, "anthropic-version": "2023-06-01" },
+        headers: { "Content-Type": "application/json", ...(key ? { "x-api-key": key } : {}), "anthropic-version": "2023-06-01" },
         body: JSON.stringify({
           model: settings.reviewer.model,
           max_tokens: 1024,
@@ -500,7 +529,9 @@ export async function reviewPermission(p: Permission, ctx: ReviewContext, settin
   let reply: string;
   try {
     const call = { maxTokens: 1024, timeoutMs: config.autoApproveTimeoutMs, temperature: 0 };
-    reply = await complete({ baseUrl: settings.reviewer.baseUrl, modelId: settings.reviewer.model }, savedKey, `${REVIEWER_SYSTEM} Reply with one JSON object: {"decision": "allow" | "deny" | "escalate", "reason": "..."}. Nothing else.`, JSON.stringify(state, null, 2), call);
+    const url = `${settings.reviewer.baseUrl.replace(/\/+$/, "")}/chat/completions`;
+    const key = typeof saved === "string" ? saved : saved?.keyOrigin && new URL(url).origin === saved.keyOrigin ? saved.reviewerKey : undefined;
+    reply = await complete({ baseUrl: settings.reviewer.baseUrl, modelId: settings.reviewer.model }, key, `${REVIEWER_SYSTEM} Reply with one JSON object: {"decision": "allow" | "deny" | "escalate", "reason": "..."}. Nothing else.`, JSON.stringify(state, null, 2), call);
   } catch (err) {
     const { status, body } = err as { status?: number; body?: string };
     return { outcome: "failed", by, note: `${by} failed: ${status ? `HTTP ${status}${serverSays(body ?? "")}` : why(err)}` };
@@ -554,4 +585,27 @@ export async function testJudge(settings: AutoApproveSettings, saved: JudgeToken
   const v = await judgePermission(HARMLESS, settings, saved);
   if (v.outcome === "failed") return { ok: false, message: v.note };
   return { ok: true, message: `${v.by} answered for \`ls\`: ${v.outcome === "allow" ? "safe" : v.rating} (${v.detail}).` };
+}
+
+/** Settings → Test: ask the saved reviewer about a harmless call and report whether it answered. */
+export async function testReviewer(settings: AutoApproveSettings, saved: ReviewerKey) {
+  const r = await reviewPermission(
+    HARMLESS,
+    {
+      title: "Settings test",
+      task: "List the files in the worktree.",
+      phase: "direct",
+      repo: "example/repo",
+      branch: "main",
+      worktree: "/data/worktrees/example",
+      sshHosts: [],
+      recent: "",
+      rating: "risky",
+      judgeDetail: "deletes_data 0.04 · reaches_outside 0.05 · hard_to_undo 0.03 · fits_task 0.92",
+    },
+    settings,
+    saved,
+  );
+  if (r.outcome === "failed") return { ok: false, message: r.note };
+  return { ok: true, message: `${r.by} answered for \`ls\`: ${r.outcome}${"reason" in r ? ` (${r.reason})` : ""}.` };
 }

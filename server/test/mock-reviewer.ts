@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 
 /** One scripted verdict, or a broken reply (garbage body, HTTP error, or a hang). */
 export type ReviewerReply = {
+  text?: string;
   decision?: "allow" | "deny" | "escalate";
   reason?: string;
   status?: number;
@@ -19,15 +20,15 @@ export type ReviewerReply = {
  * `rm -rf /mnt` is denied, `ssh` is escalated, any other `rm` is allowed. With `key`, every
  * request without that API key gets 401, like the public APIs.
  */
-export function startMockReviewer(opts: { provider: "anthropic" | "openai"; model: string; key?: string }): Promise<{
+export function startMockReviewer(opts: { provider: "anthropic" | "openai"; model: string; key?: string; defaultVerdict?: "allow" | "escalate" }): Promise<{
   url: string;
-  requests: { path: string; key?: string; body: any }[];
+  requests: { path: string; model: string; key?: string; auth?: string; xApiKey?: string; body: any }[];
   replies: ReviewerReply[];
   /** Review calls answered so far (one per finished POST), for tests that wait on a late verdict. */
   answered: () => number;
   close: () => Promise<void>;
 }> {
-  const requests: { path: string; key?: string; body: any }[] = [];
+  const requests: { path: string; model: string; key?: string; auth?: string; xApiKey?: string; body: any }[] = [];
   const replies: ReviewerReply[] = [];
   let answered = 0;
   const send = (res: http.ServerResponse, status: number, body: unknown) => {
@@ -40,24 +41,28 @@ export function startMockReviewer(opts: { provider: "anthropic" | "openai"; mode
     const path = new URL(req.url ?? "/", "http://x").pathname;
     const body = raw ? JSON.parse(raw) : {};
     const key = (req.headers["x-api-key"] ?? (req.headers.authorization ?? "").replace(/^Bearer /, "")) as string;
-    requests.push({ path, key: key || undefined, body });
+    requests.push({ path, model: String(body.model ?? ""), key: key || undefined, auth: req.headers.authorization as string | undefined, xApiKey: req.headers["x-api-key"] as string | undefined, body });
     if (opts.key && key !== opts.key) return send(res, 401, { error: { message: "invalid api key" } });
-    const route = opts.provider === "anthropic" ? "/v1/messages" : "/chat/completions";
-    if (req.method !== "POST" || path !== route) return send(res, 404, { error: "not found" });
+    const route = opts.provider === "anthropic" ? "/v1/messages" : ["/chat/completions", "/v1/chat/completions"];
+    if (req.method !== "POST" || (Array.isArray(route) ? !route.includes(path) : path !== route)) return send(res, 404, { error: "not found" });
     // llama-swap-style proxies pick the model by name; the public APIs refuse one they don't serve.
     if (body.model !== opts.model) return send(res, 404, { error: { message: `model ${body.model} not found` } });
 
     // Both providers send the state object as the user message's content string.
     const userMsg = (body.messages ?? []).find((m: any) => m.role === "user");
     const state = typeof userMsg?.content === "string" ? userMsg.content : JSON.stringify(body);
-    const reply = replies.shift() ?? scriptFor(/"command":\s*"([^"]*)"/.exec(state)?.[1] ?? "");
+    const reply = replies.shift() ?? scriptFor(/"command":\s*"([^"]*)"/.exec(state)?.[1] ?? "", opts.defaultVerdict);
     if (reply.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs));
     answered++;
     if (res.destroyed) return;
     if (reply.status && reply.status !== 200) return send(res, reply.status, reply.body ?? { error: { message: "mock failure" } });
     if (reply.body !== undefined) return send(res, 200, reply.body);
-    const verdict = { decision: reply.decision!, reason: reply.reason! };
+    const verdict = { decision: reply.decision ?? (opts.defaultVerdict ?? "allow"), reason: reply.reason ?? `mock reviewer ${(opts.defaultVerdict ?? "allow") === "allow" ? "allows" : "escalates"} it` };
     if (opts.provider === "anthropic") {
+      if (!(body.tools ?? []).length) {
+        const text = reply.text ?? JSON.stringify({ verdict: verdict.decision, reason: verdict.reason });
+        return send(res, 200, { id: "msg_mock", type: "message", role: "assistant", model: opts.model, content: [{ type: "text", text }], stop_reason: "end_turn" });
+      }
       return send(res, 200, {
         id: "msg_mock",
         type: "message",
@@ -68,7 +73,7 @@ export function startMockReviewer(opts: { provider: "anthropic" | "openai"; mode
         usage: { input_tokens: 400, output_tokens: 30 },
       });
     }
-    send(res, 200, { id: "mock", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify(verdict) }, finish_reason: "stop" }] });
+    send(res, 200, { id: "mock", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: reply.text ?? JSON.stringify(verdict) }, finish_reason: "stop" }] });
   });
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
@@ -88,9 +93,9 @@ export function startMockReviewer(opts: { provider: "anthropic" | "openai"; mode
   });
 }
 
-function scriptFor(command: string): Required<Pick<ReviewerReply, "decision" | "reason">> {
+function scriptFor(command: string, fallback: "allow" | "escalate" = "allow"): Required<Pick<ReviewerReply, "decision" | "reason">> {
   if (command.includes("rm -rf /mnt")) return { decision: "deny", reason: "Deletes data outside the worktree; that is not part of the task." };
   if (/^\s*ssh(\s|$)/.test(command)) return { decision: "escalate", reason: "Reaches a machine beyond the task; I cannot judge the target." };
   if (command.includes("rm ")) return { decision: "allow", reason: "Routine cleanup for the task." };
-  return { decision: "allow", reason: "Routine for the task." };
+  return fallback === "escalate" ? { decision: "escalate", reason: "mock reviewer escalates it" } : { decision: "allow", reason: "Routine for the task." };
 }

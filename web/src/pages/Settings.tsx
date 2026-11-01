@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.ts";
 import { notificationsEnabled, setNotifications, useStore } from "../store.tsx";
-import type { ApprovalRule, ApprovalSettings, AutoApproveSettings, JudgeModels, JudgeProtocol, ModelSettings, ProbeResult } from "../types.ts";
+import type { ApprovalRule, ApprovalSettings, AutoApproveSettings, JudgeModels, JudgeProtocol, ModelSettings, ProbeResult, ReviewerProvider, ReviewerSettings } from "../types.ts";
+import { REVIEWER_DEFAULT_URL } from "../types.ts";
 import { PageHeader, Spinner } from "../ui.tsx";
 
 const THINKING_FORMATS = ["", "qwen-chat-template", "qwen", "chat-template", "openai", "deepseek"];
@@ -220,8 +221,10 @@ function AutoApproveForm() {
   const { toast } = useStore();
   const [a, setA] = useState<AutoApproveSettings | null>(null);
   const [token, setToken] = useState("");
+  const [rkey, setRkey] = useState("");
   const [list, setList] = useState<JudgeModels | string | null>(null);
   const [test, setTest] = useState<{ ok: boolean; message: string } | "running" | null>(null);
+  const [rtest, setRtest] = useState<{ ok: boolean; message: string } | "running" | null>(null);
   useEffect(() => {
     api.get<{ autoApprove: AutoApproveSettings }>("/api/settings").then((s) => setA(s.autoApprove)).catch((e) => toast(e.message, "error"));
   }, [toast]);
@@ -243,9 +246,13 @@ function AutoApproveForm() {
 
   if (!a) return <Spinner />;
   const setJudge = (patch: Partial<AutoApproveSettings["judge"]>) => setA({ ...a, judge: { ...a.judge, ...patch } });
+  const setReviewer = (patch: Partial<ReviewerSettings>) => setA({ ...a, reviewer: { ...a.reviewer, ...patch } });
   const listed = list && typeof list === "object" ? list : null;
   // An OpenAI-shaped list (llama-swap) can hold System One models too; Save finds out which the model speaks.
   const protocol = listed?.protocol === "systemone" ? "systemone" : a.judge.protocol;
+
+  /** Changing the provider resets the base URL to that provider's public API. */
+  const setProvider = (provider: ReviewerProvider) => setReviewer({ provider, baseUrl: REVIEWER_DEFAULT_URL[provider] });
 
   const saveToken = async (value: string | null) => {
     try {
@@ -255,6 +262,18 @@ function AutoApproveForm() {
       setToken("");
       toast(value ? "Judge token saved." : "Judge token removed.");
       void listModels(a.judge.baseUrl);
+    } catch (err) {
+      toast((err as Error).message, "error");
+    }
+  };
+
+  const saveReviewerKey = async (value: string | null) => {
+    try {
+      const view = await api.put<AutoApproveSettings>("/api/settings/auto-approve/keys/reviewer", { key: "reviewerKey", value, baseUrl: a.reviewer.baseUrl });
+      // Keep the reviewer being edited: the key was bound to its URL, which Save still has to store.
+      setA({ ...view, enabled: a.enabled, judge: a.judge, reviewer: a.reviewer });
+      setRkey("");
+      toast(value ? "Reviewer key saved." : "Reviewer key removed.");
     } catch (err) {
       toast((err as Error).message, "error");
     }
@@ -270,13 +289,23 @@ function AutoApproveForm() {
     }
   };
 
+  const runReviewerTest = async () => {
+    setRtest("running");
+    try {
+      setRtest(await api.post<{ ok: boolean; message: string }>("/api/settings/auto-approve/test-reviewer", {}));
+    } catch (e) {
+      setRtest(null);
+      toast((e as Error).message, "error");
+    }
+  };
+
   return (
     <form
       className="card form"
       onSubmit={async (e) => {
         e.preventDefault();
         try {
-          setA(await api.put<AutoApproveSettings>("/api/settings/auto-approve", { enabled: a.enabled, judge: a.judge }));
+          setA(await api.put<AutoApproveSettings>("/api/settings/auto-approve", { enabled: a.enabled, judge: a.judge, reviewer: a.reviewer }));
           toast("Auto-approve saved. It applies to the next permission.");
         } catch (err) {
           toast((err as Error).message, "error");
@@ -285,8 +314,9 @@ function AutoApproveForm() {
     >
       <h3>Auto-approve</h3>
       <p className="muted small">
-        Permissions go to the risk judge first. A call it rates safe runs without you; any other call, or a judge failure, waits
-        for you with the judge’s note. Decisions (questions the agent asks you) always come to you.
+        Permissions go to the risk judge first. A call it rates safe runs without you. Any other call goes to the reviewer,
+        which allows it for that one call, escalates it to you, or (when it fails) leaves it for you. Decisions (questions
+        the agent asks you) always come to you.
       </p>
       <label className="check">
         <input type="checkbox" checked={a.enabled} onChange={(e) => setA({ ...a, enabled: e.target.checked })} /> Auto-approve
@@ -374,6 +404,63 @@ function AutoApproveForm() {
         {test && test !== "running" && <span className={`small grow ${test.ok ? "muted" : "text-error"}`}>{test.message}</span>}
         <button type="button" className="btn" disabled={test === "running"} onClick={runTest} title="Tests the saved settings and token">
           {test === "running" ? <Spinner small /> : null} Test saved judge
+        </button>
+      </div>
+      <h4>Reviewer (for calls the judge does not rate safe)</h4>
+      <label>
+        Provider
+        <select className="input" value={a.reviewer.provider} onChange={(e) => setProvider(e.target.value as ReviewerProvider)}>
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="openai">OpenAI</option>
+        </select>
+      </label>
+      <label>
+        Base URL
+        <input
+          className="input mono"
+          value={a.reviewer.baseUrl}
+          placeholder={REVIEWER_DEFAULT_URL[a.reviewer.provider]}
+          onChange={(e) => setReviewer({ baseUrl: e.target.value })}
+        />
+        <span className="muted small">Defaults to the public API. A custom host works too.</span>
+      </label>
+      <label>
+        Model ID
+        <input className="input mono" value={a.reviewer.model} onChange={(e) => setReviewer({ model: e.target.value })} />
+      </label>
+      <label>
+        API key{" "}
+        {!a.keys.reviewerKey ? (
+          <span className="tag">not set</span>
+        ) : a.keys.reviewerKeyOrigin ? (
+          <span className="tag tag-ok">set for {a.keys.reviewerKeyOrigin}</span>
+        ) : (
+          <span className="tag tag-warn">set for no host: save it again</span>
+        )}
+        <div className="row gap">
+          <input
+            className="input mono grow"
+            type="password"
+            autoComplete="off"
+            placeholder={a.keys.reviewerKey ? "Enter a new key to replace it" : "Anthropic or OpenAI API key"}
+            value={rkey}
+            onChange={(e) => setRkey(e.target.value)}
+          />
+          <button type="button" className="btn btn-sm" disabled={!rkey.trim()} onClick={() => saveReviewerKey(rkey.trim())}>
+            Save key
+          </button>
+          {a.keys.reviewerKey && (
+            <button type="button" className="btn btn-sm btn-ghost" onClick={() => saveReviewerKey(null)}>
+              Remove
+            </button>
+          )}
+        </div>
+        <span className="muted small">Stored encrypted and never shown again. It is sent only to the host it was saved for, and never given to the agent.</span>
+      </label>
+      <div className="row gap end">
+        {rtest && rtest !== "running" && <span className={`small grow ${rtest.ok ? "muted" : "text-error"}`}>{rtest.message}</span>}
+        <button type="button" className="btn" disabled={rtest === "running"} onClick={runReviewerTest} title="Tests the saved settings and key">
+          {rtest === "running" ? <Spinner small /> : null} Test saved reviewer
         </button>
         <button className="btn btn-primary">Save auto-approve</button>
       </div>

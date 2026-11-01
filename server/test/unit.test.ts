@@ -377,7 +377,7 @@ test("the reviewer key is write-only and never reaches a pi environment", () => 
   const db = tmpDb();
   const store = new SecretStore(db, "test-master-key-0123456789");
   saveAutoApproveKey(store, { key: "reviewerKey", value: "  claude-secret  " });
-  assert.equal(savedReviewerKey(store), "claude-secret");
+  assert.deepEqual(savedReviewerKey(store), { reviewerKey: "claude-secret", keyOrigin: undefined });
   assert.ok(!JSON.stringify(store.envFor()).includes("claude-secret"));
   assert.ok(!JSON.stringify(store.envFor("me/app")).includes("claude-secret"));
   const view = autoApproveView(db, store);
@@ -386,9 +386,9 @@ test("the reviewer key is write-only and never reaches a pi environment", () => 
   for (const bad of [{ key: "reviewerKey", value: "" }, { key: "reviewerKey", value: "   " }, { key: "reviewerKey", value: 5 }]) {
     assert.throws(() => saveAutoApproveKey(store, bad), (e: any) => e.status === 400, JSON.stringify(bad));
   }
-  assert.equal(savedReviewerKey(store), "claude-secret", "a refused save changes nothing");
+  assert.deepEqual(savedReviewerKey(store), { reviewerKey: "claude-secret", keyOrigin: undefined }, "a refused save changes nothing");
   saveAutoApproveKey(store, { key: "reviewerKey", value: null });
-  assert.equal(savedReviewerKey(store), undefined);
+  assert.deepEqual(savedReviewerKey(store), { reviewerKey: undefined, keyOrigin: undefined });
   assert.equal(autoApproveView(db, store).keys.reviewerKey, false);
   assert.deepEqual(store.list("wb:auto-approve"), [], "removing the key leaves nothing behind");
 });

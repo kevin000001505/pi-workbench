@@ -18,6 +18,8 @@ export type UiRequest = {
   judge?: { state: "judging" | "waiting" | "failed"; by: string; rating?: string; note?: string };
   /** permission under auto-approve: the reviewer's pass over a call the judge did not rate safe. */
   review?: { state: "reviewing" | "escalated" | "failed"; by?: string; note?: string };
+  /** permission under auto-approve: compatibility shape used by newer cards/tests. */
+  reviewer?: { state: "reviewing" | "waiting" | "failed"; by: string; note?: string };
   createdAt: number;
 };
 
@@ -27,9 +29,19 @@ export const waitingOn = (s: { pending: UiRequest[] }) => s.pending.filter(waits
 export type AutoApproveSettings = {
   enabled: boolean;
   judge: { baseUrl: string; model: string; protocol: JudgeProtocol; yesAbove: number; noBelow: number };
-  reviewer: { provider: "anthropic" | "openai"; baseUrl: string; model: string };
+  reviewer: ReviewerSettings;
   /** Whether the write-only keys are set (their values never come back), and the judge host it is bound to. */
-  keys: { judgeToken: boolean; tokenOrigin?: string; reviewerKey: boolean };
+  keys: { judgeToken: boolean; tokenOrigin?: string; reviewerKey: boolean; reviewerKeyOrigin?: string };
+};
+
+/** The frontier reviewer for the calls the judge does not rate safe. */
+export type ReviewerProvider = "anthropic" | "openai";
+export type ReviewerSettings = { provider: ReviewerProvider; model: string; baseUrl: string };
+
+/** The public APIs a base URL defaults to, per provider. */
+export const REVIEWER_DEFAULT_URL: Record<ReviewerProvider, string> = {
+  anthropic: "https://api.anthropic.com",
+  openai: "https://api.openai.com/v1",
 };
 
 /** What the judge URL speaks, read from its model list: TypeSafe System One or OpenAI-compatible chat. */
