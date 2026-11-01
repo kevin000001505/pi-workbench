@@ -248,7 +248,9 @@ function AutoApproveForm() {
 
   const saveToken = async (value: string | null) => {
     try {
-      setA(await api.put<AutoApproveSettings>("/api/settings/auto-approve/keys", { key: "judgeToken", value, baseUrl: a.judge.baseUrl }));
+      const view = await api.put<AutoApproveSettings>("/api/settings/auto-approve/keys", { key: "judgeToken", value, baseUrl: a.judge.baseUrl });
+      // Keep the judge being edited: the token was bound to its URL, which Save still has to store.
+      setA({ ...view, enabled: a.enabled, judge: a.judge });
       setToken("");
       toast(value ? "Judge token saved." : "Judge token removed.");
       void listModels(a.judge.baseUrl);
@@ -322,7 +324,13 @@ function AutoApproveForm() {
       </label>
       <label>
         Token{" "}
-        {a.keys.judgeToken ? <span className="tag tag-ok">set for {a.keys.tokenOrigin}</span> : <span className="tag">not set</span>}
+        {!a.keys.judgeToken ? (
+          <span className="tag">not set</span>
+        ) : a.keys.tokenOrigin ? (
+          <span className="tag tag-ok">set for {a.keys.tokenOrigin}</span>
+        ) : (
+          <span className="tag tag-warn">set for no host: save it again</span>
+        )}
         <div className="row gap">
           <input
             className="input mono grow"

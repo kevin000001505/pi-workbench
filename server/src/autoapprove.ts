@@ -16,9 +16,10 @@ import type { SecretStore } from "./secrets.ts";
 
 /** Keys live in their own SecretStore scope: `envFor` reads only global and repo scopes, so they never reach pi. */
 export const AUTO_APPROVE_SCOPE = "wb:auto-approve";
-const KEY_NAMES = { judgeToken: "JUDGE_TOKEN", tokenOrigin: "JUDGE_TOKEN_ORIGIN" } as const;
+/** Rows in that scope: the token, and the origin it was saved for. */
+const SECRET_NAMES = { judgeToken: "JUDGE_TOKEN", tokenOrigin: "JUDGE_TOKEN_ORIGIN" } as const;
 /** The judge token and the origin it was saved for: it is only ever sent to that origin. */
-export type JudgeKeys = { judgeToken?: string; tokenOrigin?: string };
+export type JudgeToken = { judgeToken?: string; tokenOrigin?: string };
 
 export type JudgeProtocol = "systemone" | "openai";
 export type AutoApproveSettings = {
@@ -40,6 +41,16 @@ const DEFAULTS: AutoApproveSettings = {
 };
 
 const bad = (message: string) => Object.assign(new Error(message), { status: 400 });
+
+/** Parse an http(s) URL from the request, or refuse it with `message`. */
+function httpUrl(value: unknown, message: string): URL {
+  let url: URL | undefined;
+  try {
+    url = typeof value === "string" ? new URL(value) : undefined;
+  } catch {}
+  if (!url || (url.protocol !== "http:" && url.protocol !== "https:")) throw bad(message);
+  return url;
+}
 
 export function getAutoApproveSettings(db: Db): AutoApproveSettings {
   const saved = getSetting<Partial<AutoApproveSettings>>(db, "autoApprove") ?? {};
@@ -66,7 +77,7 @@ export function saveAutoApproveSettings(db: Db, input: Partial<AutoApproveSettin
 }
 
 function validateJudge(j: AutoApproveSettings["judge"]) {
-  if (typeof j.baseUrl !== "string" || !/^https?:\/\//.test(j.baseUrl)) throw bad("The judge URL must start with http:// or https://");
+  httpUrl(j.baseUrl, "The judge URL must be an http:// or https:// URL");
   if (typeof j.model !== "string" || !j.model.trim()) throw bad("Pick the judge model");
   if (j.protocol !== "systemone" && j.protocol !== "openai") throw bad(`Unknown judge protocol ${String(j.protocol)}`);
   const ok = (x: unknown) => typeof x === "number" && x > 0 && x < 1;
@@ -95,12 +106,12 @@ export async function configureAutoApprove(db: Db, secrets: SecretStore, input: 
 /** Settings → List models: the given URL's list, or the saved judge's when none is given. */
 export function listModelsFor(db: Db, secrets: SecretStore, baseUrl: unknown) {
   const url = typeof baseUrl === "string" && baseUrl.trim() ? baseUrl.trim() : getAutoApproveSettings(db).judge.baseUrl;
-  if (!/^https?:\/\//.test(url)) throw bad("The judge URL must start with http:// or https://");
+  httpUrl(url, "The judge URL must be an http:// or https:// URL");
   return listJudgeModels(url, autoApproveKeys(secrets));
 }
 
 /** `GET <url>/models`: TypeSafe answers `{ models: [{ name }] }`, an OpenAI-compatible server `{ data: [{ id }] }`. */
-export async function listJudgeModels(baseUrl: string, keys: JudgeKeys): Promise<{ protocol: JudgeProtocol; models: string[] }> {
+export async function listJudgeModels(baseUrl: string, keys: JudgeToken): Promise<{ protocol: JudgeProtocol; models: string[] }> {
   const url = `${baseUrl.replace(/\/+$/, "")}/models`;
   let res: Response;
   let body: any;
@@ -116,12 +127,12 @@ export async function listJudgeModels(baseUrl: string, keys: JudgeKeys): Promise
   throw bad(`${url} did not answer with a TypeSafe or OpenAI-compatible model list`);
 }
 
-export function autoApproveKeys(secrets: SecretStore): JudgeKeys {
-  return { judgeToken: secrets.get(AUTO_APPROVE_SCOPE, KEY_NAMES.judgeToken), tokenOrigin: secrets.get(AUTO_APPROVE_SCOPE, KEY_NAMES.tokenOrigin) };
+export function autoApproveKeys(secrets: SecretStore): JudgeToken {
+  return { judgeToken: secrets.get(AUTO_APPROVE_SCOPE, SECRET_NAMES.judgeToken), tokenOrigin: secrets.get(AUTO_APPROVE_SCOPE, SECRET_NAMES.tokenOrigin) };
 }
 
 /** The token for a request to `url`: only when the URL is on the origin the token was saved for. */
-function tokenFor(url: string, keys: JudgeKeys): string | undefined {
+function tokenFor(url: string, keys: JudgeToken): string | undefined {
   try {
     return keys.judgeToken && new URL(url).origin === keys.tokenOrigin ? keys.judgeToken : undefined;
   } catch {
@@ -132,11 +143,15 @@ function tokenFor(url: string, keys: JudgeKeys): string | undefined {
 /** Keys are write-only: set with a value and the judge URL it belongs to, cleared with null. */
 export function saveAutoApproveKey(secrets: SecretStore, body: { key?: unknown; value?: unknown; baseUrl?: unknown }) {
   if (body.key !== "judgeToken") throw bad(`Unknown key ${String(body.key)}`);
-  if (body.value === null) return secrets.delete(AUTO_APPROVE_SCOPE, KEY_NAMES.judgeToken);
+  if (body.value === null) {
+    secrets.delete(AUTO_APPROVE_SCOPE, SECRET_NAMES.judgeToken);
+    return secrets.delete(AUTO_APPROVE_SCOPE, SECRET_NAMES.tokenOrigin);
+  }
   if (typeof body.value !== "string" || !body.value.trim()) throw bad("Value is empty");
-  if (typeof body.baseUrl !== "string" || !/^https?:\/\//.test(body.baseUrl)) throw bad("Say which judge URL the token is for");
-  secrets.set(AUTO_APPROVE_SCOPE, KEY_NAMES.judgeToken, body.value.trim());
-  secrets.set(AUTO_APPROVE_SCOPE, KEY_NAMES.tokenOrigin, new URL(body.baseUrl).origin);
+  // Check both values before writing either: a half-saved token could go to the old host.
+  const origin = httpUrl(body.baseUrl, "Say which judge URL (http:// or https://) the token is for").origin;
+  secrets.set(AUTO_APPROVE_SCOPE, SECRET_NAMES.judgeToken, body.value.trim());
+  secrets.set(AUTO_APPROVE_SCOPE, SECRET_NAMES.tokenOrigin, origin);
 }
 
 /** What Settings shows: the settings, whether the token is set and for which origin, never its value. */
@@ -216,16 +231,18 @@ const stateOf = (p: Permission) => ({
 });
 
 /** Ask the risk judge about one permission. Never throws: a failure is a verdict too. */
-export async function judgePermission(p: Permission, settings: AutoApproveSettings, keys: JudgeKeys): Promise<Verdict> {
+export async function judgePermission(p: Permission, settings: AutoApproveSettings, keys: JudgeToken): Promise<Verdict> {
   const j = settings.judge;
   const by = j.model;
   const token = tokenFor(j.baseUrl, keys);
   if (j.protocol === "openai") {
     let reply: string;
     try {
-      reply = await complete({ baseUrl: j.baseUrl, modelId: j.model }, token, CHAT_PROMPT, JSON.stringify(stateOf(p), null, 2), 1024, config.autoApproveTimeoutMs);
+      const call = { maxTokens: 1024, timeoutMs: config.autoApproveTimeoutMs, temperature: 0 };
+      reply = await complete({ baseUrl: j.baseUrl, modelId: j.model }, token, CHAT_PROMPT, JSON.stringify(stateOf(p), null, 2), call);
     } catch (err) {
-      return { outcome: "failed", by, note: `${by} failed: ${why(err)}` };
+      const status = (err as { status?: number }).status;
+      return { outcome: "failed", by, note: `${by} failed: ${status ? `HTTP ${status}` : why(err)}` };
     }
     const word = readWord(reply);
     if (!word) return { outcome: "failed", by, note: `${by} failed: the answer was not SAFE, RISKY or DANGEROUS` };
@@ -285,7 +302,7 @@ function why(err: unknown) {
 }
 
 /** Settings → Test: ask the saved judge about a harmless call and report whether it answered. */
-export async function testJudge(settings: AutoApproveSettings, keys: JudgeKeys) {
+export async function testJudge(settings: AutoApproveSettings, keys: JudgeToken) {
   const v = await judgePermission(
     {
       tool: "bash",

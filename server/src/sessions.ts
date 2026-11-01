@@ -114,7 +114,8 @@ type Live = {
 function latestTask(t: Transcript): { task: string; skill?: string } {
   const m = t.messages.findLast((x) => x.role === "user");
   const text = typeof m?.content === "string" ? m.content : Array.isArray(m?.content) ? m.content.map((b) => (b.type === "text" ? b.text : "")).join("") : "";
-  const expanded = /^<skill name="([\w-]+)"[^>]*>[\s\S]*?<\/skill>\s*/.exec(text);
+  // Like pi's own parser, the block ends at a "</skill>" line followed by a blank line or the end.
+  const expanded = /^<skill name="([\w-]+)"[^>]*>\n[\s\S]*?\n<\/skill>(?:\n\n|$)/.exec(text);
   const task = expanded ? text.slice(expanded[0].length) : text;
   return { task: task.length > 2000 ? `${task.slice(0, 2000)}…` : task, ...(expanded ? { skill: expanded[1] } : {}) };
 }

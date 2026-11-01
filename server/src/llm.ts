@@ -87,8 +87,7 @@ export async function complete(
   apiKey: string | undefined,
   system: string,
   user: string,
-  maxTokens = 4000,
-  timeoutMs = 300_000,
+  { maxTokens = 4000, timeoutMs = 300_000, temperature = 0.2 }: { maxTokens?: number; timeoutMs?: number; temperature?: number } = {},
 ) {
   const res = await fetch(`${m.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
     method: "POST",
@@ -100,12 +99,12 @@ export async function complete(
         { role: "user", content: user },
       ],
       max_tokens: maxTokens,
-      temperature: 0.2,
+      temperature,
       stream: false,
     }),
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!res.ok) throw new Error(`LLM ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) throw Object.assign(new Error(`LLM ${res.status}: ${(await res.text()).slice(0, 300)}`), { status: res.status });
   const body = (await res.json()) as { choices?: { message?: { content?: string } }[] };
   return (body.choices?.[0]?.message?.content ?? "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 }

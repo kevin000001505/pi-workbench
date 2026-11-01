@@ -334,11 +334,15 @@ test("the judge token is write-only and never reaches a pi environment", () => {
     { key: "judgeToken", value: 5, baseUrl: url },
     { key: "judgeToken", value: "t" },
     { key: "judgeToken", value: "t", baseUrl: "ftp://x" },
+    { key: "judgeToken", value: "t", baseUrl: "https://" },
+    { key: "judgeToken", value: "t", baseUrl: "https://my host/v1" },
   ]) {
     assert.throws(() => saveAutoApproveKey(store, bad), (e: any) => e.status === 400, JSON.stringify(bad));
   }
+  assert.deepEqual(autoApproveKeys(store), { judgeToken: "jev-very-secret", tokenOrigin: "https://api.typesafe.ai" }, "a refused save changes nothing");
   saveAutoApproveKey(store, { key: "judgeToken", value: null });
   assert.equal(autoApproveView(db, store).keys.judgeToken, false);
+  assert.deepEqual(store.list("wb:auto-approve"), [], "removing the token leaves nothing behind");
 });
 
 test("the Secrets page cannot see, set, or delete the auto-approve scope", () => {

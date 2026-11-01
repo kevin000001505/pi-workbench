@@ -25,7 +25,7 @@ export const waitingOn = (s: { pending: UiRequest[] }) => s.pending.filter(waits
 export type AutoApproveSettings = {
   enabled: boolean;
   judge: { baseUrl: string; model: string; protocol: JudgeProtocol; yesAbove: number; noBelow: number };
-  /** Whether each write-only key is set; values never come back. */
+  /** Whether the write-only token is set (its value never comes back), and the host it is bound to. */
   keys: { judgeToken: boolean; tokenOrigin?: string };
 };
 
