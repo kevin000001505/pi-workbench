@@ -6,6 +6,7 @@ import {
   activityOf,
   type AgentMessage,
   applyEvent,
+  type ContentBlock,
   emptyTranscript,
   type Transcript,
   withMessages,
@@ -27,10 +28,18 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { getAutoApproveSettings, judgePermission, savedJudgeToken } from "./autoapprove.ts";
+import {
+  getAutoApproveSettings,
+  judgePermission,
+  providerName,
+  reviewPermission,
+  savedJudgeToken,
+  savedReviewerKey,
+} from "./autoapprove.ts";
 import { createWorktree, getRepo, removeWorktree, slugify, worktreeNeedsSetup } from "./repos.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
+import { loadSshHosts } from "./ssh.ts";
 import { type RpcRecord, RpcProcess } from "./rpc.ts";
 
 export type SessionStatus = "stopped" | "starting" | "running" | "waiting" | "idle" | "error";
@@ -50,6 +59,8 @@ export type UiRequest = {
   reasons?: string[];
   /** permission under auto-approve: the risk judge's rating, then why it still waits for the user. */
   judge?: { state: "judging" | "waiting" | "failed"; by: string; rating?: string; note?: string };
+  /** permission under auto-approve: the frontier reviewer's verdict (a judge rating that is not safe). */
+  reviewer?: { state: "reviewing" | "waiting" | "failed"; by: string; note?: string };
   createdAt: number;
 };
 
@@ -118,6 +129,30 @@ function latestTask(t: Transcript): { task: string; skill?: string } {
   const expanded = /^<skill name="([\w-]+)"[^>]*>\n[\s\S]*?\n<\/skill>(?:\n\n|$)/.exec(text);
   const task = expanded ? text.slice(expanded[0].length) : text;
   return { task: task.length > 2000 ? `${task.slice(0, 2000)}…` : task, ...(expanded ? { skill: expanded[1] } : {}) };
+}
+
+const textOfMessage = (content: string | ContentBlock[]): string =>
+  typeof content === "string" ? content : content.filter((b) => b.type === "text").map((b) => b.text).join("\n");
+
+/** The recent conversation the reviewer sees: one line per message, the newest kept, truncated. */
+function recentTranscript(t: Transcript, max = 6000): string {
+  const lines: string[] = [];
+  for (const m of t.messages.slice(-40)) {
+    if (m.role === "autoAnswer") continue;
+    if (m.role === "user") lines.push(`user: ${textOfMessage(m.content).trim().slice(0, 400)}`);
+    else if (m.role === "assistant") {
+      if (typeof m.content === "string") {
+        if (m.content.trim()) lines.push(`assistant: ${m.content.trim().slice(0, 400)}`);
+      } else {
+        for (const b of m.content) {
+          if (b.type === "text" && b.text.trim()) lines.push(`assistant: ${b.text.trim().slice(0, 400)}`);
+          else if (b.type === "toolCall") lines.push(`assistant: calls ${b.name} ${JSON.stringify(b.arguments).slice(0, 200)}`);
+        }
+      }
+    } else if (m.role === "toolResult") lines.push(`result: ${textOfMessage(m.content).split("\n")[0].slice(0, 200)}`);
+  }
+  const joined = lines.join("\n");
+  return joined.length > max ? joined.slice(-max) : joined;
 }
 
 const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs automatically on this repository's first pi-workbench session. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push.`;
@@ -517,8 +552,9 @@ export class SessionManager extends EventEmitter {
     this.emitSummary(id, true);
   }
 
-  /** Put a permission to the risk judge; answer it when it is safe, otherwise leave it for the user. */
+  /** Put a permission to the risk judge; a safe rating allows it, anything else goes to the reviewer. */
   private async autoJudge(id: string, s: Live, req: UiRequest) {
+    const settings = getAutoApproveSettings(this.db);
     const row = this.row(id);
     const ticket = this.tickets(id).find((t) => t.status === "running");
     const session = {
@@ -530,7 +566,7 @@ export class SessionManager extends EventEmitter {
     };
     const verdict = await judgePermission(
       { tool: req.tool ?? "", subject: req.subject ?? "", reasons: req.reasons ?? [], session },
-      getAutoApproveSettings(this.db),
+      settings,
       savedJudgeToken(this.secrets),
     );
     // Answered by the user, or dropped with its process or run: the verdict is stale.
@@ -542,10 +578,47 @@ export class SessionManager extends EventEmitter {
       this.answer(id, s, req, { type: "extension_ui_response", id: req.id, value: "Allow" });
       return;
     }
-    req.judge = verdict.outcome === "user"
-      ? { state: "waiting", by: verdict.by, rating: verdict.rating, note: verdict.note }
-      : { state: "failed", by: verdict.by, note: verdict.note };
+    if (verdict.outcome === "failed") {
+      req.judge = { state: "failed", by: verdict.by, note: verdict.note };
+      this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
+      this.emitSummary(id, true);
+      return;
+    }
+    // The judge did not rate it safe: the reviewer finishes the decision.
+    req.judge = { state: "waiting", by: verdict.by, rating: verdict.rating, note: verdict.note };
+    req.reviewer = { state: "reviewing", by: providerName(settings.reviewer.provider) };
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
+    this.emitSummary(id, true);
+    const review = await reviewPermission(
+      {
+        tool: req.tool ?? "",
+        subject: req.subject ?? "",
+        reasons: req.reasons ?? [],
+        rating: verdict.rating,
+        judgeDetail: verdict.detail,
+        session: { ...session, branch: row.branch, phase: row.phase },
+        transcript: recentTranscript(s.transcript),
+        // Alias and user@hostname only, never key names.
+        ssh: loadSshHosts(this.db).map((h) => ({ alias: h.alias, user: h.user, hostname: h.hostname })),
+      },
+      settings,
+      savedReviewerKey(this.secrets),
+    );
+    if (!s.pending.has(req.id)) return;
+    if (review.outcome === "allow") {
+      // One call only, never "Allow for this session": the next matching call is reviewed again.
+      const ev = { type: "wb_auto_answer", requestId: req.id, tool: req.tool, subject: req.subject, answer: "allow", by: review.by, detail: review.note, timestamp: Date.now() };
+      applyEvent(s.transcript, ev);
+      this.emit("event", id, ev);
+      this.answer(id, s, req, { type: "extension_ui_response", id: req.id, value: "Allow" });
+      return;
+    }
+    // An escalation (a deny for now) waits for the user with the model's reasoning; a failure notes why.
+    req.reviewer = { state: review.outcome === "escalate" ? "waiting" : "failed", by: review.by, note: review.note };
+    this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
+    if (review.outcome === "escalate") {
+      this.emit("event", id, { type: "wb_notify", message: `${review.by} escalated the permission: ${review.note}`, level: "warning" });
+    }
     this.emitSummary(id, true);
   }
 

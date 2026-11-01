@@ -15,6 +15,7 @@ export type JudgeReply = {
 
 export const SAFE = { deletes_data: 0.04, reaches_outside: 0.05, hard_to_undo: 0.03, fits_task: 0.92 };
 export const RISKY = { deletes_data: 0.9, reaches_outside: 0.1, hard_to_undo: 0.6, fits_task: 0.8 };
+export const DANGEROUS = { deletes_data: 0.9, reaches_outside: 0.9, hard_to_undo: 0.9, fits_task: 0.5 };
 /** What a faithful Jev answers for `git push` of the session branch: it reaches outside, nothing else. */
 export const PUSH = { deletes_data: 0.03, reaches_outside: 0.95, hard_to_undo: 0.1, fits_task: 0.9 };
 

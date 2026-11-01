@@ -3,5 +3,6 @@
  * (sidebar, tab count, notifications), so both agree.
  */
 
-/** A permission the risk judge is still judging does not wait on the user yet. */
-export const waitsOnUser = (req: { judge?: { state: string } }) => req.judge?.state !== "judging";
+/** A permission being judged or reviewed does not wait on the user yet. */
+export const waitsOnUser = (req: { judge?: { state: string }; reviewer?: { state: string } }) =>
+  req.judge?.state !== "judging" && req.reviewer?.state !== "reviewing";
