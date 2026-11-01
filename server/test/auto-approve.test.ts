@@ -185,13 +185,48 @@ test("auto-approve can be switched off while the judge is down", { skip }, async
 });
 
 test("saving the judge checks the URL and model, and stores the detected protocol", { skip }, async () => {
+  await enable({ baseUrl: chat.url, model: "mock-judge" });
+  const from = jev.requests.length;
   const saved = await enable();
   assert.equal(saved.judge.protocol, "systemone");
+  assert.deepEqual(jev.requests.slice(from).map((r) => r.path), ["/v1/models"], "a TypeSafe list needs no paid probe");
   await assert.rejects(enable({ model: "jev-typo" }), /jev-typo.*not served/);
   const c = await enable({ baseUrl: chat.url, model: "mock-judge" });
   assert.equal(c.judge.protocol, "openai");
   await enable();
   assert.equal(auto.getAutoApproveSettings(db).judge.protocol, "systemone", "a rejected save changes nothing");
+});
+
+test("a System One model behind an OpenAI-shaped list (llama-swap) is asked at Save, and judged with Nouls", { skip }, async () => {
+  const swap = await startMockJudge({ protocol: "systemone", model: "clef-flash", list: "openai", token: "swap-token" });
+  auto.saveAutoApproveKey(secrets, { key: "judgeToken", value: "swap-token", baseUrl: swap.url });
+  try {
+    assert.equal((await auto.listModelsFor(db, secrets, swap.url)).protocol, "openai", "the list alone can't tell");
+    const saved = await enable({ baseUrl: swap.url, model: "clef-flash" });
+    assert.equal(saved.judge.protocol, "systemone");
+    const added = await run(sessionId, "please push");
+    assert.ok(added.some((m: any) => m.role === "autoAnswer"));
+    assert.ok(swap.requests.every((r) => r.path !== "/v1/chat/completions"), "no chat call to a System One model");
+    // A chat model says it doesn't serve the path: llama.cpp with 404, vLLM-style servers with 501.
+    await enable({ baseUrl: chat.url, model: "mock-judge" });
+    swap.replies.push({ status: 501 });
+    assert.equal((await enable({ baseUrl: swap.url, model: "clef-flash" })).judge.protocol, "openai");
+    // A model that can't answer the probe is not saved, and the refusal says why.
+    await enable({ baseUrl: chat.url, model: "mock-judge" });
+    for (const [reply, why] of [
+      [{ status: 500, body: JSON.stringify({ error: { message: "upstream command exited prematurely" } }) }, /clef-flash.*HTTP 500: upstream command exited prematurely/],
+      [{ nouls: SAFE, delayMs: 3000 }, /clef-flash.*no answer within/],
+      [{ body: "<html>nope</html>" }, /clef-flash.*HTTP 200/],
+    ] as const) {
+      swap.replies.push(reply);
+      await assert.rejects(enable({ baseUrl: swap.url, model: "clef-flash" }), why);
+      assert.equal(auto.getAutoApproveSettings(db).judge.model, "mock-judge", "a refused save changes nothing");
+    }
+  } finally {
+    auto.saveAutoApproveKey(secrets, { key: "judgeToken", value: TOKEN, baseUrl: jev.url });
+    await enable();
+    await swap.close();
+  }
 });
 
 test("a permission Jev judges safe runs without the user, with an allowed-by line", { skip }, async () => {

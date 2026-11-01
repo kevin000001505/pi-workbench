@@ -6,10 +6,12 @@ import type { SecretStore } from "./secrets.ts";
 
 /**
  * Auto-approve (GLOSSARY.md, ADR 0002): a permission goes to the risk judge before the user. The
- * judge is one URL; its `GET /models` answer says which protocol it speaks:
+ * judge is one URL and a model; Save finds out which protocol the model speaks:
  * - TypeSafe System One (Jev): atomic yes/no questions (Nouls) about the call, and the rule below
  *   turns their answers into safe / risky / dangerous (Jev judges, code rates: the TypeSafe skill);
  * - OpenAI-compatible chat (llama-swap, any local server): the model answers with one word.
+ * A TypeSafe model list means System One. An OpenAI-shaped list (llama-swap) can hold either, so
+ * Save asks the model one System One request.
  * A safe rating answers Allow for that one call; anything else, including a judge failure, waits
  * for the user with a note on why. All question wording and the rule live in this module.
  */
@@ -87,8 +89,8 @@ function validateJudge(j: AutoApproveSettings["judge"]) {
 }
 
 /**
- * Settings → Save: when the judge URL or model changes, list the URL's models, store the protocol
- * that list implies, and refuse a model the URL does not serve. An unchanged judge is not asked, so
+ * Settings → Save: when the judge URL or model changes, list the URL's models, refuse a model the
+ * URL does not serve, and store the protocol the model speaks. An unchanged judge is not asked, so
  * the switch can always be turned off, even while the judge is down.
  */
 export async function configureAutoApprove(db: Db, secrets: SecretStore, input: Partial<AutoApproveSettings>) {
@@ -98,10 +100,38 @@ export async function configureAutoApprove(db: Db, secrets: SecretStore, input: 
   }
   const judge = pickJudge({ ...saved, ...input.judge, protocol: "systemone" });
   validateJudge(judge);
-  const { protocol, models } = await listJudgeModels(judge.baseUrl, savedJudgeToken(secrets));
-  if (!models.includes(judge.model)) throw bad(`${judge.model} is not served at ${judge.baseUrl} (it serves: ${models.join(", ") || "nothing"})`);
+  const token = savedJudgeToken(secrets);
+  const listed = await listJudgeModels(judge.baseUrl, token);
+  if (!listed.models.includes(judge.model)) throw bad(`${judge.model} is not served at ${judge.baseUrl} (it serves: ${listed.models.join(", ") || "nothing"})`);
+  const protocol = listed.protocol === "systemone" ? "systemone" : await speaksSystemOne(judge, token);
   return saveAutoApproveSettings(db, { ...input, judge: { ...judge, protocol } });
 }
+
+/**
+ * An OpenAI-shaped list (llama-swap) can also hold System One models, so ask the model one Noul.
+ * An answer means System One, a 404 or 501 means chat; anything else refuses Save with the reason.
+ */
+async function speaksSystemOne(j: AutoApproveSettings["judge"], saved: JudgeToken): Promise<JudgeProtocol> {
+  const url = `${j.baseUrl.replace(/\/+$/, "")}/systemone`;
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(tokenFor(url, saved)) },
+      body: JSON.stringify({ model: j.model, state: stateOf(HARMLESS), questions: QUESTIONS }),
+      signal: AbortSignal.timeout(config.autoApproveTimeoutMs),
+    });
+    text = await res.text();
+  } catch (err) {
+    throw bad(`Can't tell whether ${j.model} speaks System One: ${why(err)}`);
+  }
+  // The server doesn't serve the path: llama.cpp answers 404, vLLM-style servers 501.
+  if (res.status === 404 || res.status === 501) return "openai";
+  if (res.ok && readNouls(text)) return "systemone";
+  throw bad(`Can't tell whether ${j.model} speaks System One: HTTP ${res.status}${serverSays(text)}`);
+}
+
 
 /** Settings → List models: the given URL's list, or the saved judge's when none is given. */
 export function listModelsFor(db: Db, secrets: SecretStore, baseUrl: unknown) {
@@ -314,18 +344,17 @@ function why(err: unknown) {
   return [e.message, e.cause?.message].filter(Boolean).join(": ");
 }
 
+/** The call Settings → Test and the Save probe ask about. */
+const HARMLESS: Permission = {
+  tool: "bash",
+  subject: "ls",
+  reasons: ["connection test"],
+  session: { title: "Settings test", task: "List the files in the worktree.", repo: "example/repo", worktree: "/data/worktrees/example" },
+};
+
 /** Settings → Test: ask the saved judge about a harmless call and report whether it answered. */
 export async function testJudge(settings: AutoApproveSettings, saved: JudgeToken) {
-  const v = await judgePermission(
-    {
-      tool: "bash",
-      subject: "ls",
-      reasons: ["connection test"],
-      session: { title: "Settings test", task: "List the files in the worktree.", repo: "example/repo", worktree: "/data/worktrees/example" },
-    },
-    settings,
-    saved,
-  );
+  const v = await judgePermission(HARMLESS, settings, saved);
   if (v.outcome === "failed") return { ok: false, message: v.note };
   return { ok: true, message: `${v.by} answered for \`ls\`: ${v.outcome === "allow" ? "safe" : v.rating} (${v.detail}).` };
 }
