@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { applyEvent, emptyTranscript, withMessages } from "../../shared/transcript.ts";
-import { savedJudgeToken, autoApproveView, getAutoApproveSettings, saveAutoApproveKey, saveAutoApproveSettings } from "../src/autoapprove.ts";
+import { autoApproveView, getAutoApproveSettings, saveAutoApproveKey, saveAutoApproveSettings, savedJudgeToken } from "../src/autoapprove.ts";
 import { openDb } from "../src/db.ts";
 import { redact } from "../src/git.ts";
 import { checkRequestOrigin, Router } from "../src/http.ts";

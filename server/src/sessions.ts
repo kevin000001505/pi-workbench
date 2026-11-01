@@ -27,7 +27,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { savedJudgeToken, getAutoApproveSettings, judgePermission } from "./autoapprove.ts";
+import { getAutoApproveSettings, judgePermission, savedJudgeToken } from "./autoapprove.ts";
 import { createWorktree, getRepo, removeWorktree, slugify, worktreeNeedsSetup } from "./repos.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";

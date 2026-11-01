@@ -6,7 +6,7 @@ import { config } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { GitEnv } from "./git.ts";
 import { GitHub, GitHubError } from "./github.ts";
-import { savedJudgeToken, autoApproveView, configureAutoApprove, getAutoApproveSettings, listModelsFor, saveAutoApproveKey, testJudge } from "./autoapprove.ts";
+import { autoApproveView, configureAutoApprove, getAutoApproveSettings, listModelsFor, saveAutoApproveKey, savedJudgeToken, testJudge } from "./autoapprove.ts";
 import { checkRequestOrigin, type Ctx, HttpError, readJson, Router, sendJson, serveStatic } from "./http.ts";
 import { listModels, probeEndpoint } from "./llm.ts";
 import { draftPr, openPr, changes } from "./prs.ts";

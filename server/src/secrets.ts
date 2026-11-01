@@ -53,7 +53,8 @@ export class SecretStore {
       for (const [name, value] of entries) this.set(scope, name, value);
       this.db.exec("COMMIT");
     } catch (err) {
-      this.db.exec("ROLLBACK");
+      // SQLite may already have rolled back (full disk, I/O error); keep the real error then.
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
       throw err;
     }
   }
