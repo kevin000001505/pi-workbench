@@ -26,8 +26,15 @@ export function PendingCard({ sessionId, req }: { sessionId: string; req: UiRequ
           <span className="pending-kind">Permission</span>
           <span className="muted small">{req.reasons?.join(" · ")}</span>
           {req.judge?.state === "judging" && <span className="tag">{req.judge.by} rating…</span>}
+          {req.reviewer?.state === "reviewing" && <span className="tag">{req.reviewer.by} reviewing…</span>}
+          {req.judge?.rating && <span className="tag tag-warn">{req.judge.rating}</span>}
         </div>
         {req.judge?.note && <p className={`small ${req.judge.state === "failed" ? "text-warn" : "muted"}`}>{req.judge.note}</p>}
+        {req.reviewer?.note && (
+          <p className={`small ${req.reviewer.state === "failed" ? "text-warn" : "muted"}`}>
+            {req.reviewer.state === "failed" ? req.reviewer.note : `${req.reviewer.by} escalated: ${req.reviewer.note}`}
+          </p>
+        )}
         <p className="pending-title">The agent wants to run {req.tool}:</p>
         <pre className="code pending-subject">{req.subject}</pre>
         <div className="row gap wrap">

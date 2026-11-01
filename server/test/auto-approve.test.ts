@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 import { RISKY, SAFE, startMockJudge } from "./mock-judge.ts";
 import { startMockLlm } from "./mock-llm.ts";
+import { startMockReviewer } from "./mock-reviewer.ts";
 
 const piBin = process.env.PI_BIN ?? "pi";
 const hasPi = spawnSync(piBin, ["--version"]).status === 0;
@@ -32,6 +33,7 @@ const TOKEN = "jev-secret-token";
 let mock: Awaited<ReturnType<typeof startMockLlm>>;
 let jev: Awaited<ReturnType<typeof startMockJudge>>;
 let chat: Awaited<ReturnType<typeof startMockJudge>>;
+let reviewer: Awaited<ReturnType<typeof startMockReviewer>>;
 let mgr: any;
 let db: any;
 let secrets: any;
@@ -88,6 +90,9 @@ before(async () => {
   mock = await startMockLlm();
   jev = await startMockJudge({ protocol: "systemone", model: "jev-latest", token: TOKEN });
   chat = await startMockJudge({ protocol: "openai", model: "mock-judge" });
+  // The reviewer the settings point at: scripted, and by default it escalates, so a call the
+  // judge did not rate safe still lands on the user's card, as these tests expect.
+  reviewer = await startMockReviewer({ provider: "anthropic", model: "reviewer-mock", key: "reviewer-test-key", defaultVerdict: "escalate" });
   const { config } = await import("../src/config.ts");
   const { openDb } = await import("../src/db.ts");
   const { SecretStore } = await import("../src/secrets.ts");
@@ -120,6 +125,8 @@ before(async () => {
 
   secrets = new SecretStore(db, process.env.WORKBENCH_MASTER_KEY!);
   auto.saveAutoApproveKey(secrets, { key: "judgeToken", value: TOKEN, baseUrl: jev.url });
+  auto.saveReviewerKey(secrets, { key: "reviewerKey", value: "reviewer-test-key", baseUrl: reviewer.url });
+  auto.saveAutoApproveSettings(db, { reviewer: { provider: "anthropic", model: "reviewer-mock", baseUrl: reviewer.url } });
   mgr = new SessionManager(db, secrets, async () => ({
     GIT_AUTHOR_NAME: "t",
     GIT_AUTHOR_EMAIL: "t@t",
@@ -146,6 +153,7 @@ after(async () => {
   await mock.close();
   await jev.close();
   await chat.close();
+  await reviewer.close();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
