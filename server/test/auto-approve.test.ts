@@ -406,11 +406,11 @@ test("an OpenAI-compatible judge answers with one word: only SAFE allows", { ski
 
 test("Settings → Test reports whether the saved judge answers", { skip }, async () => {
   await enable();
-  const ok = await auto.testJudge(auto.getAutoApproveSettings(db), auto.autoApproveKeys(secrets));
+  const ok = await auto.testJudge(auto.getAutoApproveSettings(db), auto.savedJudgeToken(secrets));
   assert.equal(ok.ok, true);
   assert.match(ok.message, /jev-latest/);
   jev.replies.push({ status: 401 });
-  const bad = await auto.testJudge(auto.getAutoApproveSettings(db), auto.autoApproveKeys(secrets));
+  const bad = await auto.testJudge(auto.getAutoApproveSettings(db), auto.savedJudgeToken(secrets));
   assert.equal(bad.ok, false);
   assert.match(bad.message, /HTTP 401/);
 });

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { applyEvent, emptyTranscript, withMessages } from "../../shared/transcript.ts";
-import { autoApproveKeys, autoApproveView, getAutoApproveSettings, saveAutoApproveKey, saveAutoApproveSettings } from "../src/autoapprove.ts";
+import { savedJudgeToken, autoApproveView, getAutoApproveSettings, saveAutoApproveKey, saveAutoApproveSettings } from "../src/autoapprove.ts";
 import { openDb } from "../src/db.ts";
 import { redact } from "../src/git.ts";
 import { checkRequestOrigin, Router } from "../src/http.ts";
@@ -318,8 +318,8 @@ test("the judge token is write-only and never reaches a pi environment", () => {
   const store = new SecretStore(db, "test-master-key-0123456789");
   store.set("global", "OTHER", "x");
   saveAutoApproveKey(store, { key: "judgeToken", value: "  jev-very-secret  ", baseUrl: "https://api.typesafe.ai/v1" });
-  assert.equal(autoApproveKeys(store).judgeToken, "jev-very-secret");
-  assert.equal(autoApproveKeys(store).tokenOrigin, "https://api.typesafe.ai", "the token is bound to the origin it was saved for");
+  assert.equal(savedJudgeToken(store).judgeToken, "jev-very-secret");
+  assert.equal(savedJudgeToken(store).tokenOrigin, "https://api.typesafe.ai", "the token is bound to the origin it was saved for");
   assert.ok(!JSON.stringify(store.envFor()).includes("jev-very-secret"));
   assert.ok(!JSON.stringify(store.envFor("me/app")).includes("jev-very-secret"));
   const view = autoApproveView(db, store);
@@ -339,7 +339,7 @@ test("the judge token is write-only and never reaches a pi environment", () => {
   ]) {
     assert.throws(() => saveAutoApproveKey(store, bad), (e: any) => e.status === 400, JSON.stringify(bad));
   }
-  assert.deepEqual(autoApproveKeys(store), { judgeToken: "jev-very-secret", tokenOrigin: "https://api.typesafe.ai" }, "a refused save changes nothing");
+  assert.deepEqual(savedJudgeToken(store), { judgeToken: "jev-very-secret", tokenOrigin: "https://api.typesafe.ai" }, "a refused save changes nothing");
   saveAutoApproveKey(store, { key: "judgeToken", value: null });
   assert.equal(autoApproveView(db, store).keys.judgeToken, false);
   assert.deepEqual(store.list("wb:auto-approve"), [], "removing the token leaves nothing behind");

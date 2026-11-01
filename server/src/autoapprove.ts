@@ -98,7 +98,7 @@ export async function configureAutoApprove(db: Db, secrets: SecretStore, input: 
   }
   const judge = pickJudge({ ...saved, ...input.judge, protocol: "systemone" });
   validateJudge(judge);
-  const { protocol, models } = await listJudgeModels(judge.baseUrl, autoApproveKeys(secrets));
+  const { protocol, models } = await listJudgeModels(judge.baseUrl, savedJudgeToken(secrets));
   if (!models.includes(judge.model)) throw bad(`${judge.model} is not served at ${judge.baseUrl} (it serves: ${models.join(", ") || "nothing"})`);
   return saveAutoApproveSettings(db, { ...input, judge: { ...judge, protocol } });
 }
@@ -107,16 +107,16 @@ export async function configureAutoApprove(db: Db, secrets: SecretStore, input: 
 export function listModelsFor(db: Db, secrets: SecretStore, baseUrl: unknown) {
   const url = typeof baseUrl === "string" && baseUrl.trim() ? baseUrl.trim() : getAutoApproveSettings(db).judge.baseUrl;
   httpUrl(url, "The judge URL must be an http:// or https:// URL");
-  return listJudgeModels(url, autoApproveKeys(secrets));
+  return listJudgeModels(url, savedJudgeToken(secrets));
 }
 
 /** `GET <url>/models`: TypeSafe answers `{ models: [{ name }] }`, an OpenAI-compatible server `{ data: [{ id }] }`. */
-export async function listJudgeModels(baseUrl: string, keys: JudgeToken): Promise<{ protocol: JudgeProtocol; models: string[] }> {
+export async function listJudgeModels(baseUrl: string, saved: JudgeToken): Promise<{ protocol: JudgeProtocol; models: string[] }> {
   const url = `${baseUrl.replace(/\/+$/, "")}/models`;
   let res: Response;
   let body: any;
   try {
-    res = await fetch(url, { headers: authHeaders(tokenFor(url, keys)), signal: AbortSignal.timeout(10_000) });
+    res = await fetch(url, { headers: authHeaders(tokenFor(url, saved)), signal: AbortSignal.timeout(10_000) });
     body = await res.json().catch(() => undefined);
   } catch (err) {
     throw bad(`Can't list models at ${url}: ${why(err)}`);
@@ -127,14 +127,14 @@ export async function listJudgeModels(baseUrl: string, keys: JudgeToken): Promis
   throw bad(`${url} did not answer with a TypeSafe or OpenAI-compatible model list`);
 }
 
-export function autoApproveKeys(secrets: SecretStore): JudgeToken {
+export function savedJudgeToken(secrets: SecretStore): JudgeToken {
   return { judgeToken: secrets.get(AUTO_APPROVE_SCOPE, SECRET_NAMES.judgeToken), tokenOrigin: secrets.get(AUTO_APPROVE_SCOPE, SECRET_NAMES.tokenOrigin) };
 }
 
 /** The token for a request to `url`: only when the URL is on the origin the token was saved for. */
-function tokenFor(url: string, keys: JudgeToken): string | undefined {
+function tokenFor(url: string, saved: JudgeToken): string | undefined {
   try {
-    return keys.judgeToken && new URL(url).origin === keys.tokenOrigin ? keys.judgeToken : undefined;
+    return saved.judgeToken && new URL(url).origin === saved.tokenOrigin ? saved.judgeToken : undefined;
   } catch {
     return undefined;
   }
@@ -156,8 +156,8 @@ export function saveAutoApproveKey(secrets: SecretStore, body: { key?: unknown; 
 
 /** What Settings shows: the settings, whether the token is set and for which origin, never its value. */
 export function autoApproveView(db: Db, secrets: SecretStore) {
-  const keys = autoApproveKeys(secrets);
-  return { ...getAutoApproveSettings(db), keys: { judgeToken: !!keys.judgeToken, tokenOrigin: keys.judgeToken ? keys.tokenOrigin : undefined } };
+  const saved = savedJudgeToken(secrets);
+  return { ...getAutoApproveSettings(db), keys: { judgeToken: !!saved.judgeToken, tokenOrigin: saved.judgeToken ? saved.tokenOrigin : undefined } };
 }
 
 // --- judging -------------------------------------------------------------------------------
@@ -231,10 +231,10 @@ const stateOf = (p: Permission) => ({
 });
 
 /** Ask the risk judge about one permission. Never throws: a failure is a verdict too. */
-export async function judgePermission(p: Permission, settings: AutoApproveSettings, keys: JudgeToken): Promise<Verdict> {
+export async function judgePermission(p: Permission, settings: AutoApproveSettings, saved: JudgeToken): Promise<Verdict> {
   const j = settings.judge;
   const by = j.model;
-  const token = tokenFor(j.baseUrl, keys);
+  const token = tokenFor(j.baseUrl, saved);
   if (j.protocol === "openai") {
     let reply: string;
     try {
@@ -302,7 +302,7 @@ function why(err: unknown) {
 }
 
 /** Settings → Test: ask the saved judge about a harmless call and report whether it answered. */
-export async function testJudge(settings: AutoApproveSettings, keys: JudgeToken) {
+export async function testJudge(settings: AutoApproveSettings, saved: JudgeToken) {
   const v = await judgePermission(
     {
       tool: "bash",
@@ -311,7 +311,7 @@ export async function testJudge(settings: AutoApproveSettings, keys: JudgeToken)
       session: { title: "Settings test", task: "List the files in the worktree.", repo: "example/repo", worktree: "/data/worktrees/example" },
     },
     settings,
-    keys,
+    saved,
   );
   if (v.outcome === "failed") return { ok: false, message: v.note };
   return { ok: true, message: `${v.by} answered for \`ls\`: ${v.outcome === "allow" ? "safe" : v.rating} (${v.detail}).` };

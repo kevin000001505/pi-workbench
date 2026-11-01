@@ -27,7 +27,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { autoApproveKeys, getAutoApproveSettings, judgePermission } from "./autoapprove.ts";
+import { savedJudgeToken, getAutoApproveSettings, judgePermission } from "./autoapprove.ts";
 import { createWorktree, getRepo, removeWorktree, slugify, worktreeNeedsSetup } from "./repos.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
@@ -531,7 +531,7 @@ export class SessionManager extends EventEmitter {
     const verdict = await judgePermission(
       { tool: req.tool ?? "", subject: req.subject ?? "", reasons: req.reasons ?? [], session },
       getAutoApproveSettings(this.db),
-      autoApproveKeys(this.secrets),
+      savedJudgeToken(this.secrets),
     );
     // Answered by the user, or dropped with its process or run: the verdict is stale.
     if (!s.pending.has(req.id)) return;
