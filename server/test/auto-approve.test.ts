@@ -285,7 +285,9 @@ test("safe needs no deletion and an easy undo below the no cut-off, and the task
 });
 
 for (const [name, reply, why] of [
-  ["an HTTP error", { status: 500 }, /HTTP 500/],
+  ["an HTTP error", { status: 500, body: JSON.stringify({ detail: "Model not found" }) }, /HTTP 500: Model not found/],
+  ["an HTTP error with no reason", { status: 503, body: "{}" }, /HTTP 503$/],
+  ["an HTTP error with a plain-text body", { status: 502, body: "Bad Gateway\n" }, /HTTP 502: Bad Gateway$/],
   ["a timeout", { nouls: SAFE, delayMs: 3000 }, /no answer within/],
   ["an unreadable answer", { body: "<html>nope</html>" }, /unreadable/],
   ["a missing answer", { nouls: { deletes_data: 0.1, reaches_outside: 0.1, hard_to_undo: 0.1 } }, /unreadable/],
@@ -387,10 +389,11 @@ test("an OpenAI-compatible judge answers with one word: only SAFE allows", { ski
     assert.match(unclear.judge.note, /SAFE, RISKY or DANGEROUS/);
     await deny(sessionId, unclear);
   }
-  chat.replies.push({ status: 500 });
+  // llama-swap's answer when the model process can't start.
+  chat.replies.push({ status: 500, body: JSON.stringify({ src: "llama-swap", error: { message: "upstream command exited prematurely", code: "internal_error" } }) });
   const broken = await cardFor(sessionId, "please push", judged);
   assert.equal(broken.judge.state, "failed");
-  assert.match(broken.judge.note, /^mock-judge failed: HTTP 500/);
+  assert.equal(broken.judge.note, "mock-judge failed: HTTP 500: upstream command exited prematurely");
   await deny(sessionId, broken);
   chat.replies.push({ text: "SAFE", delayMs: 3000 });
   const slow = await cardFor(sessionId, "please push", judged);

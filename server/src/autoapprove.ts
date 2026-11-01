@@ -243,8 +243,8 @@ export async function judgePermission(p: Permission, settings: AutoApproveSettin
       const call = { maxTokens: 1024, timeoutMs: config.autoApproveTimeoutMs, temperature: 0 };
       reply = await complete({ baseUrl: j.baseUrl, modelId: j.model }, token, CHAT_PROMPT, JSON.stringify(stateOf(p), null, 2), call);
     } catch (err) {
-      const status = (err as { status?: number }).status;
-      return { outcome: "failed", by, note: `${by} failed: ${status ? `HTTP ${status}` : why(err)}` };
+      const { status, body } = err as { status?: number; body?: string };
+      return { outcome: "failed", by, note: `${by} failed: ${status ? `HTTP ${status}${serverSays(body ?? "")}` : why(err)}` };
     }
     const word = readWord(reply);
     if (!word) return { outcome: "failed", by, note: `${by} failed: the answer was not SAFE, RISKY or DANGEROUS` };
@@ -265,7 +265,7 @@ export async function judgePermission(p: Permission, settings: AutoApproveSettin
   } catch (err) {
     return { outcome: "failed", by, note: `${by} failed: ${why(err)}` };
   }
-  if (!res.ok) return { outcome: "failed", by, note: `${by} failed: HTTP ${res.status}` };
+  if (!res.ok) return { outcome: "failed", by, note: `${by} failed: HTTP ${res.status}${serverSays(text)}` };
   const answers = readNouls(text);
   if (!answers) return { outcome: "failed", by, note: `${by} failed: the answer was unreadable (expected a probability from 0 to 1 for each question)` };
   const detail = (Object.keys(QUESTIONS) as (keyof Answers)[]).map((k) => `${k} ${answers[k].toFixed(2)}`).join(" · ");
@@ -293,6 +293,17 @@ function readNouls(text: string): Answers | undefined {
 function readWord(reply: string): Level | undefined {
   const m = /^\W*(SAFE|RISKY|DANGEROUS)\W*$/i.exec(reply);
   return m ? (m[1].toLowerCase() as Level) : undefined;
+}
+
+/** The server's own reason for an HTTP error: TypeSafe's `detail`, an OpenAI-style `error.message`, or a plain-text body. */
+function serverSays(text: string) {
+  let said: unknown = text;
+  try {
+    const body = JSON.parse(text);
+    said = body?.detail ?? body?.error?.message;
+  } catch {}
+  const s = typeof said === "string" ? said.trim().slice(0, 200) : "";
+  return s ? `: ${s}` : "";
 }
 
 const authHeaders = (token: string | undefined): Record<string, string> => (token ? { Authorization: `Bearer ${token}` } : {});

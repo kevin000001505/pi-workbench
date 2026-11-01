@@ -104,7 +104,10 @@ export async function complete(
     }),
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!res.ok) throw Object.assign(new Error(`LLM ${res.status}: ${(await res.text()).slice(0, 300)}`), { status: res.status });
+  if (!res.ok) {
+    const text = await res.text();
+    throw Object.assign(new Error(`LLM ${res.status}: ${text.slice(0, 300)}`), { status: res.status, body: text });
+  }
   const body = (await res.json()) as { choices?: { message?: { content?: string } }[] };
   return (body.choices?.[0]?.message?.content ?? "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 }

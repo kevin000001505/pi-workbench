@@ -8,7 +8,7 @@ export type JudgeReply = {
   /** OpenAI-compatible: the assistant's reply text. */
   text?: string;
   status?: number;
-  /** A raw body to send instead of a well-formed answer (unreadable answers). */
+  /** A raw body to send instead of a well-formed answer (unreadable answers), or with `status`, the error body. */
   body?: string;
   delayMs?: number;
 };
@@ -66,7 +66,7 @@ export function startMockJudge(opts: { protocol: "systemone" | "openai"; model: 
     if (reply.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs));
     answered++;
     if (res.destroyed) return;
-    if (reply.status && reply.status !== 200) return send(res, reply.status, { error: "mock failure" });
+    if (reply.status && reply.status !== 200) return send(res, reply.status, reply.body ?? { error: "mock failure" });
     if (reply.body !== undefined) return send(res, 200, reply.body);
     if (opts.protocol === "systemone") {
       const answers = Object.fromEntries(Object.entries(reply.nouls!).map(([k, v]) => [k, { type: "noul", noul: v }]));
