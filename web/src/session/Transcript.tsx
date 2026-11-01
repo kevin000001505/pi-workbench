@@ -169,10 +169,11 @@ function Message({ m, results, running }: { m: AgentMessage; results: Map<string
     );
   }
   if (m.role === "autoAnswer") {
+    const denied = m.answer === "deny";
     return (
       <div className="msg msg-note">
-        <span className="tag tag-ok">auto-approve</span> <code>{String(m.subject ?? m.tool)}</code>: allowed by {String(m.by)}
-        {typeof m.detail === "string" && m.detail && <span className="muted small"> ({m.detail})</span>}
+        <span className="tag">auto-approve</span> <code>{String(m.subject ?? m.tool)}</code>: {denied ? `denied by ${String(m.by)}` : `allowed by ${String(m.by)}`}
+        {typeof m.detail === "string" && m.detail && (denied ? <span> : {m.detail}</span> : <span className="muted small"> ({m.detail})</span>)}
       </div>
     );
   }

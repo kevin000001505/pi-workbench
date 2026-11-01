@@ -16,7 +16,9 @@ export type UiRequest = {
   reasons?: string[];
   /** permission under auto-approve: the risk judge's rating, then why it still waits for the user. */
   judge?: { state: "judging" | "waiting" | "failed"; by: string; rating?: string; note?: string };
-  /** permission under auto-approve: the frontier reviewer's verdict on the non-safe rating. */
+  /** permission under auto-approve: the reviewer's pass over a call the judge did not rate safe. */
+  review?: { state: "reviewing" | "escalated" | "failed"; by?: string; note?: string };
+  /** permission under auto-approve: compatibility shape used by newer cards/tests. */
   reviewer?: { state: "reviewing" | "waiting" | "failed"; by: string; note?: string };
   createdAt: number;
 };
@@ -28,7 +30,7 @@ export type AutoApproveSettings = {
   enabled: boolean;
   judge: { baseUrl: string; model: string; protocol: JudgeProtocol; yesAbove: number; noBelow: number };
   reviewer: ReviewerSettings;
-  /** Whether the write-only keys are set (their values never come back) and the hosts they are bound to. */
+  /** Whether the write-only keys are set (their values never come back), and the judge host it is bound to. */
   keys: { judgeToken: boolean; tokenOrigin?: string; reviewerKey: boolean; reviewerKeyOrigin?: string };
 };
 

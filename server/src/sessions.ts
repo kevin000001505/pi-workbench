@@ -6,7 +6,6 @@ import {
   activityOf,
   type AgentMessage,
   applyEvent,
-  type ContentBlock,
   emptyTranscript,
   type Transcript,
   withMessages,
@@ -31,15 +30,17 @@ import { waitsOnUser } from "../../shared/pending.ts";
 import {
   getAutoApproveSettings,
   judgePermission,
-  providerName,
   reviewPermission,
+  reviewerName,
   savedJudgeToken,
   savedReviewerKey,
+  transcriptExcerpt,
+  type ReviewContext,
 } from "./autoapprove.ts";
 import { createWorktree, getRepo, removeWorktree, slugify, worktreeNeedsSetup } from "./repos.ts";
+import { loadSshHosts } from "./ssh.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
-import { loadSshHosts } from "./ssh.ts";
 import { type RpcRecord, RpcProcess } from "./rpc.ts";
 
 export type SessionStatus = "stopped" | "starting" | "running" | "waiting" | "idle" | "error";
@@ -59,7 +60,9 @@ export type UiRequest = {
   reasons?: string[];
   /** permission under auto-approve: the risk judge's rating, then why it still waits for the user. */
   judge?: { state: "judging" | "waiting" | "failed"; by: string; rating?: string; note?: string };
-  /** permission under auto-approve: the frontier reviewer's verdict (a judge rating that is not safe). */
+  /** permission under auto-approve: the reviewer's pass over a call the judge did not rate safe. */
+  review?: { state: "reviewing" | "escalated" | "failed"; by?: string; note?: string };
+  /** compatibility shape used by newer UI/test paths. */
   reviewer?: { state: "reviewing" | "waiting" | "failed"; by: string; note?: string };
   createdAt: number;
 };
@@ -129,30 +132,6 @@ function latestTask(t: Transcript): { task: string; skill?: string } {
   const expanded = /^<skill name="([\w-]+)"[^>]*>\n[\s\S]*?\n<\/skill>(?:\n\n|$)/.exec(text);
   const task = expanded ? text.slice(expanded[0].length) : text;
   return { task: task.length > 2000 ? `${task.slice(0, 2000)}…` : task, ...(expanded ? { skill: expanded[1] } : {}) };
-}
-
-const textOfMessage = (content: string | ContentBlock[]): string =>
-  typeof content === "string" ? content : content.filter((b) => b.type === "text").map((b) => b.text).join("\n");
-
-/** The recent conversation the reviewer sees: one line per message, the newest kept, truncated. */
-function recentTranscript(t: Transcript, max = 6000): string {
-  const lines: string[] = [];
-  for (const m of t.messages.slice(-40)) {
-    if (m.role === "autoAnswer") continue;
-    if (m.role === "user") lines.push(`user: ${textOfMessage(m.content).trim().slice(0, 400)}`);
-    else if (m.role === "assistant") {
-      if (typeof m.content === "string") {
-        if (m.content.trim()) lines.push(`assistant: ${m.content.trim().slice(0, 400)}`);
-      } else {
-        for (const b of m.content) {
-          if (b.type === "text" && b.text.trim()) lines.push(`assistant: ${b.text.trim().slice(0, 400)}`);
-          else if (b.type === "toolCall") lines.push(`assistant: calls ${b.name} ${JSON.stringify(b.arguments).slice(0, 200)}`);
-        }
-      }
-    } else if (m.role === "toolResult") lines.push(`result: ${textOfMessage(m.content).split("\n")[0].slice(0, 200)}`);
-  }
-  const joined = lines.join("\n");
-  return joined.length > max ? joined.slice(-max) : joined;
 }
 
 const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs automatically on this repository's first pi-workbench session. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push.`;
@@ -552,10 +531,10 @@ export class SessionManager extends EventEmitter {
     this.emitSummary(id, true);
   }
 
-  /** Put a permission to the risk judge; a safe rating allows it, anything else goes to the reviewer. */
+  /** Put a permission to the risk judge; answer it when it is safe, otherwise send it to the reviewer or leave it for the user. */
   private async autoJudge(id: string, s: Live, req: UiRequest) {
-    const settings = getAutoApproveSettings(this.db);
     const row = this.row(id);
+    const settings = getAutoApproveSettings(this.db);
     const ticket = this.tickets(id).find((t) => t.status === "running");
     const session = {
       title: row.title,
@@ -564,11 +543,8 @@ export class SessionManager extends EventEmitter {
       worktree: row.worktree,
       ...(ticket ? { ticket: `#${ticket.num} ${ticket.title}` } : {}),
     };
-    const verdict = await judgePermission(
-      { tool: req.tool ?? "", subject: req.subject ?? "", reasons: req.reasons ?? [], session },
-      settings,
-      savedJudgeToken(this.secrets),
-    );
+    const permission = { tool: req.tool ?? "", subject: req.subject ?? "", reasons: req.reasons ?? [], session };
+    const verdict = await judgePermission(permission, settings, savedJudgeToken(this.secrets));
     // Answered by the user, or dropped with its process or run: the verdict is stale.
     if (!s.pending.has(req.id)) return;
     if (verdict.outcome === "allow") {
@@ -584,42 +560,53 @@ export class SessionManager extends EventEmitter {
       this.emitSummary(id, true);
       return;
     }
-    // The judge did not rate it safe: the reviewer finishes the decision.
-    req.judge = { state: "waiting", by: verdict.by, rating: verdict.rating, note: verdict.note };
-    req.reviewer = { state: "reviewing", by: providerName(settings.reviewer.provider) };
-    this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
-    this.emitSummary(id, true);
-    const review = await reviewPermission(
-      {
-        tool: req.tool ?? "",
-        subject: req.subject ?? "",
-        reasons: req.reasons ?? [],
-        rating: verdict.rating,
-        judgeDetail: verdict.detail,
-        session: { ...session, branch: row.branch, phase: row.phase },
-        transcript: recentTranscript(s.transcript),
-        // Alias and user@hostname only, never key names.
-        ssh: loadSshHosts(this.db).map((h) => ({ alias: h.alias, user: h.user, hostname: h.hostname })),
-      },
-      settings,
-      savedReviewerKey(this.secrets),
-    );
-    if (!s.pending.has(req.id)) return;
-    if (review.outcome === "allow") {
-      // One call only, never "Allow for this session": the next matching call is reviewed again.
-      const ev = { type: "wb_auto_answer", requestId: req.id, tool: req.tool, subject: req.subject, answer: "allow", by: review.by, detail: review.note, timestamp: Date.now() };
-      applyEvent(s.transcript, ev);
-      this.emit("event", id, ev);
-      this.answer(id, s, req, { type: "extension_ui_response", id: req.id, value: "Allow" });
+    // The judge did not rate it safe. Without a configured reviewer the card waits with the rating, as before.
+    const reviewerKey = savedReviewerKey(this.secrets);
+    if (!settings.reviewer.model || !reviewerKey.reviewerKey) {
+      req.judge = { state: "waiting", by: verdict.by, rating: verdict.rating, note: verdict.note };
+      this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
+      this.emitSummary(id, true);
       return;
     }
-    // An escalation (a deny for now) waits for the user with the model's reasoning; a failure notes why.
-    req.reviewer = { state: review.outcome === "escalate" ? "waiting" : "failed", by: review.by, note: review.note };
+    req.judge = { state: "waiting", by: verdict.by, rating: verdict.rating, note: verdict.note };
+    req.review = { state: "reviewing", by: reviewerName(settings) };
+    req.reviewer = { state: "reviewing", by: reviewerName(settings) };
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
-    if (review.outcome === "escalate") {
-      this.emit("event", id, { type: "wb_notify", message: `${review.by} escalated the permission: ${review.note}`, level: "warning" });
-    }
     this.emitSummary(id, true);
+    const rv = await reviewPermission(permission, this.reviewContext(id, s, row, verdict), settings, reviewerKey);
+    // Answered by the user, or dropped with its process or run: the verdict is stale.
+    if (!s.pending.has(req.id)) return;
+    if (rv.outcome === "allow" || rv.outcome === "deny") {
+      const ev = { type: "wb_auto_answer", requestId: req.id, tool: req.tool, subject: req.subject, answer: rv.outcome, by: rv.by, detail: rv.reason, timestamp: Date.now() };
+      applyEvent(s.transcript, ev);
+      this.emit("event", id, ev);
+      // A deny answers with the envelope the extension turns into a reviewer-deny block.
+      this.answer(id, s, req, { type: "extension_ui_response", id: req.id, value: rv.outcome === "allow" ? "Allow" : JSON.stringify({ wb: "deny", by: rv.by, reason: rv.reason }) });
+      return;
+    }
+    // An escalation or a reviewer failure: the card waits for the user with the note.
+    req.review = { state: rv.outcome === "escalate" ? "escalated" : "failed", by: rv.by, note: rv.outcome === "escalate" ? rv.reason : rv.note };
+    req.reviewer = { state: rv.outcome === "escalate" ? "waiting" : "failed", by: rv.by, note: rv.outcome === "escalate" ? rv.reason : rv.note };
+    this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
+    this.emitSummary(id, true);
+  }
+
+  /** What the reviewer sees, from what the manager already holds (ADR 0002). */
+  private reviewContext(id: string, s: Live, row: SessionRow, verdict: { rating?: string; detail?: string }): ReviewContext {
+    const ticket = this.tickets(id).find((t) => t.status === "running");
+    return {
+      title: row.title,
+      ...latestTask(s.transcript),
+      phase: row.phase,
+      ...(ticket ? { ticket: { num: ticket.num, title: ticket.title, body: ticket.body } } : {}),
+      repo: row.repo_id,
+      branch: row.branch,
+      worktree: row.worktree,
+      sshHosts: loadSshHosts(this.db).map((h) => ({ alias: h.alias, user: h.user, hostname: h.hostname })),
+      recent: transcriptExcerpt(s.transcript.messages),
+      rating: verdict.rating,
+      judgeDetail: verdict.detail,
+    };
   }
 
   /** Write the answer to pi and drop the request; a judgement still running for it finds it gone. */

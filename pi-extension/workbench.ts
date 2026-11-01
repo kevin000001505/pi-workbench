@@ -3,7 +3,11 @@
  *
  * - Known SSH hosts: on every run the "wb_ssh" system prompt section names the hosts from the
  *   non-secret hosts file, so "fix the code in Media" means `ssh Media` and work there.
- * - Approval gate: tool calls matching the rules in workbench-rules.json wait for the user.
+ * - Approval gate: tool calls matching the rules in workbench-rules.json wait for the user. A
+ *   `Deny` click, a typed note, or a malformed `"wb": "deny"` value block with the user's wording;
+ *   a well-formed `{"wb": "deny", "by", "reason"}` value (the auto-approve reviewer's answer,
+ *   ADR 0002) blocks with the reviewer's wording, so the agent knows the reviewer denied the
+ *   call and can choose another approach.
  * - ask_user tool: lets the model put a question or choice to the user as a decision card.
  *
  * Both go through ctx.ui.select / ctx.ui.input, which RPC mode turns into extension_ui_request
@@ -77,6 +81,25 @@ function isOutside(cwd: string, target: string): boolean {
   return rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
 }
 
+/**
+ * The reviewer-deny envelope the server answers with (ADR 0002): `{"wb": "deny", "by": <name>,
+ * "reason": <text>}`. A non-object, a different wb, or a missing by/reason reads as a plain deny,
+ * never as an allow. `reason` may be undefined (a plain deny); a well-formed one always has both.
+ */
+function denyEnvelope(choice: unknown): { by?: string; reason?: string } | null {
+  if (typeof choice !== "string" || !choice.startsWith("{")) return null;
+  try {
+    const v = JSON.parse(choice);
+    if (!v || typeof v !== "object" || v.wb !== "deny") return null;
+    return {
+      by: typeof v.by === "string" && v.by.trim() ? v.by.trim() : undefined,
+      reason: typeof v.reason === "string" ? v.reason : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export default function workbench(pi: ExtensionAPI) {
   const allowedForSession = new Set<string>();
 
@@ -130,8 +153,15 @@ export default function workbench(pi: ExtensionAPI) {
       for (const m of matched) allowedForSession.add(m.id);
       return undefined;
     }
+    const labels = matched.map((m) => m.label).join(", ");
+    // The server's reviewer-deny envelope. A malformed one is a plain deny, never an allow.
+    const deny = denyEnvelope(choice);
+    if (deny?.by && deny.reason !== undefined) {
+      return { block: true, reason: `The auto-approve reviewer (${deny.by}) denied this ${event.toolName} call (${labels}): ${deny.reason}. You can choose another approach, or ask the user with ask_user.` };
+    }
+    if (deny) return { block: true, reason: `The user denied this ${event.toolName} call (${labels}).` };
     const why = typeof choice === "string" && choice !== DENY && choice.trim() ? ` The user said: ${choice}` : "";
-    return { block: true, reason: `The user denied this ${event.toolName} call (${matched.map((m) => m.label).join(", ")}).${why}` };
+    return { block: true, reason: `The user denied this ${event.toolName} call (${labels}).${why}` };
   });
 
   pi.registerTool({

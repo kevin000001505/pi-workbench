@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { applyEvent, emptyTranscript, withMessages } from "../../shared/transcript.ts";
-import { autoApproveView, getAutoApproveSettings, saveAutoApproveKey, saveAutoApproveSettings, savedJudgeToken } from "../src/autoapprove.ts";
+import { autoApproveView, getAutoApproveSettings, reviewPermission, saveAutoApproveKey, saveAutoApproveSettings, savedJudgeToken, savedReviewerKey, transcriptExcerpt } from "../src/autoapprove.ts";
+import { startMockReviewer } from "./mock-reviewer.ts";
+import { waitsOnUser } from "../../shared/pending.ts";
 import { openDb } from "../src/db.ts";
 import { redact } from "../src/git.ts";
 import { checkRequestOrigin, Router } from "../src/http.ts";
@@ -354,6 +356,158 @@ test("the judge token is write-only and never reaches a pi environment", () => {
   saveAutoApproveKey(store, { key: "judgeToken", value: null });
   assert.equal(autoApproveView(db, store).keys.judgeToken, false);
   assert.deepEqual(store.list("wb:auto-approve"), [], "removing the token leaves nothing behind");
+});
+
+test("reviewer settings validate and keep their shape", () => {
+  const db = tmpDb();
+  const defaults = getAutoApproveSettings(db);
+  assert.deepEqual(defaults.reviewer, { provider: "anthropic", baseUrl: "https://api.anthropic.com", model: "" });
+  const rev = (patch: Record<string, unknown>) => ({ reviewer: { ...getAutoApproveSettings(db).reviewer, ...patch } }) as any;
+  for (const provider of ["google", 7, ""]) assert.throws(() => saveAutoApproveSettings(db, rev({ provider })), /provider/);
+  for (const baseUrl of ["ftp://x", 42, "https://", ""]) assert.throws(() => saveAutoApproveSettings(db, rev({ baseUrl })), /URL/);
+  for (const model of [7, null]) assert.throws(() => saveAutoApproveSettings(db, rev({ model })), /model/);
+  const saved = saveAutoApproveSettings(db, rev({ provider: "openai", baseUrl: "https://api.openai.com/v1", model: "gpt-mock", extra: "x" }));
+  assert.deepEqual(saved.reviewer, { provider: "openai", baseUrl: "https://api.openai.com/v1", model: "gpt-mock" });
+  const judge = saved.judge;
+  assert.deepEqual(saveAutoApproveSettings(db, { enabled: true }).reviewer, saved.reviewer, "saving only the switch keeps the reviewer");
+  assert.deepEqual(saveAutoApproveSettings(db, { enabled: true }).judge, judge);
+});
+
+test("the reviewer key is write-only and never reaches a pi environment", () => {
+  const db = tmpDb();
+  const store = new SecretStore(db, "test-master-key-0123456789");
+  saveAutoApproveKey(store, { key: "reviewerKey", value: "  claude-secret  " });
+  assert.deepEqual(savedReviewerKey(store), { reviewerKey: "claude-secret", keyOrigin: undefined });
+  assert.ok(!JSON.stringify(store.envFor()).includes("claude-secret"));
+  assert.ok(!JSON.stringify(store.envFor("me/app")).includes("claude-secret"));
+  const view = autoApproveView(db, store);
+  assert.equal(view.keys.reviewerKey, true);
+  assert.ok(!JSON.stringify(view).includes("claude-secret"));
+  for (const bad of [{ key: "reviewerKey", value: "" }, { key: "reviewerKey", value: "   " }, { key: "reviewerKey", value: 5 }]) {
+    assert.throws(() => saveAutoApproveKey(store, bad), (e: any) => e.status === 400, JSON.stringify(bad));
+  }
+  assert.deepEqual(savedReviewerKey(store), { reviewerKey: "claude-secret", keyOrigin: undefined }, "a refused save changes nothing");
+  saveAutoApproveKey(store, { key: "reviewerKey", value: null });
+  assert.deepEqual(savedReviewerKey(store), { reviewerKey: undefined, keyOrigin: undefined });
+  assert.equal(autoApproveView(db, store).keys.reviewerKey, false);
+  assert.deepEqual(store.list("wb:auto-approve"), [], "removing the key leaves nothing behind");
+});
+
+const PERM = {
+  tool: "bash",
+  subject: "rm -rf build",
+  reasons: ["rm -r / -f"],
+  session: { title: "Auto", task: "Tidy the demo", repo: "me/demo", worktree: "/wt" },
+};
+const CTX = {
+  title: "Auto",
+  task: "Tidy the demo",
+  phase: "direct",
+  repo: "me/demo",
+  branch: "pi/x-1",
+  worktree: "/wt",
+  sshHosts: [{ alias: "Media", user: "ubuntu", hostname: "127.0.0.1" }],
+  recent: "[user] please rm the build dir",
+};
+const REVIEW_SETTINGS = (baseUrl: string, patch: Record<string, unknown> = {}) => ({
+  enabled: true,
+  judge: { baseUrl: "https://judge.example/v1", model: "jev-latest", protocol: "systemone", yesAbove: 0.7, noBelow: 0.3 },
+  reviewer: { provider: "anthropic", baseUrl, model: "claude-mock", ...patch },
+});
+
+test("reviewPermission: a reviewer without a model id or key fails with a note", async () => {
+  const noModel = await reviewPermission(PERM, CTX, REVIEW_SETTINGS("https://x.example", { model: "" }), "key");
+  assert.equal(noModel.outcome, "failed");
+  assert.match(noModel.note, /model id/);
+  assert.equal(noModel.by, "Claude");
+  const noKey = await reviewPermission(PERM, CTX, REVIEW_SETTINGS("https://x.example"), undefined);
+  assert.equal(noKey.outcome, "failed");
+  assert.match(noKey.note, /API key/);
+});
+
+test("reviewPermission: the anthropic reviewer's forced tool verdict is parsed, and no key leaves the server", async () => {
+  const m = await startMockReviewer({ provider: "anthropic", model: "claude-mock", key: "claude-secret" });
+  try {
+    const v = await reviewPermission(PERM, CTX, REVIEW_SETTINGS(m.url), "claude-secret");
+    assert.deepEqual(v, { outcome: "allow", by: "Claude", reason: "Routine cleanup for the task." });
+    const req = m.requests.find((r) => r.path === "/v1/messages")!;
+    assert.equal(req.key, "claude-secret");
+    assert.equal(req.body.model, "claude-mock");
+    assert.equal(req.body.tools?.[0]?.name, "verdict", "the verdict is a forced tool call");
+    assert.equal(req.body.tool_choice?.name, "verdict");
+    const state = JSON.stringify(req.body);
+    assert.match(state, /rm -rf build/);
+    assert.match(state, /Tidy the demo/);
+    assert.match(state, /pi\/x-1/);
+    assert.match(state, /Media \(ubuntu@127\.0\.0\.1\)/);
+    assert.ok(!state.includes("claude-secret"), "the key is not in the body");
+  } finally {
+    await m.close();
+  }
+});
+
+test("reviewPermission: deny and escalate verdicts carry the reason", async () => {
+  const m = await startMockReviewer({ provider: "anthropic", model: "claude-mock", key: "k" });
+  try {
+    m.replies.push({ decision: "deny", reason: "Not part of the task." });
+    const deny = await reviewPermission({ ...PERM, subject: "rm -rf /mnt/data" }, CTX, REVIEW_SETTINGS(m.url), "k");
+    assert.deepEqual(deny, { outcome: "deny", by: "Claude", reason: "Not part of the task." });
+    m.replies.push({ decision: "escalate", reason: "Could damage data beyond the task." });
+    const esc = await reviewPermission(PERM, CTX, REVIEW_SETTINGS(m.url), "k");
+    assert.deepEqual(esc, { outcome: "escalate", by: "Claude", reason: "Could damage data beyond the task." });
+  } finally {
+    await m.close();
+  }
+});
+
+test("reviewPermission: an HTTP error, a garbage body, or a missing verdict fails with a note", async () => {
+  const m = await startMockReviewer({ provider: "anthropic", model: "claude-mock", key: "k" });
+  try {
+    for (const [reply, why] of [
+      [{ status: 500, body: JSON.stringify({ error: { message: "overloaded" } }) }, /HTTP 500: overloaded/],
+      [{ body: "<html>nope</html>" }, /unreadable/],
+      [{ decision: "maybe", reason: "hmm" }, /unreadable/],
+      [{ decision: "deny", reason: "" }, /unreadable/],
+    ] as const) {
+      m.replies.push(reply);
+      const v = await reviewPermission(PERM, CTX, REVIEW_SETTINGS(m.url), "k");
+      assert.equal(v.outcome, "failed", why);
+      assert.match(v.note, why);
+    }
+  } finally {
+    await m.close();
+  }
+});
+
+test("reviewPermission: the openai provider reads a JSON verdict and names the reviewer OpenAI", async () => {
+  const m = await startMockReviewer({ provider: "openai", model: "gpt-mock", key: "sk" });
+  try {
+    const v = await reviewPermission(PERM, CTX, { ...REVIEW_SETTINGS(m.url), reviewer: { provider: "openai", baseUrl: m.url, model: "gpt-mock" } }, "sk");
+    assert.equal(v.by, "OpenAI");
+    assert.equal(v.outcome, "allow");
+    const req = m.requests.find((r) => r.path === "/chat/completions")!;
+    assert.equal(req.key, "sk", "the openai key travels as a bearer token or api key");
+    assert.match(JSON.stringify(req.body), /rm -rf build/);
+  } finally {
+    await m.close();
+  }
+});
+
+test("transcriptExcerpt keeps the newest messages and truncates", () => {
+  const msgs = Array.from({ length: 20 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: `message number ${i} ${"x".repeat(200)}` }));
+  const out = transcriptExcerpt(msgs, 500);
+  assert.match(out, /message number 19/);
+  assert.ok(!out.includes("message number 5"), "old lines drop out");
+  assert.ok(out.length <= 500);
+});
+
+test("waitsOnUser: judging and reviewing do not wait; waiting, escalated, and failed do", () => {
+  assert.equal(waitsOnUser({}), true);
+  assert.equal(waitsOnUser({ judge: { state: "judging" } }), false);
+  assert.equal(waitsOnUser({ judge: { state: "waiting" } }), true);
+  assert.equal(waitsOnUser({ judge: { state: "waiting" }, review: { state: "reviewing" } }), false);
+  assert.equal(waitsOnUser({ judge: { state: "waiting" }, review: { state: "escalated" } }), true);
+  assert.equal(waitsOnUser({ judge: { state: "failed" }, review: { state: "failed" } }), true);
 });
 
 test("the Secrets page cannot see, set, or delete the auto-approve scope", () => {
