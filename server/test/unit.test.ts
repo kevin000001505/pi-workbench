@@ -35,6 +35,17 @@ test("secrets round-trip, overlay per repo, and are encrypted at rest", () => {
   assert.throws(() => new SecretStore(db, "another-master-key-entirely").envFor());
 });
 
+test("setting several secrets writes all of them or none", () => {
+  const db = tmpDb();
+  const store = new SecretStore(db, "test-master-key-0123456789");
+  store.setAll("global", [["A", "old-a"], ["B", "old-b"]]);
+  // The second value fails mid-way (it cannot be encrypted), after the first row was written.
+  assert.throws(() => store.setAll("global", [["A", "new-a"], ["B", 5 as any]]));
+  assert.deepEqual(store.envFor(), { A: "old-a", B: "old-b" });
+  store.setAll("global", [["A", "new-a"], ["B", "new-b"]]);
+  assert.deepEqual(store.envFor(), { A: "new-a", B: "new-b" });
+});
+
 test("secret rows are bound to their slot", () => {
   const db = tmpDb();
   const store = new SecretStore(db, "a-master-key-of-some-length");

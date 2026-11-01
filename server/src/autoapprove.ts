@@ -150,8 +150,10 @@ export function saveAutoApproveKey(secrets: SecretStore, body: { key?: unknown; 
   if (typeof body.value !== "string" || !body.value.trim()) throw bad("Value is empty");
   // Check both values before writing either: a half-saved token could go to the old host.
   const origin = httpUrl(body.baseUrl, "Say which judge URL (http:// or https://) the token is for").origin;
-  secrets.set(AUTO_APPROVE_SCOPE, SECRET_NAMES.judgeToken, body.value.trim());
-  secrets.set(AUTO_APPROVE_SCOPE, SECRET_NAMES.tokenOrigin, origin);
+  secrets.setAll(AUTO_APPROVE_SCOPE, [
+    [SECRET_NAMES.judgeToken, body.value.trim()],
+    [SECRET_NAMES.tokenOrigin, origin],
+  ]);
 }
 
 /** What Settings shows: the settings, whether the token is set and for which origin, never its value. */
