@@ -8,7 +8,7 @@ export type JudgeReply = {
   /** OpenAI-compatible: the assistant's reply text. */
   text?: string;
   status?: number;
-  /** A raw body to send instead of a well-formed answer (unreadable answers). */
+  /** A raw body to send instead of a well-formed answer (unreadable answers), or with `status`, the error body. */
   body?: string;
   delayMs?: number;
 };
@@ -24,8 +24,9 @@ export const PUSH = { deletes_data: 0.03, reaches_outside: 0.95, hard_to_undo: 0
  * - "openai": an OpenAI-compatible `GET /v1/models` ({ data: [{ id }] }) and `POST /v1/chat/completions`.
  * Queued `replies` answer first; otherwise it answers by the call in the state: `rm ` is risky,
  * `git push` reaches outside (and is otherwise safe), anything else safe. With `token`, every request without that bearer token gets 403, like TypeSafe.
+ * `list: "openai"` lists a System One model the way llama-swap does, in the OpenAI shape.
  */
-export function startMockJudge(opts: { protocol: "systemone" | "openai"; model: string; token?: string }): Promise<{
+export function startMockJudge(opts: { protocol: "systemone" | "openai"; model: string; token?: string; list?: "systemone" | "openai" }): Promise<{
   url: string;
   requests: { path: string; auth?: string; body: any }[];
   replies: JudgeReply[];
@@ -51,13 +52,15 @@ export function startMockJudge(opts: { protocol: "systemone" | "openai"; model: 
       return send(
         res,
         200,
-        opts.protocol === "systemone"
+        (opts.list ?? opts.protocol) === "systemone"
           ? { models: [{ name: opts.model, description: "mock", release_date: "2026-09-15" }] }
           : { object: "list", data: [{ id: opts.model, object: "model" }] },
       );
     }
     const route = opts.protocol === "systemone" ? "/v1/systemone" : "/v1/chat/completions";
     if (req.method !== "POST" || path !== route) return send(res, 404, { error: "not found" });
+    // llama-swap picks the model process by name, and TypeSafe refuses a model it doesn't serve.
+    if (body.model !== opts.model) return send(res, 404, { error: { message: `model ${body.model} not found` } });
 
     const state = JSON.stringify(opts.protocol === "systemone" ? body.state : body.messages);
     const risky = state.includes("rm ");
@@ -66,7 +69,7 @@ export function startMockJudge(opts: { protocol: "systemone" | "openai"; model: 
     if (reply.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs));
     answered++;
     if (res.destroyed) return;
-    if (reply.status && reply.status !== 200) return send(res, reply.status, { error: "mock failure" });
+    if (reply.status && reply.status !== 200) return send(res, reply.status, reply.body ?? { error: "mock failure" });
     if (reply.body !== undefined) return send(res, 200, reply.body);
     if (opts.protocol === "systemone") {
       const answers = Object.fromEntries(Object.entries(reply.nouls!).map(([k, v]) => [k, { type: "noul", noul: v }]));

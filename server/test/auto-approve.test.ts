@@ -185,13 +185,48 @@ test("auto-approve can be switched off while the judge is down", { skip }, async
 });
 
 test("saving the judge checks the URL and model, and stores the detected protocol", { skip }, async () => {
+  await enable({ baseUrl: chat.url, model: "mock-judge" });
+  const from = jev.requests.length;
   const saved = await enable();
   assert.equal(saved.judge.protocol, "systemone");
+  assert.deepEqual(jev.requests.slice(from).map((r) => r.path), ["/v1/models"], "a TypeSafe list needs no paid probe");
   await assert.rejects(enable({ model: "jev-typo" }), /jev-typo.*not served/);
   const c = await enable({ baseUrl: chat.url, model: "mock-judge" });
   assert.equal(c.judge.protocol, "openai");
   await enable();
   assert.equal(auto.getAutoApproveSettings(db).judge.protocol, "systemone", "a rejected save changes nothing");
+});
+
+test("a System One model behind an OpenAI-shaped list (llama-swap) is asked at Save, and judged with Nouls", { skip }, async () => {
+  const swap = await startMockJudge({ protocol: "systemone", model: "clef-flash", list: "openai", token: "swap-token" });
+  auto.saveAutoApproveKey(secrets, { key: "judgeToken", value: "swap-token", baseUrl: swap.url });
+  try {
+    assert.equal((await auto.listModelsFor(db, secrets, swap.url)).protocol, "openai", "the list alone can't tell");
+    const saved = await enable({ baseUrl: swap.url, model: "clef-flash" });
+    assert.equal(saved.judge.protocol, "systemone");
+    const added = await run(sessionId, "please push");
+    assert.ok(added.some((m: any) => m.role === "autoAnswer"));
+    assert.ok(swap.requests.every((r) => r.path !== "/v1/chat/completions"), "no chat call to a System One model");
+    // A chat model says it doesn't serve the path: llama.cpp with 404, vLLM-style servers with 501.
+    await enable({ baseUrl: chat.url, model: "mock-judge" });
+    swap.replies.push({ status: 501 });
+    assert.equal((await enable({ baseUrl: swap.url, model: "clef-flash" })).judge.protocol, "openai");
+    // A model that can't answer the probe is not saved, and the refusal says why.
+    await enable({ baseUrl: chat.url, model: "mock-judge" });
+    for (const [reply, why] of [
+      [{ status: 500, body: JSON.stringify({ error: { message: "upstream command exited prematurely" } }) }, /clef-flash.*HTTP 500: upstream command exited prematurely/],
+      [{ nouls: SAFE, delayMs: 3000 }, /clef-flash.*no answer within/],
+      [{ body: "<html>nope</html>" }, /clef-flash.*HTTP 200/],
+    ] as const) {
+      swap.replies.push(reply);
+      await assert.rejects(enable({ baseUrl: swap.url, model: "clef-flash" }), why);
+      assert.equal(auto.getAutoApproveSettings(db).judge.model, "mock-judge", "a refused save changes nothing");
+    }
+  } finally {
+    auto.saveAutoApproveKey(secrets, { key: "judgeToken", value: TOKEN, baseUrl: jev.url });
+    await enable();
+    await swap.close();
+  }
 });
 
 test("a permission Jev judges safe runs without the user, with an allowed-by line", { skip }, async () => {
@@ -285,7 +320,9 @@ test("safe needs no deletion and an easy undo below the no cut-off, and the task
 });
 
 for (const [name, reply, why] of [
-  ["an HTTP error", { status: 500 }, /HTTP 500/],
+  ["an HTTP error", { status: 500, body: JSON.stringify({ detail: "Model not found" }) }, /HTTP 500: Model not found/],
+  ["an HTTP error with no reason", { status: 503, body: "{}" }, /HTTP 503$/],
+  ["an HTTP error with a plain-text body", { status: 502, body: "Bad Gateway\n" }, /HTTP 502: Bad Gateway$/],
   ["a timeout", { nouls: SAFE, delayMs: 3000 }, /no answer within/],
   ["an unreadable answer", { body: "<html>nope</html>" }, /unreadable/],
   ["a missing answer", { nouls: { deletes_data: 0.1, reaches_outside: 0.1, hard_to_undo: 0.1 } }, /unreadable/],
@@ -387,10 +424,11 @@ test("an OpenAI-compatible judge answers with one word: only SAFE allows", { ski
     assert.match(unclear.judge.note, /SAFE, RISKY or DANGEROUS/);
     await deny(sessionId, unclear);
   }
-  chat.replies.push({ status: 500 });
+  // llama-swap's answer when the model process can't start.
+  chat.replies.push({ status: 500, body: JSON.stringify({ src: "llama-swap", error: { message: "upstream command exited prematurely", code: "internal_error" } }) });
   const broken = await cardFor(sessionId, "please push", judged);
   assert.equal(broken.judge.state, "failed");
-  assert.match(broken.judge.note, /^mock-judge failed: HTTP 500/);
+  assert.equal(broken.judge.note, "mock-judge failed: HTTP 500: upstream command exited prematurely");
   await deny(sessionId, broken);
   chat.replies.push({ text: "SAFE", delayMs: 3000 });
   const slow = await cardFor(sessionId, "please push", judged);

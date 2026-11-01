@@ -213,7 +213,7 @@ function RulesForm() {
 
 const PROTOCOL_LABEL: Record<JudgeProtocol, string> = {
   systemone: "TypeSafe System One (Jev): yes/no questions, rated in code",
-  openai: "OpenAI-compatible chat: the model answers SAFE, RISKY or DANGEROUS",
+  openai: "OpenAI-compatible list: Save asks the model if it speaks System One (Jev); if not, it answers SAFE, RISKY or DANGEROUS in chat",
 };
 
 function AutoApproveForm() {
@@ -244,7 +244,8 @@ function AutoApproveForm() {
   if (!a) return <Spinner />;
   const setJudge = (patch: Partial<AutoApproveSettings["judge"]>) => setA({ ...a, judge: { ...a.judge, ...patch } });
   const listed = list && typeof list === "object" ? list : null;
-  const protocol = listed?.protocol ?? a.judge.protocol;
+  // An OpenAI-shaped list (llama-swap) can hold System One models too; Save finds out which the model speaks.
+  const protocol = listed?.protocol === "systemone" ? "systemone" : a.judge.protocol;
 
   const saveToken = async (value: string | null) => {
     try {
