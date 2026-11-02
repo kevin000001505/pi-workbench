@@ -1,21 +1,23 @@
-import { phaseLabel } from "../session/PipelinePanel.tsx";
 import { useStore } from "../store.tsx";
 import { waitingOn } from "../types.ts";
 import { ago, Empty, PageHeader, StatusPill, issueUrl, parseIssueRef } from "../ui.tsx";
 
-export function Home() {
+/** The direct-mode sessions: plain agent turns, which are no card on any board. */
+export function Sessions() {
   const { sessions } = useStore();
-  const all = Object.values(sessions).sort((a, b) => b.updatedAt - a.updatedAt);
+  const all = Object.values(sessions)
+    .filter((s) => s.mode === "direct")
+    .sort((a, b) => b.updatedAt - a.updatedAt);
   const waiting = all.filter((s) => waitingOn(s).length > 0 || s.attention);
   const running = all.filter((s) => s.status === "running" || s.status === "starting");
 
   if (all.length === 0) {
     return (
       <div className="page">
-        <Empty title="Nothing running yet">
+        <Empty title="No direct sessions">
           <p className="muted">
-            Add a GitHub token on <a href="#/secrets">Secrets</a>, pick a repo on <a href="#/repos">Repositories</a>, then start a
-            session.
+            Direct sessions skip the pipeline: pick <strong>Direct</strong> on the New session form. Pipeline sessions are cards on
+            each repo's <a href="#/">board</a>.
           </p>
           <a className="btn btn-primary" href="#/new">
             + New session
@@ -28,7 +30,7 @@ export function Home() {
   return (
     <div className="page">
       <PageHeader
-        title="Overview"
+        title="Sessions"
         sub={`${running.length} working · ${waiting.length} waiting on you · ${all.length} session${all.length === 1 ? "" : "s"}`}
       >
         <a className="btn btn-primary" href="#/new">
@@ -60,7 +62,6 @@ export function Home() {
                       ? "Setting up skills; your task is queued"
                       : s.activity || (s.error ? s.error : "Idle")}
               </p>
-              {s.mode === "pipeline" && <p className="small phase-line">{phaseLabel(s)}</p>}
               <div className="row gap">
                 {issue && (
                   <a className="tag" href={issueUrl(s.issueRef)} title={`Solving ${s.issueRef}`}>

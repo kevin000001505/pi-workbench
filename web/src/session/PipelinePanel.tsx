@@ -9,6 +9,7 @@ const STEPS: { phase: Phase; label: string }[] = [
   { phase: "grill", label: "Grill" },
   { phase: "spec", label: "Spec" },
   { phase: "tickets", label: "Tickets" },
+  { phase: "ready", label: "Ready" },
   { phase: "implement", label: "Implement" },
   { phase: "review", label: "Review" },
   { phase: "done", label: "Done" },
@@ -27,10 +28,14 @@ export const phaseLabel = (s: SessionSummary) => {
       return "Writing the spec";
     case "tickets":
       return "Writing tickets";
+    case "ready":
+      return `${s.tickets.length} tickets ready · waits for Solve all`;
     case "implement":
       return running ? `Ticket ${running.num} · ${done}/${s.tickets.length} done` : `${done}/${s.tickets.length} tickets done`;
     case "review":
       return `Reviewing all ${s.tickets.length} tickets`;
+    case "pr":
+      return s.prNumber ? `PR #${s.prNumber} open` : "PR open";
     case "done":
       return s.tickets.length ? `All ${s.tickets.length} tickets done` : "Pipeline stopped";
     default:

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import path from "node:path";
+import { boardCards } from "../../shared/board.ts";
 import { config, TYPESAFE_SKILL } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { GitEnv } from "./git.ts";
@@ -147,6 +148,12 @@ const router = new Router()
     db.prepare("DELETE FROM repos WHERE id = ?").run(id);
     fs.rmSync(clonePath(repo), { recursive: true, force: true });
     return { ok: true };
+  })
+
+  // --- board ---------------------------------------------------------------------------------
+  .on("GET", "/api/board", ({ query }) => {
+    const repo = requireTrackedRepo(db, query.get("repo") ?? "");
+    return { cards: boardCards(sessions.list().filter((s) => s.repoId === repo.id)) };
   })
 
   // --- sessions -----------------------------------------------------------------------------

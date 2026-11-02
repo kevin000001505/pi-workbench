@@ -131,6 +131,16 @@ test("a pipeline session grills, writes a spec and tickets, implements them one 
 
   // to-tickets asks for approval, publishes, records.
   await answerNext(s.id, /Approve/);
+  // The recorded tickets pause the session in `ready` (the board's Issues column): no ticket run starts.
+  await waitFor(() => mgr.summary(s.id).phase === "ready" && mgr.summary(s.id).status === "idle");
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(mgr.summary(s.id).phase, "ready");
+  assert.equal(mgr.summary(s.id).activeRun, s.id);
+  assert.ok(!mock.requests.some((r) => JSON.stringify(r.messages ?? []).includes('<skill name=\\"tdd\\"')), "no ticket run starts in ready");
+  // Solve all (a later ticket's Issues → Doing move) resumes it; until that route exists, set the
+  // phase and let the pipeline's retry start the next ticket.
+  db.prepare("UPDATE sessions SET phase = 'implement' WHERE id = ?").run(s.id);
+  await mgr.pipelineAction(s.id, "retry");
   await waitFor(() => mgr.summary(s.id).phase === "implement");
   const sum = await waitFor(() => {
     const x = mgr.summary(s.id);

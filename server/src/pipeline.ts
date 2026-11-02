@@ -10,7 +10,8 @@
  * - review: one fresh /skill:code-review run over the whole branch that fixes what it finds; ends with finish_review.
  */
 
-export type Phase = "setup" | "grill" | "spec" | "tickets" | "implement" | "review" | "retro" | "done" | "direct";
+/** `ready`: the tickets are recorded and the session waits for Solve all. `pr`: reviewed, PR open. */
+export type Phase = "setup" | "grill" | "spec" | "tickets" | "ready" | "implement" | "review" | "retro" | "pr" | "done" | "direct";
 
 export type Ticket = {
   num: number;

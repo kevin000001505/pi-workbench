@@ -1,0 +1,106 @@
+/*
+ * The Board's look, ported from kanzo (https://github.com/emanuele-em/kanzo, src/index.html),
+ * AGPL-3.0: see LICENSE at the repo root. The classes carry a `kz-` prefix so they do not mix
+ * with the rest of the workbench's styles; the tokens live on `.kz-board` and follow the system
+ * light/dark setting, as kanzo's do.
+ */
+.kz-board {
+  --kz-bg: #ffffff; --kz-col: #f7f7f7; --kz-card: #ffffff; --kz-card-hover: #f4f4f4;
+  --kz-hover: #ececec; --kz-active: #e5e5e5;
+  --kz-text: #0d0d0d; --kz-muted: #5d5d5d; --kz-faint: #8f8f8f; --kz-border: #e5e5e5; --kz-card-border: #ebebeb;
+  --kz-accent: #0d0d0d; --kz-accent-text: #ffffff; --kz-danger: #dc2626; --kz-danger-bg: rgba(220, 38, 38, .08);
+  --kz-link: #2563eb;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  .kz-board {
+    --kz-bg: #000000; --kz-col: #0b0b0b; --kz-card: #171717; --kz-card-hover: #1e1e1e;
+    --kz-hover: #1a1a1a; --kz-active: #242424;
+    --kz-text: #ececec; --kz-muted: #a1a1a1; --kz-faint: #6e6e6e; --kz-border: #1f1f1f; --kz-card-border: transparent;
+    --kz-accent: #ffffff; --kz-accent-text: #000000; --kz-danger: #f87171; --kz-danger-bg: rgba(248, 113, 113, .1);
+    --kz-link: #7ab7ff;
+    color-scheme: dark;
+  }
+}
+
+.kz-board {
+  height: 100%; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--kz-bg); color: var(--kz-text);
+  font: 14px/1.5 ui-sans-serif, -apple-system, system-ui, "Segoe UI", "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  scrollbar-width: thin; scrollbar-color: var(--kz-active) transparent;
+}
+.kz-board * { box-sizing: border-box; }
+.kz-board button { font: inherit; color: inherit; cursor: pointer; }
+.kz-board :focus { outline: none; }
+.kz-board .icon { display: inline-flex; flex: none; }
+.kz-board .icon svg { width: 18px; height: 18px; display: block; }
+
+.kz-header {
+  display: flex; align-items: center; gap: 12px; padding: 16px 24px 14px; flex-wrap: wrap; min-height: 64px;
+}
+.kz-header .info { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.kz-header h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: -.01em; }
+.kz-header .sub { color: var(--kz-muted); }
+.kz-header .repo-link {
+  display: inline-flex; align-items: center; gap: 6px; align-self: center; padding: 3px 10px 3px 8px;
+  border-radius: 99px; background: var(--kz-hover); color: var(--kz-muted); font-size: 12.5px; text-decoration: none;
+}
+.kz-header .repo-link:hover, .kz-header .repo-link:focus-visible { background: var(--kz-active); color: var(--kz-text); }
+.kz-header .repo-link .icon svg { width: 14px; height: 14px; }
+
+.kz-btn {
+  border: 0; background: var(--kz-hover); border-radius: 99px; padding: 7px 16px; font-weight: 500;
+  color: var(--kz-text); text-decoration: none; display: inline-flex; align-items: center; gap: 6px;
+}
+.kz-btn:hover, .kz-btn:focus-visible { background: var(--kz-active); text-decoration: none; }
+.kz-btn.primary { background: var(--kz-accent); color: var(--kz-accent-text); padding-left: 12px; }
+.kz-btn.primary:hover, .kz-btn.primary:focus-visible { opacity: .85; }
+.kz-btn .icon svg { width: 16px; height: 16px; }
+
+.kz-columns {
+  flex: 1; min-height: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(260px, 1fr);
+  gap: 12px; padding: 0 24px 24px; overflow-x: auto;
+}
+.kz-column {
+  background: var(--kz-col); border-radius: 18px; display: flex; flex-direction: column; min-height: 0;
+}
+.kz-column h2 {
+  font-size: 13px; font-weight: 600; color: var(--kz-muted);
+  margin: 0; padding: 14px 16px 10px; display: flex; align-items: center; gap: 8px;
+}
+.kz-column h2 .count { color: var(--kz-faint); font-weight: 400; }
+.kz-board .status-icon { display: inline-flex; flex: none; }
+.kz-board .status-icon svg { width: 14px; height: 14px; display: block; }
+.kz-cards { flex: 0 1 auto; overflow-y: auto; padding: 2px 8px 8px; display: flex; flex-direction: column; gap: 6px; min-height: 8px; }
+.kz-card {
+  display: block; background: var(--kz-card); border: 1px solid var(--kz-card-border); border-radius: 14px; padding: 10px 12px;
+  color: inherit; text-decoration: none; user-select: none; transition: background .1s;
+}
+.kz-card:hover { background: var(--kz-card-hover); text-decoration: none; }
+.kz-card .head { display: flex; align-items: flex-start; gap: 10px; }
+.kz-card .title { overflow-wrap: anywhere; flex: 1; min-width: 0; }
+.kz-card .num {
+  display: inline-flex; align-items: center; gap: 5px; flex: none; margin-top: 2px;
+  color: var(--kz-faint); font-size: 12px; font-variant-numeric: tabular-nums;
+}
+.kz-card .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.kz-card .desc {
+  display: block; margin-top: 2px; color: var(--kz-muted); font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.kz-card .desc.attention { color: var(--kz-danger); }
+.kz-tag {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--kz-muted);
+  background: var(--kz-hover); border-radius: 99px; padding: 1px 9px 1px 8px;
+}
+.kz-tag .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: currentColor; }
+.kz-empty {
+  margin: auto; text-align: center; color: var(--kz-muted); max-width: 380px; padding: 40px 20px;
+}
+.kz-empty h1 { color: var(--kz-text); font-size: 22px; font-weight: 600; letter-spacing: -.01em; }
+
+@media (max-width: 700px) {
+  .kz-columns { grid-auto-columns: minmax(78vw, 1fr); padding: 0 12px 12px; }
+  .kz-header { padding: 12px 12px 12px 56px; }
+}

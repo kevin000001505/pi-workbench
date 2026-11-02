@@ -186,7 +186,7 @@ const toTicket = (r: TicketRow): Ticket => ({
 /**
  * Owns every session: its row, its worktree and, while it runs, its `pi --mode rpc` process.
  *
- * A pipeline session moves setup → grill → spec → tickets → implement → review → done. Setup,
+ * A pipeline session moves setup → grill → spec → tickets → ready → implement → review → done. Setup,
  * grill, spec and tickets share the session's main conversation; each ticket and the final review
  * get a fresh pi run (their own pi session id) in the same worktree. `active_run` says which
  * conversation is live and on screen.
@@ -899,8 +899,8 @@ export class SessionManager extends EventEmitter {
       this.update(id, { phase: "tickets" });
       await this.send(id, ticketsPrompt(row.spec_ref), "followUp");
     } else if (row.phase === "tickets" && this.tickets(id).length > 0) {
-      this.update(id, { phase: "implement" });
-      await this.runNext(id);
+      // The tickets are on the tracker: the card waits in Issues until Solve all starts the runs.
+      this.update(id, { phase: "ready" });
     } else if (row.phase === "implement") {
       await this.afterTicketRun(id, s);
     } else if (row.phase === "review" && row.review_run === this.runOf(row)) {

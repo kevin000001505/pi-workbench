@@ -27,7 +27,7 @@ export type SessionRow = {
   archived: number;
   /** "pipeline" (grill → tickets → implement) or "direct" (plain agent turns). */
   mode: string;
-  /** setup | grill | spec | tickets | implement | review | retro | done | direct */
+  /** setup | grill | spec | tickets | ready | implement | review | retro | pr | done | direct */
   phase: string;
   /** Short summary of the decisions agreed while grilling. */
   grill_summary: string | null;

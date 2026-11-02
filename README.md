@@ -13,6 +13,7 @@ A self-hosted web UI for the [pi coding agent](https://github.com/earendil-works
 
 ## What you get
 
+- **A board per repo.** The start page is the selected repo's **Board**: one card per pipeline session in the columns To do, Issues, Doing, QA, Review and Done. A card shows its title, its ticket progress, and why it needs you. The sidebar lists the tracked repos and opens each one's board; the last one opens again next time. Direct-mode sessions are listed on the **Sessions** page.
 - **Plan, then build, as the default.** A new session runs a pipeline (see [The pipeline](#the-pipeline)): `grill-with-docs` → `to-spec` → `to-tickets` → test-first build of each ticket → one code review. Pick **Direct** on the New session form to skip it for small fixes.
 - **Live sessions.** Every session streams text, thinking, and tool calls as they happen. Sessions keep running when you close the tab, and several can run in parallel, each in its own git worktree and branch.
 - **Permissions.** Before a risky tool call runs, the session waits for **Allow / Allow for this session / Deny**. Risky calls include `git push`, `gh`, `rm -r`, `sudo`, `curl`/`wget`, `ssh`, package installs, destructive git commands, and writes outside the worktree. You can edit the rules under Settings.
@@ -36,6 +37,7 @@ New sessions follow the flow these skills are designed for: align on requirement
 | Grill | `/skill:grill-with-docs` on your idea. It questions you (database choice, edge cases, terms) and writes the glossary and ADRs as it goes | you confirm a shared understanding; the agent commits the docs and calls `save_grill_summary` |
 | Spec | `/skill:to-spec` in the same conversation: turns what you agreed into a spec | you approve its test seams; it publishes the spec and calls `save_spec` |
 | Tickets | `/skill:to-tickets` on the spec | you approve the breakdown; it publishes the tickets and calls `record_tickets` |
+| Ready | nothing: the session pauses, and its card waits in Issues | Solve all starts the tickets |
 | Implement | one fresh run per ticket with `/skill:tdd`, in dependency order | the agent commits and calls `finish_ticket`; the next ticket starts |
 | Review | one fresh `/skill:code-review` run over the whole branch, fixing what it finds | the agent commits the fixes and calls `finish_review` |
 | Done | messages become plain follow-ups on the same branch | you press **Create PR** |
@@ -162,3 +164,7 @@ cd web && npm run build
 ```
 
 `npm run build` typechecks and builds the UI.
+
+## License and credits
+
+pi workbench is licensed under the [GNU Affero General Public License v3.0](LICENSE). The Board's markup and CSS are ported from [kanzo](https://github.com/emanuele-em/kanzo) by emanuele-em (AGPL-3.0).

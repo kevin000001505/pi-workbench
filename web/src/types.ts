@@ -90,7 +90,7 @@ export type SessionSummary = {
 /** A session's auto-approve: follow the global switch in Settings, or override it. */
 export type AutoApproveMode = "inherit" | "on" | "off";
 
-export type Phase = "setup" | "grill" | "spec" | "tickets" | "implement" | "review" | "retro" | "done" | "direct";
+export type Phase = "setup" | "grill" | "spec" | "tickets" | "ready" | "implement" | "review" | "retro" | "pr" | "done" | "direct";
 
 export type Ticket = {
   num: number;

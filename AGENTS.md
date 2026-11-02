@@ -6,6 +6,7 @@ Self-hosted web UI that drives the pi coding agent (`@earendil-works/pi-coding-a
 - `server/`: Node ≥ 22.19 running TypeScript directly (type stripping, no build step). Imports must use the `.ts` extension, and only erasable syntax works (no enums, no parameter properties). Dependency: `ws`. Storage is `node:sqlite`.
 - `web/`: React + Vite. It imports `../shared/` directly.
 - `shared/transcript.ts`: the RPC-event → conversation reducer. **Both sides use it.** Change it in one place, never fork it.
+- `shared/board.ts`: the phase → Board column map (`columnOf`) and the card shape behind `GET /api/board`. Both sides use it too. The Board's kanzo-ported CSS is `web/src/board.css` (AGPL-3.0, see LICENSE).
 - `pi-extension/workbench.ts`: loaded into every pi process via the generated `settings.json`. Imports of pi packages and `typebox` resolve to pi's own copies.
 - `skills/`: workbench-bundled skills (asd-ste100). The Dockerfile copies them into the image skills dir next to mattpocock's skills.
 - The TypeSafe skill (`typesafe-ai/skills`, pinned in the Dockerfile) goes to `OPTIONAL_SKILLS_DIR`, which pi never scans. A session created with the TypeSafe box passes it with `--skill` and `PI_WORKBENCH_EXTRA_SKILLS`.
@@ -13,7 +14,7 @@ Self-hosted web UI that drives the pi coding agent (`@earendil-works/pi-coding-a
 ## Pipeline
 - Every pi process is spawned with `--append-system-prompt`: user-facing explanations follow the asd-ste100 skill (Simplified Technical English). See `EXPLAIN_PROMPT` in `sessions.ts`.
 - Phase transitions happen in `SessionManager.afterSettled`, after a run settles, never mid-run. The extension's pipeline tools only validate and acknowledge. The server reads their arguments from `tool_execution_start` and applies them on a successful `tool_execution_end`.
-- Flow: setup → grill (`grill-with-docs`) → spec (`to-spec`) → tickets (`to-tickets`) → implement (`tdd` per ticket) → review (`code-review`) → done. Prompts are in `server/src/pipeline.ts`. pi only expands `/skill:name` when an argument follows on the same line; a unit test guards this.
+- Flow: setup → grill (`grill-with-docs`) → spec (`to-spec`) → tickets (`to-tickets`) → ready (paused; the card waits in Issues for Solve all) → implement (`tdd` per ticket) → review (`code-review`) → done. Prompts are in `server/src/pipeline.ts`. pi only expands `/skill:name` when an argument follows on the same line; a unit test guards this.
 - The Issues page's "Solve all tickets" button starts a session with `startFrom: tickets`: the spec issue's open ticket sub-issues (fetched with their blockedBy edges, one GraphQL call in `github.ts`) are recorded as tickets and the session skips setup → grill → spec → tickets and starts at `implement` (or `setup` first on an un-setup repo).
 - Each ticket runs under its own pi session id (`<session>-t<num>-<stamp>`), stored on the ticket row, and the review under `sessions.review_run`. `sessions.active_run` says which run is live. A run switch emits `wb_run`, and the browser re-subscribes to get the new snapshot. Switch runs *before* announcing a phase that implies the switch.
 - `server/test/mock-llm.ts` scripts each phase by step. Keep `test/pipeline-e2e.test.ts` passing when you change prompts, tools, or transitions.

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Home } from "./pages/Home.tsx";
+import { Board } from "./pages/Board.tsx";
 import { Issues } from "./pages/Issues.tsx";
 import { NewSession } from "./pages/NewSession.tsx";
 import { Repos } from "./pages/Repos.tsx";
 import { Secrets } from "./pages/Secrets.tsx";
+import { Sessions } from "./pages/Sessions.tsx";
 import { Settings } from "./pages/Settings.tsx";
 import { Ssh } from "./pages/Ssh.tsx";
 import { SessionView } from "./session/SessionView.tsx";
@@ -11,7 +12,8 @@ import { Sidebar } from "./Sidebar.tsx";
 import { useStore } from "./store.tsx";
 
 export type Route =
-  | { page: "home" }
+  | { page: "board"; repoId?: string }
+  | { page: "sessions" }
   | { page: "session"; id: string }
   | {
       page: "new";
@@ -35,7 +37,9 @@ function parse(hash: string): Route {
   const [page, a, b] = parts;
   switch (page) {
     case "session":
-      return a ? { page: "session", id: a } : { page: "home" };
+      return a ? { page: "session", id: a } : { page: "sessions" };
+    case "board":
+      return { page: "board", repoId: a ? decodeURIComponent(a) : undefined };
     case "new":
       return {
         page: "new",
@@ -51,13 +55,14 @@ function parse(hash: string): Route {
         repoId: a ? decodeURIComponent(a) : undefined,
         number: b && /^\d+$/.test(b) ? Number(b) : undefined,
       };
+    case "sessions":
     case "repos":
     case "secrets":
     case "ssh":
     case "settings":
       return { page };
     default:
-      return { page: "home" };
+      return { page: "board" };
   }
 }
 
@@ -88,7 +93,8 @@ export function App() {
         ☰
       </button>
       <main className="main">
-        {route.page === "home" && <Home />}
+        {route.page === "board" && <Board key={route.repoId ?? ""} repoId={route.repoId} />}
+        {route.page === "sessions" && <Sessions />}
         {route.page === "session" && <SessionView key={route.id} id={route.id} />}
         {route.page === "new" && (
           <NewSession

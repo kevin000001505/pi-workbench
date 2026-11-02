@@ -362,9 +362,9 @@ test("glossary and ADR 0003 record the stop-rule, rescue and retro vocabulary", 
   }
   // The relationship: the Reviewer's settings drive the Reviewer, rescue and retro runs.
   assert.match(glossary, /an empty Reviewer model turns all three off/i);
-  // The Phase union puts retro between review and done, server and web.
-  assert.match(fs.readFileSync(new URL("../src/pipeline.ts", import.meta.url), "utf8"), /"review" \| "retro" \| "done"/);
-  assert.match(fs.readFileSync(new URL("../../web/src/types.ts", import.meta.url), "utf8"), /"review" \| "retro" \| "done"/);
+  // The Phase union puts retro between review and pr (then done), server and web.
+  assert.match(fs.readFileSync(new URL("../src/pipeline.ts", import.meta.url), "utf8"), /"review" \| "retro" \| "pr" \| "done"/);
+  assert.match(fs.readFileSync(new URL("../../web/src/types.ts", import.meta.url), "utf8"), /"review" \| "retro" \| "pr" \| "done"/);
   const adrs = fs.readdirSync(new URL("../../docs/adr", import.meta.url));
   const file = adrs.find((f) => f.startsWith("0003-"));
   assert.ok(file, "ADR 0003 exists");
