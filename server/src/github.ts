@@ -68,9 +68,12 @@ export class GitHub {
       headers: { Authorization: `Bearer ${this.token}`, "User-Agent": "pi-workbench", "Content-Type": "application/json" },
       body: JSON.stringify({ query, variables }),
     });
-    const j = (await res.json()) as { data?: T; errors?: { message?: string }[]; message?: string };
-    if (!res.ok || j.errors?.length)
-      throw new GitHubError(res.status || 400, j.errors?.[0]?.message ?? j.message ?? `GraphQL ${res.status} ${res.statusText}`);
+    const j = (await res.json()) as { data?: T; errors?: { type?: string; message?: string }[]; message?: string };
+    if (!res.ok || j.errors?.length) {
+      // GitHub's /graphql returns HTTP 200 even when `errors` is populated; never let 200 become GitHubError.status.
+      const status = !res.ok ? res.status || 400 : j.errors?.[0]?.type === "NOT_FOUND" ? 404 : 400;
+      throw new GitHubError(status, j.errors?.[0]?.message ?? j.message ?? `GraphQL ${res.status} ${res.statusText}`);
+    }
     return j.data as T;
   }
 
@@ -130,14 +133,14 @@ export class GitHub {
       number: number;
       title: string;
       body: string | null;
-      html_url: string;
+      url: string;
       subIssues: {
         nodes: { number: number; title: string; body: string | null; state: string; blockedBy: { nodes: { number: number; state: string }[] } }[];
       };
     };
     const q = `query($owner: String!, $name: String!, $number: Int!) {
       repository(owner: $owner, name: $name) { issue(number: $number) {
-        number title body html_url
+        number title body url
         subIssues(first: 100) { nodes { number title body state blockedBy(first: 100) { nodes { number state } } } }
       } }
     }`;
@@ -147,7 +150,7 @@ export class GitHub {
       const open = issue.subIssues.nodes.filter((n) => n.state === "OPEN");
       const openNumbers = new Set(open.map((n) => n.number));
       return {
-        spec: { number: issue.number, title: issue.title, body: issue.body, htmlUrl: issue.html_url },
+        spec: { number: issue.number, title: issue.title, body: issue.body, htmlUrl: issue.url },
         subIssues: open.map((n) => ({
           number: n.number,
           title: n.title,

@@ -169,7 +169,7 @@ function IssueDetail({
     // No ticket sub-issues is a 404, not an error: the button simply stays hidden.
     api
       .get<GhTicketSeed>(`/api/github/issues/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/${number}/tickets`)
-      .then(setTickets)
+      .then((t) => setTickets(Array.isArray(t?.subIssues) ? t : null))
       .catch(() => setTickets(null));
   }, [repoId, number, refresh]);
 
@@ -183,6 +183,8 @@ function IssueDetail({
       </div>
     );
   if (!data) return <Spinner />;
+
+  const subCount = tickets?.subIssues?.length ?? 0;
 
   return (
     <div className="page-narrow issue-detail">
@@ -206,19 +208,19 @@ function IssueDetail({
         </p>
         <div className="row gap">
           <button
-            className={`btn ${tickets && tickets.subIssues.length > 0 ? "btn-ghost" : "btn-primary"}`}
+            className={`btn ${subCount > 0 ? "btn-ghost" : "btn-primary"}`}
             onClick={startSession}
           >
             Start session
           </button>
-          {tickets && tickets.subIssues.length > 0 && (
+          {subCount > 0 && (
             <button
               className="btn btn-primary"
               disabled={solving}
-              title={`Implement all ${tickets.subIssues.length} open ticket sub-issues in one session, in dependency order. Its PR closes this issue and every ticket issue.`}
+              title={`Implement all ${subCount} open ticket sub-issues in one session, in dependency order. Its PR closes this issue and every ticket issue.`}
               onClick={() => void solveAllTickets()}
             >
-              {solving ? <Spinner small /> : `Solve all ${tickets.subIssues.length} tickets`}
+              {solving ? <Spinner small /> : `Solve all ${subCount} tickets`}
             </button>
           )}
           <a className="btn btn-ghost" href={data.htmlUrl} target="_blank" rel="noopener">

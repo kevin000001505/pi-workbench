@@ -128,9 +128,18 @@ export function startMockGitHub(root: string, login = "kevin") {
     }
     // The workbench's one GraphQL call: an issue's sub-issues and their blockedBy edges.
     if (req.method === "POST" && p === "/graphql") {
+      // GitHub's GraphQL Issue type has `url`, not REST's `html_url`; reject `html_url` with HTTP 200 + errors like GitHub does.
+      if (/\bhtml_url\b/.test(String(body.query ?? ""))) {
+        return send(200, { errors: [{ message: "Field 'html_url' doesn't exist on type 'Issue'" }] });
+      }
       const { variables } = body;
       const seed = subIssueSeeds[`${variables.owner}/${variables.name}#${variables.number}`];
-      if (!seed) return send(200, { data: { repository: { issue: null } } });
+      if (!seed) {
+        return send(200, {
+          data: { repository: { issue: null } },
+          errors: [{ type: "NOT_FOUND", message: `Could not resolve to an Issue with the number of ${variables.number}.` }],
+        });
+      }
       return send(200, {
         data: {
           repository: {
@@ -138,7 +147,7 @@ export function startMockGitHub(root: string, login = "kevin") {
               number: seed.spec.number,
               title: seed.spec.title,
               body: seed.spec.body,
-              html_url: seed.spec.html_url ?? `https://github.com/${variables.owner}/${variables.name}/issues/${seed.spec.number}`,
+              url: seed.spec.url ?? seed.spec.html_url ?? `https://github.com/${variables.owner}/${variables.name}/issues/${seed.spec.number}`,
               subIssues: {
                 nodes: seed.subs.map((s: any) => ({
                   number: s.number,
