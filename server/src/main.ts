@@ -2,7 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
-import { config } from "./config.ts";
+import path from "node:path";
+import { config, TYPESAFE_SKILL } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { GitEnv } from "./git.ts";
 import { GitHub, GitHubError } from "./github.ts";
@@ -152,7 +153,7 @@ const router = new Router()
       mode: body.mode === "direct" ? "direct" : "pipeline",
       issueRef: body.issueRef ? String(body.issueRef) : undefined,
       autoApprove: body.autoApprove,
-      typesafeSkill: body.typesafeSkill === true,
+      typesafeSkill: body.typesafeSkill,
     }),
   )
   .on("GET", "/api/sessions/:id", ({ params }) => sessions.snapshot(params.id))
@@ -225,7 +226,9 @@ const router = new Router()
   .on("GET", "/api/skills", ({ query }) => {
     const id = query.get("sessionId");
     const cwd = id ? sessions.repoOf(id).row.worktree : undefined;
-    return listSkills(config.skillsDir, cwd, id ? sessions.extraSkillDirs(id) : []).map(({ path: _p, ...s }) => s);
+    // `typesafe=1`: the New session form, with the TypeSafe box ticked, before the session exists.
+    const extra = id ? sessions.extraSkillDirs(id) : query.get("typesafe") === "1" ? [path.join(config.optionalSkillsDir, TYPESAFE_SKILL)] : [];
+    return listSkills(config.skillsDir, cwd, extra).map(({ path: _p, ...s }) => s);
   })
 
   // --- settings & secrets ---------------------------------------------------------------

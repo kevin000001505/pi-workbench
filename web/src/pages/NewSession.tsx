@@ -32,7 +32,7 @@ export function NewSession({
   const [autoApprove, setAutoApprove] = useState<AutoApproveMode>("inherit");
   const [typesafe, setTypesafe] = useState(false);
   const [creating, setCreating] = useState(false);
-  const skills = useSkills();
+  const skills = useSkills(undefined, typesafe);
 
   useEffect(() => {
     api
@@ -137,7 +137,7 @@ export function NewSession({
             </select>
           </label>
           <label className="check">
-            <input type="checkbox" checked={typesafe} onChange={(e) => setTypesafe(e.target.checked)} />
+            <input type="checkbox" aria-label="TypeSafe skill" checked={typesafe} onChange={(e) => setTypesafe(e.target.checked)} />
             <span>
               TypeSafe skill{" "}
               <span className="muted small">

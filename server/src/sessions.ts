@@ -142,6 +142,8 @@ type Live = {
   /** finish_ticket's (or finish_review's) report for the current run, applied when the run settles. */
   finished?: { status: "done" | "blocked"; note: string };
   lastSettleAborted: boolean;
+  /** The missing-TypeSafe-skill toast went out; the summary keeps showing the state after it. */
+  warnedMissingSkill?: boolean;
 };
 
 /**
@@ -357,10 +359,13 @@ export class SessionManager extends EventEmitter {
     s.loaded = true;
   }
 
-  async create(input: { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: boolean }) {
+  async create(input: { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown }) {
     const repo = getRepo(this.db, input.repoId);
     if (!repo) throw Object.assign(new Error(`Unknown repo ${input.repoId}`), { status: 404 });
     const autoApprove = autoApproveMode(input.autoApprove);
+    if (input.typesafeSkill !== undefined && typeof input.typesafeSkill !== "boolean") {
+      throw Object.assign(new Error("The TypeSafe skill choice must be true or false"), { status: 400 });
+    }
     const typesafe = input.typesafeSkill === true;
     if (typesafe && !fs.existsSync(path.join(typesafeSkillDir(), "SKILL.md"))) {
       throw Object.assign(new Error(`The TypeSafe skill is not installed (expected at ${typesafeSkillDir()})`), { status: 400 });
@@ -424,7 +429,8 @@ export class SessionManager extends EventEmitter {
     fs.mkdirSync(config.piSessionsDir, { recursive: true });
     const extraSkills = this.extraSkillDirs(id);
     // pi starts without a --skill dir it cannot find, and says nothing: say it here (the summary shows it too).
-    if (this.typesafeSkillMissing(row)) {
+    if (this.typesafeSkillMissing(row) && !s.warnedMissingSkill) {
+      s.warnedMissingSkill = true;
       const message = `The TypeSafe skill is not installed (expected at ${typesafeSkillDir()}); this session runs without it.`;
       this.emit("event", id, { type: "wb_notify", message, level: "warning" });
     }

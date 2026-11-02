@@ -166,6 +166,11 @@ test("a TypeSafe session whose skill went missing says so when it starts, withou
     assert.equal(mgr.summary(s.id).typesafeSkillMissing, true);
     assert.equal(mgr.summary(s.id).attention, null);
     assert.ok(notes.some((n) => /TypeSafe skill is not installed/.test(n.message) && n.level === "warning"));
+    // Once: a later spawn (a resume, the next ticket run) does not repeat the toast.
+    await mgr.stop(s.id);
+    await mgr.start(s.id);
+    assert.equal(notes.filter((n) => /TypeSafe skill is not installed/.test(n.message)).length, 1);
+    assert.equal(mgr.summary(s.id).typesafeSkillMissing, true);
   } finally {
     mgr.off("event", onEvent);
     fs.renameSync(`${dir}.off`, dir);
@@ -179,6 +184,8 @@ test("the TypeSafe box is refused when the skill is not installed", { skip }, as
   fs.renameSync(dir, `${dir}.off`);
   try {
     await assert.rejects(mgr.create({ repoId: "me/demo", title: "Missing", prompt: "", mode: "direct", typesafeSkill: true }), /TypeSafe skill is not installed/);
+    // Not a boolean: refused, never read as "no".
+    await assert.rejects(mgr.create({ repoId: "me/demo", title: "Bad", prompt: "", mode: "direct", typesafeSkill: "true" }), /true or false/);
   } finally {
     fs.renameSync(`${dir}.off`, dir);
   }
