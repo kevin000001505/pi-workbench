@@ -483,8 +483,11 @@ export class SessionManager extends EventEmitter {
     let modelId = m.modelId;
     if (rescuey) {
       const reviewer = getAutoApproveSettings(this.db).reviewer;
+      const key = savedReviewerKey(this.secrets);
       provider = RESCUE_PROVIDER_ID;
       modelId = reviewer.model;
+      // Point the proxy at the Reviewer as saved now, so a re-saved URL or key applies to the next run.
+      this.rescueProxy!.configure({ baseUrl: reviewer.baseUrl, provider: reviewer.provider, key: key.reviewerKey, keyOrigin: key.keyOrigin });
       env[RESCUE_TOKEN_ENV] = this.rescueProxy!.mint(runId);
     }
     const ticket = this.tickets(id).find((t) => t.runId === runId);

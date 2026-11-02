@@ -13,6 +13,7 @@ import { listModelsAt, probeEndpoint } from "./llm.ts";
 import { draftPr, openPr, changes } from "./prs.ts";
 import { addRepo, assertRepoName, clonePath, getRepo, listRepos, repoNeedsSetup, requireTrackedRepo } from "./repos.ts";
 import { assertUserScope, GLOBAL_SCOPE, SecretStore, userSecrets } from "./secrets.ts";
+import { startRescueProxy } from "./rescue-proxy.ts";
 import { SessionManager } from "./sessions.ts";
 import { applySsh, saveSshHosts, sshView, testSshHost } from "./ssh.ts";
 import {
@@ -30,7 +31,11 @@ import { listSkills } from "./skills.ts";
 const db = openDb(config.dbFile);
 const secrets = new SecretStore(db, config.masterKey);
 for (const dir of [config.reposDir, config.worktreesDir, config.piSessionsDir]) fs.mkdirSync(dir, { recursive: true });
-writePiConfig(db);
+// Rescue and retro runs call the Reviewer model through this localhost-only hop (ADR 0003).
+const rescueProxy = await startRescueProxy();
+/** Regenerate pi's agent dir; the rescue provider in models.json points at the proxy. */
+const piConfig = () => writePiConfig(db, rescueProxy.url);
+piConfig();
 // Fresh ssh keys and host config before the first session and after every key/host change (ADR 0001).
 applySsh(db, secrets, config.agentHome, config.piAgentDir);
 
@@ -63,7 +68,7 @@ async function gitEnv(): Promise<GitEnv> {
   return { ...identity.env, ...env };
 }
 
-const sessions = new SessionManager(db, secrets, gitEnv, () => applySsh(db, secrets, config.agentHome, config.piAgentDir), (ref) => github().ticketsFromIssueRef(ref));
+const sessions = new SessionManager(db, secrets, gitEnv, () => applySsh(db, secrets, config.agentHome, config.piAgentDir), (ref) => github().ticketsFromIssueRef(ref), rescueProxy);
 
 const llmKey = () => secrets.get(GLOBAL_SCOPE, LLM_KEY_ENV);
 
@@ -243,6 +248,8 @@ const router = new Router()
   .on("GET", "/api/settings", () => ({ model: getModelSettings(db), approval: getApprovalSettings(db), autoApprove: autoApproveView(db, secrets), pipeline: getPipelineSettings(db) }))
   .on("PUT", "/api/settings/auto-approve", async ({ body }) => {
     await sessions.applyAutoApproveSettings(body);
+    // The Reviewer's model drives the rescue provider: an empty one removes it from models.json.
+    piConfig();
     return autoApproveView(db, secrets);
   })
   .on("PUT", "/api/settings/auto-approve/keys", ({ body }) => {
@@ -261,12 +268,12 @@ const router = new Router()
   .on("POST", "/api/settings/auto-approve/test-reviewer", () => testReviewer(getAutoApproveSettings(db), savedReviewerKey(secrets)))
   .on("PUT", "/api/settings/model", ({ body }) => {
     const model = saveModelSettings(db, body);
-    writePiConfig(db);
+    piConfig();
     return model;
   })
   .on("PUT", "/api/settings/approval", ({ body }) => {
     const approval = saveApprovalSettings(db, body);
-    writePiConfig(db);
+    piConfig();
     return approval;
   })
   // The stop-rule limits; no pi config to regenerate, so no writePiConfig call.
@@ -391,6 +398,7 @@ server.listen(config.port, config.host, () => {
 const shutdown = async () => {
   console.log("shutting down: stopping pi sessions");
   await sessions.shutdown();
+  await rescueProxy.close();
   process.exit(0);
 };
 process.on("SIGTERM", shutdown);
