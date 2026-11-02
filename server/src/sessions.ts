@@ -29,7 +29,9 @@ import {
 import { waitsOnUser } from "../../shared/pending.ts";
 import {
   getAutoApproveSettings,
+  judgeName,
   judgePermission,
+  localJudge,
   reviewPermission,
   reviewerName,
   savedJudgeToken,
@@ -522,9 +524,12 @@ export class SessionManager extends EventEmitter {
     } else if (envelope?.wb === "decision") {
       Object.assign(req, { kind: "decision", title: String(envelope.question ?? "") });
     }
-    if (req.kind === "permission" && getAutoApproveSettings(this.db).enabled) {
-      req.judge = { state: "judging", by: getAutoApproveSettings(this.db).judge.model };
-      void this.autoJudge(id, s, req);
+    if (req.kind === "permission") {
+      const aa = getAutoApproveSettings(this.db);
+      if (aa.enabled) {
+        req.judge = { state: "judging", by: judgeName(aa.judge) };
+        void this.autoJudge(id, s, req);
+      }
     }
     s.pending.set(req.id, req);
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
@@ -544,7 +549,7 @@ export class SessionManager extends EventEmitter {
       ...(ticket ? { ticket: `#${ticket.num} ${ticket.title}` } : {}),
     };
     const permission = { tool: req.tool ?? "", subject: req.subject ?? "", reasons: req.reasons ?? [], session };
-    const verdict = await judgePermission(permission, settings, savedJudgeToken(this.secrets));
+    const verdict = await judgePermission(permission, settings, savedJudgeToken(this.secrets), localJudge(this.db, this.secrets));
     // Answered by the user, or dropped with its process or run: the verdict is stale.
     if (!s.pending.has(req.id)) return;
     if (verdict.outcome === "allow") {
