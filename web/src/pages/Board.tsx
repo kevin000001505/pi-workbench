@@ -89,7 +89,7 @@ function BoardCard({ card, activity }: { card: Card; activity: string }) {
       {line && <span className={`desc ${card.attention ? "attention" : ""}`}>{line}</span>}
       {card.pr && (
         <span className="tags">
-          <span className="kz-tag">
+          <span className={`kz-tag ${card.pr.state ? `pr-${card.pr.state}` : ""}`} title={card.pr.url ?? undefined}>
             <span className="dot" />
             PR #{card.pr.number}
             {card.pr.state ? ` · ${card.pr.state}` : ""}

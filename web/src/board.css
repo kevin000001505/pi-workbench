@@ -95,6 +95,10 @@
   background: var(--kz-hover); border-radius: 99px; padding: 1px 9px 1px 8px;
 }
 .kz-tag .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: currentColor; }
+/* The PR badge's dot: green when it can merge, amber while checks run or fail, red on a conflict. */
+.kz-tag.pr-open .dot { background: #2f9e44; }
+.kz-tag.pr-checks .dot { background: #e8a317; }
+.kz-tag.pr-conflict { color: var(--kz-danger); }
 .kz-empty {
   margin: auto; text-align: center; color: var(--kz-muted); max-width: 380px; padding: 40px 20px;
 }

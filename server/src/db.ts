@@ -154,6 +154,12 @@ function migrate(db: DatabaseSync) {
     const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
     if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
+  // `done` used to mean "reviewed"; it now means "merged", and a reviewed card with a PR is `pr`.
+  // Once only: a card merged after this must stay `done`.
+  if (!getSetting(db, "migrated.donePr")) {
+    db.exec("UPDATE sessions SET phase = 'pr' WHERE phase = 'done' AND pr_number IS NOT NULL");
+    putSetting(db, "migrated.donePr", true);
+  }
 }
 
 export function getSetting<T>(db: Db, key: string): T | undefined {

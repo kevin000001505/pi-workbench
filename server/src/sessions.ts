@@ -15,6 +15,7 @@ import {
 import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
 import type { Db, RepoRow, SessionRow, TicketRow } from "./db.ts";
 import type { GitEnv } from "./git.ts";
+import type { Delivery } from "./delivery.ts";
 import {
   allDone,
   grillPrompt,
@@ -204,10 +205,12 @@ export class SessionManager extends EventEmitter {
   private fetchTicketSeed?: (ref: string) => Promise<TicketSeed>;
   /** The localhost proxy rescue and retro runs call the Reviewer model through (ADR 0003). */
   private rescueProxy?: RescueProxy;
+  /** Delivers a reviewed card to GitHub (opens its PR); the server wires it from the token and model settings. */
+  private delivery?: Delivery;
   private live = new Map<string, Live>();
   private summaryTimers = new Map<string, NodeJS.Timeout>();
 
-  constructor(db: Db, secrets: SecretStore, gitEnv: () => Promise<GitEnv>, refreshSsh?: () => void, fetchTicketSeed?: (ref: string) => Promise<TicketSeed>, rescueProxy?: RescueProxy) {
+  constructor(db: Db, secrets: SecretStore, gitEnv: () => Promise<GitEnv>, refreshSsh?: () => void, fetchTicketSeed?: (ref: string) => Promise<TicketSeed>, rescueProxy?: RescueProxy, delivery?: Delivery) {
     super();
     this.db = db;
     this.secrets = secrets;
@@ -215,6 +218,7 @@ export class SessionManager extends EventEmitter {
     this.refreshSsh = refreshSsh;
     this.fetchTicketSeed = fetchTicketSeed;
     this.rescueProxy = rescueProxy;
+    this.delivery = delivery;
   }
 
   private row(id: string): SessionRow {
@@ -936,11 +940,21 @@ export class SessionManager extends EventEmitter {
     else this.flag(id, "The review stopped without finishing. Reply to the agent, retry it, or mark it done.");
   }
 
+  /** The review is finished: push the branch and open the PR. If it cannot open, stay in review with the reason. */
   private async finishPipeline(id: string, reviewNote: string | null) {
-    // Switch back to the plan conversation before announcing "done", so no one sees done + review run.
+    let pr: { number: number; url: string };
+    try {
+      if (!this.delivery) throw new Error("this workbench has no GitHub connection");
+      const { row, repo } = this.repoOf(id);
+      pr = await this.delivery.openPr(row, repo, this.tickets(id));
+    } catch (err) {
+      this.flag(id, `The PR could not open: ${(err as Error).message}. Retry the review, or mark it done to try the PR again.`);
+      return;
+    }
+    // Switch back to the plan conversation before announcing "pr", so no one sees pr + review run.
     await this.switchRun(id, id, false);
-    this.update(id, { phase: "done", attention: null });
-    const msg = `All tickets are done and reviewed${reviewNote ? ` (${reviewNote})` : ""}. Create the PR.`;
+    this.update(id, { phase: "pr", pr_number: pr.number, pr_url: pr.url, attention: null });
+    const msg = `All tickets are done and reviewed${reviewNote ? ` (${reviewNote})` : ""}. PR #${pr.number} is open.`;
     this.emit("event", id, { type: "wb_notify", message: msg, level: "info" });
   }
 
@@ -1000,8 +1014,9 @@ export class SessionManager extends EventEmitter {
     if (row.mode !== "pipeline") throw Object.assign(new Error("Not a pipeline session"), { status: 409 });
     const current = this.tickets(id).find((t) => t.status === "running" || t.status === "blocked");
     if (action === "stop") {
+      // Stop pauses the card in Issues; Solve all continues it.
       await this.abort(id).catch(() => {});
-      this.update(id, { phase: "done", attention: null });
+      this.update(id, { phase: "ready", attention: null });
     } else if (row.phase === "review") {
       if (action === "retry") await this.startReview(id);
       else await this.finishPipeline(id, null);

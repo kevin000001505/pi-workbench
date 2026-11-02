@@ -54,9 +54,21 @@ export type Card = {
   tickets: { done: number; total: number };
   attention: string | null;
   /** The card's PR; `state` is null until the workbench reads it from GitHub. */
-  pr: { number: number; url: string | null; state: string | null } | null;
+  pr: { number: number; url: string | null; state: PrState | null } | null;
   specRef: string | null;
 };
+
+/** The PR badge: open, checks (a check runs or failed), or conflict (the branch does not merge). */
+export type PrState = "open" | "checks" | "conflict";
+
+/** What the badge reads from GitHub's pull request status. */
+export type PrStatus = { state: string; mergeableState: string; checks: { pending: number; failed: number } };
+
+export function prState(s: PrStatus): PrState {
+  if (s.mergeableState === "dirty") return "conflict";
+  if (s.checks.pending > 0 || s.checks.failed > 0) return "checks";
+  return "open";
+}
 
 export function cardOf(s: CardSource): Card | null {
   const column = s.mode === "pipeline" ? columnOf(s.phase) : null;

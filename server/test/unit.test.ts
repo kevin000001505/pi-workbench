@@ -315,6 +315,29 @@ test("old databases gain the pipeline columns", async () => {
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM auto_decisions").get() as any).n, 1);
 });
 
+test("old done pipeline rows with a PR number open as pr, once", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wb-mig-")), "old.db");
+  const old = new DatabaseSync(file);
+  old.exec(
+    "CREATE TABLE sessions (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, title TEXT NOT NULL, branch TEXT NOT NULL, base_branch TEXT NOT NULL, worktree TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, pr_number INTEGER, pr_url TEXT, held_prompt TEXT, archived INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'direct', phase TEXT NOT NULL DEFAULT 'direct')",
+  );
+  const add = old.prepare("INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, pr_number, mode, phase) VALUES (?, 'r', 't', 'b', 'main', '/w', 0, 0, ?, ?, ?)");
+  add.run("reviewed-with-pr", 4, "pipeline", "done");
+  add.run("reviewed-no-pr", null, "pipeline", "done");
+  add.run("implementing", 5, "pipeline", "implement");
+  add.run("direct", 6, "direct", "direct");
+  old.close();
+  const phases = (db: ReturnType<typeof openDb>) =>
+    Object.fromEntries((db.prepare("SELECT id, phase FROM sessions ORDER BY id").all() as any[]).map((r) => [r.id, r.phase]));
+  const db = openDb(file);
+  assert.deepEqual(phases(db), { "reviewed-with-pr": "pr", "reviewed-no-pr": "done", implementing: "implement", direct: "direct" });
+  // `done` now means merged: a later merge is not turned back into `pr` on the next open.
+  db.prepare("UPDATE sessions SET phase = 'done' WHERE id = 'reviewed-with-pr'").run();
+  db.close();
+  assert.equal(phases(openDb(file))["reviewed-with-pr"], "done");
+});
+
 test("README documents the issues feature for a fresh setup", () => {
   const readme = fs.readFileSync(new URL("../../README.md", import.meta.url), "utf8");
   const section = (title: string) => {

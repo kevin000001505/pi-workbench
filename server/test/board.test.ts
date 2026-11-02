@@ -159,7 +159,7 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
   assert.equal((await api("GET", "/api/board?repo=kevin/nope")).status, 404);
 });
 
-test("a card started from a spec's ticket issues skips Issues: Doing, then QA, then Done", { skip: !hasPi && "pi CLI not found" }, async () => {
+test("a card started from a spec's ticket issues skips Issues: Doing, then QA, then Review with the opened PR", { skip: !hasPi && "pi CLI not found" }, async () => {
   gh.seedSubIssues("kevin", "demo", { number: 7, title: "Greeting suite", body: "## Solution\nhello.txt says Hello." }, [
     { number: 8, title: "Write hello.txt", body: "Create hello.txt containing Hello. BLOCKME" },
   ]);
@@ -176,19 +176,26 @@ test("a card started from a spec's ticket issues skips Issues: Doing, then QA, t
   const perm = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
   assert.equal(await column(), "qa");
   assert.equal((await api("POST", `/api/sessions/${s.id}/respond`, { requestId: perm.id, value: perm.options[0] })).status, 200);
-  await waitFor(async () => (await column()) === "done");
+  // After the review, the workbench opens the PR: the card moves to Review with its PR badge.
+  await waitFor(async () => (await column()) === "review");
   const card = (await board()).find((c) => c.id === s.id);
   assert.deepEqual(card.tickets, { done: 1, total: 1 });
   assert.equal(card.attention, null);
   assert.match(card.specRef, /issues\/7$/);
-  assert.equal(card.pr, null);
+  const pr = gh.pulls.at(-1);
+  assert.match(pr.body, /Closes #8/);
+  assert.match(pr.body, /Closes #7/);
+  // A check still runs on the PR head.
+  assert.deepEqual(card.pr, { number: pr.number, url: pr.html_url, state: "checks" });
 
   // The newest card still sorts by column, after the older ones in To do and Issues.
-  assert.deepEqual((await board()).map((c) => c.column), ["todo", "issues", "done"]);
+  assert.deepEqual((await board()).map((c) => c.column), ["todo", "issues", "review"]);
 
-  // A PR opened on the session shows on its card.
-  const pr = await api("POST", `/api/sessions/${s.id}/pr`, { title: "Greeting suite", body: "Closes #7" });
-  assert.equal(pr.status, 200, JSON.stringify(pr.json));
-  const withPr = (await board()).find((c) => c.id === s.id);
-  assert.deepEqual(withPr.pr, { number: pr.json.number, url: pr.json.url, state: null });
+  // The badge follows the PR on GitHub: every check passed, a check failed, then a merge conflict.
+  gh.checkRuns.splice(1);
+  assert.equal((await board()).find((c) => c.id === s.id).pr.state, "open");
+  gh.checkRuns[0].conclusion = "failure";
+  assert.equal((await board()).find((c) => c.id === s.id).pr.state, "checks", "a failed check");
+  pr.mergeable_state = "dirty";
+  assert.equal((await board()).find((c) => c.id === s.id).pr.state, "conflict");
 });

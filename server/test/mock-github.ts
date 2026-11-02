@@ -12,7 +12,12 @@ export function startMockGitHub(root: string, login = "kevin") {
   const pulls: any[] = [];
   const issues: any[] = []; // repo-scoped: { owner, name, ...issue }; the issues feed carries pull-request entries too
   const comments: any[] = []; // { owner, name, issueNumber, ...comment }
-  const subIssueSeeds: Record<string, any> = {}; // `${owner}/${name}#${specNumber}` → { spec, subs } for the /graphql route
+  const subIssueSeeds: Record<string, any> = {};
+  // Every PR head's check runs; a test edits it. Set a pull's `mergeable_state` to "dirty" for a conflict.
+  const checkRuns: { name: string; status: string; conclusion: string | null }[] = [
+    { name: "ci", status: "completed", conclusion: "success" },
+    { name: "lint", status: "in_progress", conclusion: null },
+  ]; // `${owner}/${name}#${specNumber}` → { spec, subs } for the /graphql route
   const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
 
   const createBare = (owner: string, name: string) => {
@@ -165,16 +170,16 @@ export function startMockGitHub(root: string, login = "kevin") {
     if ((m = /^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(p))) {
       const pr = pulls[Number(m[1]) - 1];
       return pr
-        ? send(200, { state: "open", merged: false, draft: !!pr.draft, mergeable_state: "clean", html_url: pr.html_url, head: { sha: "abc" }, comments: 0, review_comments: 1 })
+        ? send(200, { state: "open", merged: false, draft: !!pr.draft, mergeable_state: pr.mergeable_state ?? "clean", html_url: pr.html_url, head: { sha: "abc" }, comments: 0, review_comments: 1 })
         : send(404, { message: "Not Found" });
     }
     if (/\/commits\/[^/]+\/check-runs$/.test(p)) {
-      return send(200, { check_runs: [{ name: "ci", status: "completed", conclusion: "success" }, { name: "lint", status: "in_progress", conclusion: null }] });
+      return send(200, { check_runs: checkRuns });
     }
     send(404, { message: `mock has no ${req.method} ${p}` });
   });
 
-  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; close: () => Promise<void> }>((resolve) => {
+  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; checkRuns: typeof checkRuns; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; close: () => Promise<void> }>((resolve) => {
     server.listen(Number(process.env.MOCK_GH_PORT ?? 0), "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
       resolve({
@@ -182,6 +187,7 @@ export function startMockGitHub(root: string, login = "kevin") {
         pulls,
         issues,
         comments,
+        checkRuns,
         createBare,
         seedSubIssues,
         close: () => new Promise((r) => server.close(() => r())),
