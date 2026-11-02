@@ -356,17 +356,14 @@ test("README documents the issues feature for a fresh setup", () => {
   assert.match(clause, /read/i);
   assert.doesNotMatch(clause, /write/i);
 
-  // Features: the Issues page browses and searches the open issues of a tracked repo, reads the discussion, and starts a pre-filled session.
+  // Features: a spec issue with open tickets shows as an unclaimed card; its drags solve or rework it.
   const features = section("What you get");
-  assert.match(features, /Issues\*{0,2} page/i);
-  assert.match(features, /open issues/);
-  assert.match(features, /search/i);
-  assert.match(features, /discussion|comment/i);
-  assert.match(features, /pre-?filled/i);
-
-  // Solve flow: the PR body carries Closes #n, and merging the PR closes the issue.
-  assert.match(features, /Closes #/);
-  assert.match(features, /merg/i);
+  assert.match(features, /unclaimed card/i);
+  assert.match(features, /ticket sub-issues/);
+  assert.match(features, /Doing/);
+  assert.match(features, /To do/);
+  // Solve flow: the PR closes the spec issue and every ticket issue.
+  assert.match(features, /closes the spec issue/i);
 });
 
 test("every pipeline prompt starts with a /skill: command pi will expand", async () => {

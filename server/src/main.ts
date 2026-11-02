@@ -3,7 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import path from "node:path";
-import { boardCards, DONE_PAGE, limitDone, prState } from "../../shared/board.ts";
+import { boardCards, DONE_PAGE, issueNumberOf, limitDone, prState, unclaimedCards } from "../../shared/board.ts";
 import { config, TYPESAFE_SKILL } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { GitEnv } from "./git.ts";
@@ -89,6 +89,15 @@ async function repoView(r: ReturnType<typeof listRepos>[number]) {
   };
 }
 
+/** The repo's unclaimed cards; none when GitHub cannot be read (no token, offline). */
+async function unclaimedOf(repoId: string, mine: ReturnType<SessionManager["list"]>) {
+  const [owner, name] = repoId.split("/");
+  const specs = await Promise.resolve()
+    .then(() => github().listSpecIssues(owner, name))
+    .catch(() => []);
+  return unclaimedCards(specs, mine.flatMap((s) => [s.issueRef, s.specRef]), repoId);
+}
+
 const router = new Router()
   .on("GET", "/api/health", () => ({ ok: true }))
 
@@ -166,7 +175,8 @@ const router = new Router()
     // `done` is how many Done cards to list, newest first; the board's "show more" raises it.
     const done = query.has("done") ? Number(query.get("done")) : DONE_PAGE;
     if (!Number.isInteger(done) || done < 0) throw new HttpError(400, "done must be a whole number of cards");
-    const board = limitDone(boardCards(sessions.list().filter((s) => s.repoId === repo.id)), done);
+    const mine = sessions.list().filter((s) => s.repoId === repo.id);
+    const board = limitDone(boardCards(mine, await unclaimedOf(repo.id, mine)), done);
     // The PR badge's state comes from GitHub; a card whose PR cannot be read keeps state null.
     await Promise.all(
       board.cards.map(async (c) => {
@@ -174,6 +184,19 @@ const router = new Router()
       }),
     );
     return board;
+  })
+
+  // An unclaimed card (`issue:<number>`) has no session yet: its move creates one. To Doing is
+  // Solve all on the spec's open tickets; to To do grills in rework mode on that spec issue.
+  .on("POST", "/api/repos/:owner/:name/issues/:number/move", async ({ params, body }) => {
+    const repo = requireTrackedRepo(db, `${params.owner}/${params.name}`);
+    const number = Number(params.number);
+    const startFrom = body.column === "doing" ? "tickets" : body.column === "todo" ? "spec" : null;
+    if (!startFrom) throw new HttpError(409, "An unclaimed card can move only to Doing or To do.");
+    const mine = sessions.list().filter((s) => s.repoId === repo.id);
+    if (mine.some((s) => issueNumberOf(s.issueRef, repo.id) === number || issueNumberOf(s.specRef, repo.id) === number))
+      throw new HttpError(409, `A card already works on issue #${number}.`);
+    return sessions.create({ repoId: repo.id, title: "", prompt: "", mode: "pipeline", issueRef: `${repo.id}#${number}`, startFrom });
   })
 
   // --- sessions -----------------------------------------------------------------------------
@@ -413,6 +436,8 @@ const broadcast = (msg: unknown, sessionId?: string) => {
 };
 sessions.on("summary", (session) => broadcast({ type: "summary", session }));
 sessions.on("removed", (id) => broadcast({ type: "removed", id }));
+// A card was created (or removed): open boards of that repo fetch GET /api/board again.
+sessions.on("board", (repoId) => broadcast({ type: "wb_board", repoId }));
 sessions.on("event", (sessionId, event) => broadcast({ type: "event", sessionId, event }, sessionId));
 
 server.listen(config.port, config.host, () => {

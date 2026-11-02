@@ -96,10 +96,10 @@ export function parseIssueRef(issueRef: string | null | undefined): { repoId: st
   return { repoId: issueRef.slice(0, i), number };
 }
 
-/** The issue-detail hash link for an `owner/name#123` ref. */
+/** The GitHub page of an `owner/name#123` issue ref. */
 export const issueUrl = (issueRef: string | null | undefined) => {
   const p = parseIssueRef(issueRef);
-  return p ? `#/issues/${encodeURIComponent(p.repoId)}/${p.number}` : "#/issues";
+  return p ? `https://github.com/${p.repoId}/issues/${p.number}` : undefined;
 };
 
 export const kTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}K` : String(n));

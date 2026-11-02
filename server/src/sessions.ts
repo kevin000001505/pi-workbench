@@ -394,9 +394,10 @@ export class SessionManager extends EventEmitter {
       throw Object.assign(new Error(`The TypeSafe skill is not installed (expected at ${typesafeSkillDir()})`), { status: 400 });
     }
     const mode = input.mode === "direct" ? "direct" : "pipeline";
-    // The Issues page's "Solve all tickets" button: the spec and its ticket sub-issues already
-    // exist on GitHub, so the session skips grill/spec/tickets and starts at implement.
-    const startFrom = input.startFrom === "tickets" ? "tickets" : undefined;
+    // An unclaimed card's moves: the spec and its ticket sub-issues already exist on GitHub.
+    // `tickets` (to Doing) skips grill/spec/tickets and starts at implement; `spec` (to To do)
+    // grills in rework mode on that spec issue, so it updates the spec and tickets in place.
+    const startFrom = input.startFrom === "tickets" || input.startFrom === "spec" ? input.startFrom : undefined;
     if (startFrom && input.mode === "direct")
       throw Object.assign(new Error("Solving tickets needs a pipeline session"), { status: 400 });
     const task = (input.prompt ?? "").trim();
@@ -406,18 +407,20 @@ export class SessionManager extends EventEmitter {
       if (!issueRef) throw Object.assign(new Error("Solving tickets needs the spec issue (issueRef)"), { status: 400 });
       if (!this.fetchTicketSeed) throw Object.assign(new Error("This workbench has no GitHub connection to read tickets from"), { status: 400 });
     }
+    // The spec issue's title, body and URL, and its ticket sub-issues, for startFrom sessions.
+    let seed: TicketSeed | undefined;
+    if (startFrom) {
+      seed = await this.fetchTicketSeed!(issueRef!);
+      if (seed.subIssues.length === 0) throw Object.assign(new Error(`Issue ${issueRef} has no open ticket sub-issues`), { status: 404 });
+    }
     const id = crypto.randomUUID();
-    const title = input.title.trim() || task.split("\n")[0].slice(0, 60) || "New session";
+    const title = input.title.trim() || task.split("\n")[0].slice(0, 60) || seed?.spec.title.slice(0, 120) || "New session";
     const base = input.baseBranch?.trim() || repo.default_branch;
     const branch = `pi/${slugify(title)}-${id.slice(0, 6)}`;
     const worktree = await createWorktree(repo, id, branch, base, await this.gitEnv());
     const now = Date.now();
     const needsSetup = worktreeNeedsSetup(worktree);
-    // The spec issue's title and body, and the ticket rows, for startFrom sessions.
-    let seed: TicketSeed | undefined;
-    if (startFrom) {
-      seed = await this.fetchTicketSeed!(issueRef!);
-      if (seed.subIssues.length === 0) throw Object.assign(new Error(`Issue ${issueRef} has no open ticket sub-issues`), { status: 404 });
+    if (startFrom === "tickets" && seed) {
       let ticketInputs;
       try {
         ticketInputs = validateTickets(ticketsFromSubIssues(seed.subIssues));
@@ -429,28 +432,34 @@ export class SessionManager extends EventEmitter {
       );
       for (const t of ticketInputs) insert.run(id, t.number, t.title, t.body, JSON.stringify(t.blockedBy), t.trackerRef ?? null);
     }
-    const phase: Phase = needsSetup ? "setup" : startFrom ? "implement" : mode === "pipeline" ? "grill" : "direct";
+    const phase: Phase = needsSetup ? "setup" : startFrom === "tickets" ? "implement" : mode === "pipeline" ? "grill" : "direct";
+    // The grill's first prompt; a setup run holds it until setup is done.
+    const held = startFrom === "spec" ? reworkPrompt(seed!.spec.htmlUrl) : task ? input.prompt : null;
     this.db
       .prepare(
         `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt, mode, phase, active_run, issue_ref, auto_approve, typesafe_skill, spec, spec_ref)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup && task ? input.prompt : null, mode, phase, id, issueRef, autoApprove === "inherit" ? null : autoApprove, typesafe ? 1 : 0, seed?.spec.body ?? null, seed?.spec.htmlUrl ?? null);
+      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup ? held : null, mode, phase, id, issueRef, autoApprove === "inherit" ? null : autoApprove, typesafe ? 1 : 0, startFrom === "tickets" ? (seed?.spec.body ?? null) : null, seed?.spec.htmlUrl ?? null);
     const s = this.state(id);
     s.loaded = true;
     await this.start(id);
     if (needsSetup) {
       s.setupRunning = true;
       await this.send(id, SETUP_PROMPT);
-    } else if (startFrom) {
+    } else if (startFrom === "tickets") {
       // grill/spec/tickets are skipped: the first ticket run starts now.
       await this.runNext(id);
+    } else if (startFrom === "spec") {
+      await this.send(id, held!);
     } else if (mode === "pipeline") {
       await this.send(id, grillPrompt(input.prompt));
     } else if (task) {
       await this.send(id, input.prompt);
     }
     this.emitSummary(id);
+    // A pipeline session is a new card on its repo's board.
+    if (mode === "pipeline") this.emit("board", repo.id);
     return this.summary(id);
   }
 
@@ -883,7 +892,8 @@ export class SessionManager extends EventEmitter {
     if (row.mode === "pipeline" && !discard) {
       this.update(id, { phase: "grill" });
       this.emitSummary(id);
-      await this.send(id, grillPrompt(row.held_prompt), "followUp");
+      // A session on an existing spec issue holds its whole rework prompt; others hold the task.
+      await this.send(id, row.spec_ref ? row.held_prompt : grillPrompt(row.held_prompt), "followUp");
       return;
     }
     this.update(id, { phase: "direct", mode: "direct" });
