@@ -28,8 +28,8 @@ process.env.DATA_DIR = path.join(tmp, "data");
 process.env.WORKBENCH_MASTER_KEY = "rev-master-key-0123456789";
 process.env.SKILLS_DIR = path.join(tmp, "skills");
 process.env.HOME = path.join(tmp, "agent-home");
-process.env.AUTO_APPROVE_TIMEOUT_MS = "1500";
-process.env.REVIEWER_TIMEOUT_MS = "1500";
+process.env.AUTO_APPROVE_TIMEOUT_MS = "500";
+process.env.REVIEWER_TIMEOUT_MS = "500";
 process.env.PI_EXTENSION = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "pi-extension", "workbench.ts");
 
 const JUDGE_TOKEN = "jev-secret-token";
@@ -233,7 +233,7 @@ test("a reviewer escalate turns the card into a waiting card with the rating and
 for (const [name, reply, why] of [
   ["an HTTP error", { status: 500, body: JSON.stringify({ error: { message: "overloaded" } }) }, /HTTP 500: overloaded/],
   ["a garbage body", { body: "<html>nope</html>" }, /unreadable/],
-  ["a timeout", { decision: "allow", reason: "late", delayMs: 3000 }, /no answer within/],
+  ["a timeout", { decision: "allow", reason: "late", hold: true }, /no answer within/],
 ] as const) {
   test(`when the reviewer fails with ${name}, the card waits for the user with a failure note`, { skip }, async () => {
     useReviewer({ provider: "anthropic", baseUrl: claude.url, model: "claude-mock", key: CLAUDE_KEY });
@@ -250,15 +250,16 @@ for (const [name, reply, why] of [
 
 test("the user's Deny during a review wins: one answer, no late deny reaches pi", { skip }, async () => {
   useReviewer({ provider: "anthropic", baseUrl: claude.url, model: "claude-mock", key: CLAUDE_KEY });
-  jev.replies.push({ nouls: RISKY, delayMs: 800 });
-  claude.replies.push({ decision: "deny", reason: "late", delayMs: 1200 });
+  jev.replies.push({ nouls: RISKY });
+  claude.replies.push({ decision: "deny", reason: "late", hold: true });
   const req = await cardFor(sessionId, "please push", (r) => r.review?.state === "reviewing");
   const capture = captureWrites(mgr.live.get(sessionId).proc, req.id);
   const from = events.length;
   const answeredBefore = claude.answered();
   await deny(sessionId, req);
-  await waitFor(() => claude.answered() > answeredBefore);
-  await new Promise((r) => setTimeout(r, 200));
+  // Let the reviewer deliver its late verdict, then let the server handle it.
+  claude.release();
+  await reviewCallOver(answeredBefore);
   capture.stop();
   assert.deepEqual(capture.writes.map((w) => w.value), ["Deny"]);
   assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"), "no automatic answer after the user's");
@@ -267,7 +268,7 @@ test("the user's Deny during a review wins: one answer, no late deny reaches pi"
 test("aborting the run during a slow review cancels it: the card waits, and no answer is written afterwards", { skip }, async () => {
   useReviewer({ provider: "anthropic", baseUrl: claude.url, model: "claude-mock", key: CLAUDE_KEY });
   jev.replies.push({ nouls: RISKY });
-  claude.replies.push({ decision: "allow", reason: "late", delayMs: 1200 });
+  claude.replies.push({ decision: "allow", reason: "late", hold: true });
   const req = await cardFor(sessionId, "please push", (r) => r.review?.state === "reviewing");
   const capture = captureWrites(mgr.live.get(sessionId).proc, req.id);
   const from = events.length;
@@ -278,14 +279,19 @@ test("aborting the run during a slow review cancels it: the card waits, and no a
   assert.equal(card.review, undefined, "the card is an ordinary waiting card");
   assert.equal(card.judge.rating, "risky", "it keeps the judge's rating");
   assert.equal(mgr.summary(sessionId).status, "waiting");
-  await waitFor(() => claude.answered() > answeredBefore);
-  await new Promise((r) => setTimeout(r, 200));
+  await reviewCallOver(answeredBefore);
   capture.stop();
   assert.deepEqual(capture.writes, [], "no late extension_ui_response");
   assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"));
   assert.equal(claude.dropped(), droppedBefore + 1, "the cancelled review call was hung up on");
   await deny(sessionId, card);
 });
+
+/** Wait until the held review call is over (answered, or hung up on), then let the server handle it. */
+async function reviewCallOver(answeredBefore: number) {
+  await waitFor(() => claude.answered() > answeredBefore);
+  await new Promise((r) => setTimeout(r, 100));
+}
 
 /** With auto-approve off the card waits for the user; answer it with `value` and return the tool result. */
 async function denyWith(id: string, value: string) {

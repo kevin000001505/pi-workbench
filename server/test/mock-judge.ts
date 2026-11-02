@@ -10,7 +10,8 @@ export type JudgeReply = {
   status?: number;
   /** A raw body to send instead of a well-formed answer (unreadable answers), or with `status`, the error body. */
   body?: string;
-  delayMs?: number;
+  /** Hold the answer until the test calls `release()`, or the client hangs up (a cancel or a timeout). */
+  hold?: boolean;
 };
 
 export const SAFE = { deletes_data: 0.04, reaches_outside: 0.05, hard_to_undo: 0.03, fits_task: 0.92 };
@@ -35,11 +36,16 @@ export function startMockJudge(opts: { protocol: "systemone" | "openai"; model: 
   answered: () => number;
   /** Calls the client hung up on before their answer was sent (a cancelled judgement). */
   dropped: () => number;
-  /** Delay every scripted (not queued) answer, so calls arriving together are judged together. */
-  setDelay: (ms: number) => void;
+  /** Calls held now (see `JudgeReply.hold`). */
+  held: () => number;
+  /** Answer every held call. */
+  release: () => void;
+  /** Hold every scripted (not queued) answer too, so calls arriving together are judged together. */
+  setHold: (on: boolean) => void;
   close: () => Promise<void>;
 }> {
-  let scriptDelayMs = 0;
+  let holdScripted = false;
+  const held = new Set<() => void>();
   let dropped = 0;
   const requests: { path: string; auth?: string; body: any }[] = [];
   const replies: JudgeReply[] = [];
@@ -74,9 +80,9 @@ export function startMockJudge(opts: { protocol: "systemone" | "openai"; model: 
     const push = state.includes("git push");
     const reply: JudgeReply = replies.shift() ?? {
       ...(opts.protocol === "systemone" ? { nouls: risky ? RISKY : push ? PUSH : SAFE } : { text: risky ? "RISKY" : "SAFE" }),
-      delayMs: scriptDelayMs,
+      hold: holdScripted,
     };
-    if (reply.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs));
+    if (reply.hold) await holdUntilReleased(held, res);
     answered++;
     if (res.destroyed) {
       dropped++;
@@ -99,8 +105,10 @@ export function startMockJudge(opts: { protocol: "systemone" | "openai"; model: 
         replies,
         answered: () => answered,
         dropped: () => dropped,
-        setDelay: (ms: number) => {
-          scriptDelayMs = ms;
+        held: () => held.size,
+        release: () => [...held].forEach((done) => done()),
+        setHold: (on: boolean) => {
+          holdScripted = on;
         },
         close: () =>
           new Promise<void>((r) => {
@@ -109,5 +117,18 @@ export function startMockJudge(opts: { protocol: "systemone" | "openai"; model: 
           }),
       });
     });
+  });
+}
+
+/** Wait until the test releases the call, or the client hangs up on it. */
+export function holdUntilReleased(held: Set<() => void>, res: http.ServerResponse): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      held.delete(done);
+      res.off("close", done);
+      resolve();
+    };
+    held.add(done);
+    res.once("close", done);
   });
 }

@@ -26,7 +26,7 @@ process.env.DATA_DIR = path.join(tmp, "data");
 process.env.WORKBENCH_MASTER_KEY = "auto-master-key-0123456789";
 process.env.SKILLS_DIR = path.join(tmp, "skills");
 process.env.HOME = path.join(tmp, "agent-home");
-process.env.AUTO_APPROVE_TIMEOUT_MS = "1500";
+process.env.AUTO_APPROVE_TIMEOUT_MS = "500";
 process.env.PI_EXTENSION = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "pi-extension", "workbench.ts");
 
 const TOKEN = "jev-secret-token";
@@ -78,6 +78,12 @@ async function cardFor(id: string, prompt: string, until: (req: any) => boolean 
   return waitFor(() => mgr.summary(id).pending.find((r: any) => r.kind === "permission" && until(r)));
 }
 const judged = (r: any) => r.judge?.state !== "judging";
+
+/** Wait until the held judge call is over (answered, or hung up on), then let the server handle it. */
+async function judgeCallOver(judge: { answered: () => number }, answeredBefore: number) {
+  await waitFor(() => judge.answered() > answeredBefore);
+  await new Promise((r) => setTimeout(r, 100));
+}
 
 async function deny(id: string, req: any) {
   mgr.respond(id, req.id, { value: "Deny" });
@@ -217,7 +223,7 @@ test("a System One model behind an OpenAI-shaped list (llama-swap) is asked at S
     await enable({ baseUrl: chat.url, model: "mock-judge" });
     for (const [reply, why] of [
       [{ status: 500, body: JSON.stringify({ error: { message: "upstream command exited prematurely" } }) }, /clef-flash.*HTTP 500: upstream command exited prematurely/],
-      [{ nouls: SAFE, delayMs: 3000 }, /clef-flash.*no answer within/],
+      [{ nouls: SAFE, hold: true }, /clef-flash.*no answer within/],
       [{ body: "<html>nope</html>" }, /clef-flash.*HTTP 200/],
     ] as const) {
       swap.replies.push(reply);
@@ -266,10 +272,12 @@ test("the task Jev sees is the request, not the expanded skill text before it", 
 
 test("while the judge rates, the card shows judging and the session is not waiting on the user", { skip }, async () => {
   await enable();
-  jev.replies.push({ nouls: SAFE, delayMs: 800 });
+  jev.replies.push({ nouls: SAFE, hold: true });
   const req = await cardFor(sessionId, "please push");
   assert.equal(req.judge.state, "judging");
   assert.notEqual(mgr.summary(sessionId).status, "waiting");
+  await waitFor(() => jev.held());
+  jev.release();
   await settle(sessionId);
   assert.equal(mgr.summary(sessionId).pending.length, 0);
 });
@@ -325,7 +333,7 @@ for (const [name, reply, why] of [
   ["an HTTP error", { status: 500, body: JSON.stringify({ detail: "Model not found" }) }, /HTTP 500: Model not found/],
   ["an HTTP error with no reason", { status: 503, body: "{}" }, /HTTP 503$/],
   ["an HTTP error with a plain-text body", { status: 502, body: "Bad Gateway\n" }, /HTTP 502: Bad Gateway$/],
-  ["a timeout", { nouls: SAFE, delayMs: 3000 }, /no answer within/],
+  ["a timeout", { nouls: SAFE, hold: true }, /no answer within/],
   ["an unreadable answer", { body: "<html>nope</html>" }, /unreadable/],
   ["a missing answer", { nouls: { deletes_data: 0.1, reaches_outside: 0.1, hard_to_undo: 0.1 } }, /unreadable/],
   ["a probability above 1", { nouls: { ...SAFE, fits_task: 1.2 } }, /unreadable/],
@@ -358,7 +366,7 @@ test("when the judge is unreachable, the card waits for the user and says why", 
 
 test("the user's answer during judging wins: pi gets exactly one answer and no late allow", { skip }, async () => {
   await enable();
-  jev.replies.push({ nouls: SAFE, delayMs: 1000 });
+  jev.replies.push({ nouls: SAFE, hold: true });
   const req = await cardFor(sessionId, "please push");
   assert.equal(req.judge.state, "judging");
   // Watch what reaches pi for this request.
@@ -366,9 +374,9 @@ test("the user's answer during judging wins: pi gets exactly one answer and no l
   const from = events.length;
   const answeredBefore = jev.answered();
   await deny(sessionId, req);
-  // Wait for the judge to deliver its late verdict, then let the server handle it.
-  await waitFor(() => jev.answered() > answeredBefore);
-  await new Promise((r) => setTimeout(r, 200));
+  // Let the judge deliver its late verdict, then let the server handle it.
+  jev.release();
+  await judgeCallOver(jev, answeredBefore);
   capture.stop();
   assert.deepEqual(capture.writes.map((w) => w.value), ["Deny"]);
   assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"), "no automatic answer after the user's");
@@ -426,7 +434,7 @@ test("an OpenAI-compatible judge answers with one word: only SAFE allows", { ski
   assert.equal(broken.judge.state, "failed");
   assert.equal(broken.judge.note, "mock-judge failed: HTTP 500: upstream command exited prematurely");
   await deny(sessionId, broken);
-  chat.replies.push({ text: "SAFE", delayMs: 3000 });
+  chat.replies.push({ text: "SAFE", hold: true });
   const slow = await cardFor(sessionId, "please push", judged);
   assert.equal(slow.judge.state, "failed");
   assert.match(slow.judge.note, /no answer within/);
@@ -613,15 +621,10 @@ test("inherit follows the global switch, also when it changes while the session 
   assert.equal(added.find((m: any) => m.role === "autoAnswer")?.answer, "allow");
 });
 
-/** Wait until the slow judge call is over (answered, or hung up on), then let the server handle it. */
-async function judgeCallOver(answeredBefore: number) {
-  await waitFor(() => jev.answered() > answeredBefore);
-  await new Promise((r) => setTimeout(r, 200));
-}
 
 /** Start a slow judgement, call `off` while it runs, and check the card waits and no late answer reaches pi. */
 async function offDuringReview(off: () => unknown) {
-  jev.replies.push({ nouls: SAFE, delayMs: 800 });
+  jev.replies.push({ nouls: SAFE, hold: true });
   const req = await cardFor(sessionId, "please push");
   assert.equal(req.judge.state, "judging");
   const capture = captureWrites(mgr.live.get(sessionId).proc, req.id);
@@ -632,7 +635,7 @@ async function offDuringReview(off: () => unknown) {
   const card = mgr.summary(sessionId).pending.find((r: any) => r.id === req.id);
   assert.equal(card.judge, undefined, "the card is an ordinary waiting card");
   assert.equal(mgr.summary(sessionId).status, "waiting");
-  await judgeCallOver(answeredBefore);
+  await judgeCallOver(jev, answeredBefore);
   capture.stop();
   assert.deepEqual(capture.writes, [], "no late extension_ui_response");
   assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"));
@@ -672,7 +675,7 @@ test("an unknown session auto-approve value is refused, on create and on update,
 
 /** Start a slow judgement, run `cut` while it runs, and check no answer for that request reaches pi afterwards. */
 async function cutDuringJudging(cut: () => Promise<unknown>) {
-  jev.replies.push({ nouls: SAFE, delayMs: 800 });
+  jev.replies.push({ nouls: SAFE, hold: true });
   const req = await cardFor(sessionId, "please push");
   assert.equal(req.judge.state, "judging");
   const capture = captureWrites(mgr.live.get(sessionId).proc, req.id);
@@ -680,7 +683,7 @@ async function cutDuringJudging(cut: () => Promise<unknown>) {
   const answeredBefore = jev.answered();
   const droppedBefore = jev.dropped();
   await cut();
-  await judgeCallOver(answeredBefore);
+  await judgeCallOver(jev, answeredBefore);
   capture.stop();
   assert.deepEqual(capture.writes, [], "no extension_ui_response for the request after the cut");
   assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"), "no automatic answer after the cut");
@@ -726,7 +729,7 @@ test("a run switch during a slow judgement cancels it: no answer is written afte
 
 test("cancelling an OpenAI-compatible judgement hangs up its call too", { skip }, async () => {
   await enable({ baseUrl: chat.url, model: "mock-judge" });
-  chat.replies.push({ text: "SAFE", delayMs: 800 });
+  chat.replies.push({ text: "SAFE", hold: true });
   const req = await cardFor(sessionId, "please push");
   assert.equal(req.judge.state, "judging");
   const capture = captureWrites(mgr.live.get(sessionId).proc, req.id);
@@ -734,8 +737,7 @@ test("cancelling an OpenAI-compatible judgement hangs up its call too", { skip }
   const droppedBefore = chat.dropped();
   mgr.setAutoApprove(sessionId, "off");
   try {
-    await waitFor(() => chat.answered() > answeredBefore);
-    await new Promise((r) => setTimeout(r, 200));
+    await judgeCallOver(chat, answeredBefore);
     capture.stop();
     assert.deepEqual(capture.writes, []);
     assert.equal(chat.dropped(), droppedBefore + 1, "the cancelled chat call was hung up on");
@@ -747,15 +749,18 @@ test("cancelling an OpenAI-compatible judgement hangs up its call too", { skip }
 
 test("a verdict landing while the session stops is dropped: no answer, no audit line", { skip }, async () => {
   await enable();
-  jev.replies.push({ nouls: SAFE, delayMs: 300 });
+  jev.replies.push({ nouls: SAFE, hold: true });
   const req = await cardFor(sessionId, "please push");
   assert.equal(req.judge.state, "judging");
+  await waitFor(() => jev.held());
   // A process slow to exit: the verdict lands while it is still stopping.
   const proc = mgr.live.get(sessionId).proc;
   const capture = captureWrites(proc, req.id);
+  const answeredBefore = jev.answered();
   const stopProc = proc.stop.bind(proc);
   proc.stop = async (...args: any[]) => {
-    await new Promise((r) => setTimeout(r, 1000));
+    jev.release();
+    await judgeCallOver(jev, answeredBefore);
     return stopProc(...args);
   };
   const from = events.length;
@@ -770,7 +775,7 @@ test("a verdict landing while the session stops is dropped: no answer, no audit 
 
 test("two permissions in one session, the second arriving while the first is judged, each get their own verdict", { skip }, async () => {
   await enable();
-  jev.setDelay(600);
+  jev.setHold(true);
   try {
     const from = (await mgr.snapshot(sessionId)).transcript.messages.length;
     await mgr.send(sessionId, "do it twice");
@@ -782,6 +787,9 @@ test("two permissions in one session, the second arriving while the first is jud
     proc.emit("record", { type: "extension_ui_request", id: "second-permission", method: "select", title, options: ["Allow", "Allow for this session", "Deny"] });
     const both = mgr.summary(sessionId).pending.filter((r: any) => r.kind === "permission");
     assert.deepEqual(both.map((r: any) => r.judge?.state), ["judging", "judging"]);
+    await waitFor(() => jev.held() === 2);
+    jev.setHold(false);
+    jev.release();
     // The second (rm) is rated risky and waits for the user; the first (git push) is allowed on its own verdict.
     const second = await waitFor(() => mgr.summary(sessionId).pending.find((r: any) => r.id === "second-permission" && r.judge?.state === "waiting"));
     assert.equal(second.judge.rating, "risky");
@@ -798,7 +806,7 @@ test("two permissions in one session, the second arriving while the first is jud
     assert.equal(results.length, 2);
     assert.ok(results.some((m: any) => /denied/i.test(JSON.stringify(m.content))), "the user's deny reached the rm call");
   } finally {
-    jev.setDelay(0);
+    jev.setHold(false);
   }
 });
 

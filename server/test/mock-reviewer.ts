@@ -1,5 +1,6 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import { holdUntilReleased } from "./mock-judge.ts";
 
 /** One scripted verdict, or a broken reply (garbage body, HTTP error, or a hang). */
 export type ReviewerReply = {
@@ -9,7 +10,8 @@ export type ReviewerReply = {
   status?: number;
   /** A raw body to send instead of a well-formed answer (unreadable verdicts), or with `status`, the error body. */
   body?: string;
-  delayMs?: number;
+  /** Hold the verdict until the test calls `release()`, or the client hangs up (a cancel or a timeout). */
+  hold?: boolean;
 };
 
 /**
@@ -30,8 +32,13 @@ export function startMockReviewer(opts: { provider: "anthropic" | "openai"; mode
   answered: () => number;
   /** Review calls the client hung up on before their answer was sent (a cancelled review). */
   dropped: () => number;
+  /** Calls held now (see `ReviewerReply.hold`). */
+  held: () => number;
+  /** Answer every held call. */
+  release: () => void;
   close: () => Promise<void>;
 }> {
+  const held = new Set<() => void>();
   let dropped = 0;
   const requests: { path: string; model: string; key?: string; auth?: string; xApiKey?: string; body: any }[] = [];
   const replies: ReviewerReply[] = [];
@@ -57,7 +64,7 @@ export function startMockReviewer(opts: { provider: "anthropic" | "openai"; mode
     const userMsg = (body.messages ?? []).find((m: any) => m.role === "user");
     const state = typeof userMsg?.content === "string" ? userMsg.content : JSON.stringify(body);
     const reply = replies.shift() ?? (opts.defaultVerdict ? undefined : scriptFor(/"command":\s*"([^"]*)"/.exec(state)?.[1] ?? ""));
-    if (reply?.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs));
+    if (reply?.hold) await holdUntilReleased(held, res);
     answered++;
     if (res.destroyed) {
       dropped++;
@@ -82,6 +89,8 @@ export function startMockReviewer(opts: { provider: "anthropic" | "openai"; mode
         replies,
         answered: () => answered,
         dropped: () => dropped,
+        held: () => held.size,
+        release: () => [...held].forEach((done) => done()),
         close: () =>
           new Promise<void>((r) => {
             server.closeAllConnections();
