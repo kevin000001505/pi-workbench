@@ -108,16 +108,16 @@ const REVIEWER_DEFAULT_URL: Record<AutoApproveSettings["reviewer"]["provider"], 
   openai: "https://api.openai.com/v1",
 };
 
-/** A reviewer patch keeps the saved URL unless the provider changes, then the provider's public API. */
+/** A reviewer patch keeps the saved URL unless the provider changes, then the provider's public API. An empty model turns the reviewer off. */
 const pickReviewer = (cur: AutoApproveSettings["reviewer"], input: Partial<AutoApproveSettings>["reviewer"]): AutoApproveSettings["reviewer"] => {
   if (!input) return cur;
   const provider = input.provider ?? cur.provider;
   if (provider !== "anthropic" && provider !== "openai") throw bad(`Unknown reviewer provider ${String(provider)}`);
   const baseUrl = input.baseUrl === undefined && provider !== cur.provider ? REVIEWER_DEFAULT_URL[provider] : input.baseUrl ?? cur.baseUrl;
   httpUrl(baseUrl, "The reviewer URL must be an http:// or https:// URL");
-  const model = input.model ?? cur.model;
-  // An empty model refuses the save; the saved empty model is the "reviewer off" state.
-  if (!model || typeof model !== "string" || !model.trim()) throw bad("Pick a reviewer model");
+  if (input.model !== undefined && typeof input.model !== "string") throw bad("The reviewer model must be a string");
+  // An empty model saves the "reviewer off" state: calls the judge did not rate safe wait for the user.
+  const model = (input.model ?? cur.model).trim();
   return { provider, baseUrl, model };
 };
 

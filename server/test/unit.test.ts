@@ -379,6 +379,21 @@ test("reviewer settings validate and keep their shape", () => {
   assert.deepEqual(saveAutoApproveSettings(db, { enabled: true }).judge, judge);
 });
 
+test("Save with an empty reviewer model turns the reviewer off and keeps the switch usable", async () => {
+  const db = tmpDb();
+  const store = new SecretStore(db, "test-master-key-0123456789");
+  const judge = getAutoApproveSettings(db).judge;
+  const reviewer = { provider: "anthropic" as const, baseUrl: "https://api.anthropic.com", model: "" };
+  // Settings → Save always sends the reviewer fields, also when no reviewer is set up.
+  const on = await configureAutoApprove(db, store, { enabled: true, judge, reviewer });
+  assert.equal(on.enabled, true);
+  assert.deepEqual(on.reviewer, reviewer);
+  const off = await configureAutoApprove(db, store, { enabled: false, judge, reviewer: { ...reviewer, model: "  " } });
+  assert.equal(off.enabled, false);
+  assert.equal(off.reviewer.model, "", "a blank model id is stored as the reviewer-off state");
+  assert.equal(getAutoApproveSettings(db).enabled, false);
+});
+
 test("the reviewer key is write-only and never reaches a pi environment", () => {
   const db = tmpDb();
   const store = new SecretStore(db, "test-master-key-0123456789");
