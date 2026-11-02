@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { config, PROVIDER_ID } from "./config.ts";
 import { type Db, getSetting, putSetting } from "./db.ts";
+import { HttpError } from "./http.ts";
 
 export type ModelSettings = {
   baseUrl: string;
@@ -97,6 +98,35 @@ export function saveApprovalSettings(db: Db, input: ApprovalSettings) {
   });
   const next = { rules, outsideWorktree: input.outsideWorktree !== false };
   putSetting(db, "approval", next);
+  return next;
+}
+
+/**
+ * The stop rule for runs in the implement phase: a run stops when it passes the time limit
+ * (the clock pauses while a permission or decision waits for the user), repeats the same tool
+ * call with the same input, or passes the tool-call limit.
+ */
+export type PipelineSettings = {
+  /** Minutes of run time before the stop rule stops a run; the clock pauses while the user is asked something. */
+  timeLimitMinutes: number;
+  /** Consecutive identical tool calls (same tool, same JSON input) before the stop rule stops a run. */
+  repeatLimit: number;
+  /** Tool calls in one run before the stop rule stops it. */
+  toolCallLimit: number;
+};
+
+const DEFAULT_PIPELINE_SETTINGS: PipelineSettings = { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 };
+
+export function getPipelineSettings(db: Db): PipelineSettings {
+  return { ...DEFAULT_PIPELINE_SETTINGS, ...getSetting<Partial<PipelineSettings>>(db, "pipeline") };
+}
+
+export function savePipelineSettings(db: Db, input: Partial<PipelineSettings>): PipelineSettings {
+  const next = { ...getPipelineSettings(db), ...pick(input, ["timeLimitMinutes", "repeatLimit", "toolCallLimit"]) };
+  for (const k of ["timeLimitMinutes", "repeatLimit", "toolCallLimit"] as const) {
+    if (!Number.isInteger(next[k]) || next[k] <= 0) throw new HttpError(400, `${k} must be a positive integer`);
+  }
+  putSetting(db, "pipeline", next);
   return next;
 }
 

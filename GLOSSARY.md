@@ -58,8 +58,27 @@ _Avoid_: threshold (too vague; there are two), confidence
 The reviewer handing a permission back to the user because it could break something beyond the task.
 _Avoid_: fallback (a failed judge or reviewer also lands with the user, but no model chose it)
 
+### Pipeline
+
+**Stop rule**:
+The three conditions that stop a run in the implement phase: a time limit, a repeated tool call with the same input, or a tool-call count limit.
+_Avoid_: watchdog (that is the mechanism that enforces it), circuit breaker
+
+**Rescue run**:
+A run with the Reviewer's model that diagnoses a stuck ticket with `diagnosing-bugs` Phases 1 to 4; it finds the cause but does not fix it.
+_Avoid_: escalation (that is the Reviewer handing a permission to the user), fallback
+
+**Fix run**:
+A fresh local-model run that fixes a rescued ticket from its diagnosis.
+_Avoid_: retry (a retry re-runs the same ticket with the same model; a fix run starts clean from a diagnosis)
+
+**Retro run**:
+A run at the end of a spec that reviews the rescued tickets with the `retro` skill and only proposes changes.
+_Avoid_: code review (the review phase reads every change; the retro reads only the rescued tickets)
+
 ## Relationships
 
 - Under **Auto-approve**, every **Permission** goes to the **Risk judge** first; a safe rating allows it, any other rating goes to the **Reviewer** with the rating attached
 - Only the **Reviewer** produces an **Escalation**; the **Risk judge** never sends a **Permission** to the user
 - **Decisions** are never auto-approved
+- The **Reviewer's** settings drive the **Reviewer** as well as **Rescue runs** and **Retro runs**; an empty Reviewer model turns all three off

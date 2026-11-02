@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.ts";
 import { notificationsEnabled, setNotifications, useStore } from "../store.tsx";
-import type { ApprovalRule, ApprovalSettings, AutoApproveSettings, JudgeKind, JudgeModels, JudgeProtocol, ModelSettings, ProbeResult, ReviewerProvider, ReviewerSettings } from "../types.ts";
+import type { ApprovalRule, ApprovalSettings, AutoApproveSettings, JudgeKind, JudgeModels, JudgeProtocol, ModelSettings, PipelineSettings, ProbeResult, ReviewerProvider, ReviewerSettings } from "../types.ts";
 import { REVIEWER_DEFAULT_URL } from "../types.ts";
 import { PageHeader, Spinner } from "../ui.tsx";
 
@@ -454,6 +454,7 @@ function AutoApproveForm() {
         </button>
       </div>
       <h4>Reviewer (for calls the judge does not rate safe)</h4>
+      <span className="muted small">Its model also drives rescue runs and retro runs; an empty model turns them off.</span>
       <label>
         Provider
         <select className="input" value={a.reviewer.provider} onChange={(e) => setProvider(e.target.value as ReviewerProvider)}>
@@ -515,6 +516,62 @@ function AutoApproveForm() {
   );
 }
 
+function PipelineForm() {
+  const { toast } = useStore();
+  const [p, setP] = useState<PipelineSettings | null>(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    api.get<{ pipeline: PipelineSettings }>("/api/settings").then((s) => setP(s.pipeline)).catch((e) => toast(e.message, "error"));
+  }, [toast]);
+  if (!p) return <Spinner />;
+  const set = <K extends keyof PipelineSettings>(k: K, v: PipelineSettings[K]) => setP({ ...p, [k]: v });
+
+  return (
+    <form
+      className="card form"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setSaving(true);
+        try {
+          setP(await api.put<PipelineSettings>("/api/settings/pipeline", p));
+          toast("Pipeline settings saved. They apply to the next run in the implement phase.");
+        } catch (err) {
+          toast((err as Error).message, "error");
+        } finally {
+          setSaving(false);
+        }
+      }}
+    >
+      <h3>Pipeline</h3>
+      <p className="muted small">
+        The stop rule for ticket, rescue and fix runs: a run stops when it passes the time limit, repeats the same tool call
+        with the same input, or passes the tool-call limit. The clock pauses while a permission or decision waits for you.
+      </p>
+      <div className="grid2">
+        <label>
+          Time limit (minutes)
+          <input className="input mono" type="number" min={1} value={p.timeLimitMinutes} onChange={(e) => set("timeLimitMinutes", Number(e.target.value))} />
+        </label>
+        <label>
+          Repeat limit
+          <input className="input mono" type="number" min={1} value={p.repeatLimit} onChange={(e) => set("repeatLimit", Number(e.target.value))} />
+          <span className="muted small">Same tool call with the same input, in a row.</span>
+        </label>
+        <label>
+          Tool-call limit
+          <input className="input mono" type="number" min={1} value={p.toolCallLimit} onChange={(e) => set("toolCallLimit", Number(e.target.value))} />
+          <span className="muted small">Tool calls in one run.</span>
+        </label>
+      </div>
+      <div className="row end">
+        <button className="btn btn-primary" disabled={saving}>
+          Save pipeline
+        </button>
+      </div>
+    </form>
+  );
+}
+
 function NotificationsCard() {
   const [on, setOn] = useState(notificationsEnabled());
   const supported = "Notification" in window;
@@ -551,6 +608,7 @@ export function Settings() {
       <ModelForm />
       <RulesForm />
       <AutoApproveForm />
+      <PipelineForm />
       <NotificationsCard />
     </div>
   );

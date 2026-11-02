@@ -90,7 +90,7 @@ export type SessionSummary = {
 /** A session's auto-approve: follow the global switch in Settings, or override it. */
 export type AutoApproveMode = "inherit" | "on" | "off";
 
-export type Phase = "setup" | "grill" | "spec" | "tickets" | "implement" | "review" | "done" | "direct";
+export type Phase = "setup" | "grill" | "spec" | "tickets" | "implement" | "review" | "retro" | "done" | "direct";
 
 export type Ticket = {
   num: number;
@@ -139,6 +139,9 @@ export type ModelSettings = {
 
 export type ApprovalRule = { id: string; tool: string; pattern: string; label: string; enabled: boolean };
 export type ApprovalSettings = { rules: ApprovalRule[]; outsideWorktree: boolean };
+
+/** The stop-rule limits for runs in the implement phase: time limit, repeat limit, tool-call limit. */
+export type PipelineSettings = { timeLimitMinutes: number; repeatLimit: number; toolCallLimit: number };
 
 export type SecretMeta = { scope: string; name: string; updatedAt: number };
 

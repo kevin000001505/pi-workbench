@@ -18,9 +18,11 @@ import { applySsh, saveSshHosts, sshView, testSshHost } from "./ssh.ts";
 import {
   getApprovalSettings,
   getModelSettings,
+  getPipelineSettings,
   LLM_KEY_ENV,
   saveApprovalSettings,
   saveModelSettings,
+  savePipelineSettings,
   writePiConfig,
 } from "./settings.ts";
 import { listSkills } from "./skills.ts";
@@ -238,7 +240,7 @@ const router = new Router()
   })
 
   // --- settings & secrets ---------------------------------------------------------------
-  .on("GET", "/api/settings", () => ({ model: getModelSettings(db), approval: getApprovalSettings(db), autoApprove: autoApproveView(db, secrets) }))
+  .on("GET", "/api/settings", () => ({ model: getModelSettings(db), approval: getApprovalSettings(db), autoApprove: autoApproveView(db, secrets), pipeline: getPipelineSettings(db) }))
   .on("PUT", "/api/settings/auto-approve", async ({ body }) => {
     await sessions.applyAutoApproveSettings(body);
     return autoApproveView(db, secrets);
@@ -267,6 +269,8 @@ const router = new Router()
     writePiConfig(db);
     return approval;
   })
+  // The stop-rule limits; no pi config to regenerate, so no writePiConfig call.
+  .on("PUT", "/api/settings/pipeline", ({ body }) => savePipelineSettings(db, body))
   // A POST, so it passes the write-route checks: it calls out to a URL the request names.
   .on("POST", "/api/models", ({ body }) => listModelsAt(getModelSettings(db), body.baseUrl, llmKey()))
   .on("POST", "/api/models/test", async ({ body }) => {
