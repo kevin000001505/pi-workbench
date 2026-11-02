@@ -50,7 +50,6 @@ import { loadSshHosts } from "./ssh.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
 import { type RpcRecord, RpcProcess } from "./rpc.ts";
-import { getAutoApproveSettings } from "./autoapprove.ts";
 import { isRescueyRun, RESCUE_PROVIDER_ID, RESCUE_TOKEN_ENV, type RescueProxy } from "./rescue-proxy.ts";
 
 export type SessionStatus = "stopped" | "starting" | "running" | "waiting" | "idle" | "error";
