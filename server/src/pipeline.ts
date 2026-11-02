@@ -164,3 +164,16 @@ ${tickets.map((t) => `- #${t.num} ${t.title}${t.trackerRef ? ` (${t.trackerRef})
 Fix every issue the review raises, run the tests, and commit the fixes to the current branch. Do not push.
 Then call finish_review with a short note of what you found and fixed.`;
 }
+
+/** The grill again, after a card is moved back to To do: grill → spec → tickets rework what is already published. */
+export function reworkPrompt(specRef: string | null) {
+  const spec = specRef ? `the spec (${specRef})` : "the spec we wrote";
+  return `/skill:grill-with-docs Rework the spec${specRef ? ` (${specRef})` : ""} and its tickets: the user moved this feature back to plan it again.
+
+[pi-workbench pipeline: rework of grill-with-docs → to-spec → to-tickets]
+Ask the user with the ask_user tool what must change. Keep going until the user explicitly confirms, through ask_user, that we have reached a shared understanding.
+Commit any docs you changed (glossary, ADRs) to the current branch. Do not push.
+Then call save_grill_summary with a short summary of the new decisions, and stop.
+In the to-spec and to-tickets steps that follow, do not publish new issues for this feature: update the existing spec issue, ${spec}, in place, and update its ticket issues.
+Close every ticket issue that the new breakdown drops. record_tickets lists the full new breakdown.`;
+}

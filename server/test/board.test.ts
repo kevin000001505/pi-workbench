@@ -277,3 +277,125 @@ test("a move is a command: Issues → Doing is Solve all, a forward move with no
   assert.deepEqual(running.tickets.map((t: any) => t.status), ["running", "ready", "ready"]);
   await waitFor(() => mock.requests.some((r) => JSON.stringify(r.messages ?? []).includes("Ticket #1: Write hello.txt")));
 });
+
+test("a move back to Issues stops the run; a move to Doing resumes it with the done tickets kept", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.seedSubIssues("kevin", "demo", { number: 20, title: "Wave", body: "## Solution\nwave.txt says Wave." }, [
+    { number: 21, title: "Write wave.txt", body: "Create wave.txt containing Wave." },
+    { number: 22, title: "Push wave.txt", body: "Push it. PUSHME", blockedBy: [21] },
+  ]);
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Wave", issueRef: "kevin/demo#20", mode: "pipeline", startFrom: "tickets" })).json;
+  const move = (column: string) => api("POST", `/api/sessions/${s.id}/move`, { column });
+  const ticketRuns = (num: number) => mock.requests.filter((r) => JSON.stringify(r.messages ?? []).includes(`Ticket #${num}: `)).length;
+
+  // Ticket 1 finishes; ticket 2's `git push` waits on a permission in Doing.
+  await waitFor(async () => (await summary(s.id)).pending.some((p: any) => p.kind === "permission"));
+  const before = await summary(s.id);
+  assert.deepEqual(before.tickets.map((t: any) => t.status), ["done", "running"]);
+  assert.equal(await columnOf(s.id), "doing");
+
+  // Doing → Issues: the run stops and the session pauses in `ready`; the ticket statuses stay.
+  const paused = await move("issues");
+  assert.equal(paused.status, 200, JSON.stringify(paused.json));
+  assert.equal(paused.json.phase, "ready");
+  assert.equal(await columnOf(s.id), "issues");
+  await waitFor(async () => (await summary(s.id)).status === "stopped");
+  await new Promise((r) => setTimeout(r, 1000));
+  const stopped = await summary(s.id);
+  assert.equal(stopped.phase, "ready");
+  assert.deepEqual(stopped.pending, [], "the stopped run's permission is gone");
+  assert.deepEqual(stopped.tickets.map((t: any) => t.status), ["done", "running"]);
+  assert.equal(stopped.attention, null);
+  const t1Runs = ticketRuns(1);
+
+  // Issues → Doing resumes: ticket 2 starts again in a fresh run; ticket 1 does not run again.
+  const resumed = await move("doing");
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.json));
+  const perm = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  const again = await summary(s.id);
+  assert.deepEqual(again.tickets.map((t: any) => t.status), ["done", "running"]);
+  assert.notEqual(again.tickets[1].runId, before.tickets[1].runId, "a fresh run for the stopped ticket");
+  assert.equal(again.activeRun, again.tickets[1].runId);
+  assert.equal(again.tickets[0].runId, before.tickets[0].runId, "the done ticket keeps its run");
+  assert.equal((await api("POST", `/api/sessions/${s.id}/respond`, { requestId: perm.id, value: perm.options[0] })).status, 200);
+
+  // The review's `git push` waits in QA; QA → Issues stops the review the same way.
+  await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.phase === "review" && x.pending.some((p: any) => p.kind === "permission");
+  });
+  assert.equal(await columnOf(s.id), "qa");
+  assert.equal(ticketRuns(1), t1Runs, "ticket 1 never ran again");
+  assert.equal((await move("issues")).json.phase, "ready");
+  await waitFor(async () => (await summary(s.id)).status === "stopped");
+  assert.deepEqual((await summary(s.id)).tickets.map((t: any) => t.status), ["done", "done"]);
+  // Back to Doing with every ticket done: the review starts again.
+  assert.equal((await move("doing")).status, 200);
+  const perm2 = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.phase === "review" ? x.pending.find((p: any) => p.kind === "permission") : undefined;
+  });
+  assert.ok(perm2);
+  // QA → To do stops the review and plans again.
+  assert.equal((await move("todo")).json.phase, "grill");
+  assert.equal(await columnOf(s.id), "todo");
+});
+
+test("a move back to To do stops the run and grills again in the plan conversation, to rework the spec", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const greeting = (await board()).find((c) => c.title === "Greeting");
+  // The previous test left it in Doing, its first ticket waiting on a permission.
+  assert.equal(greeting.column, "doing");
+  const before = await summary(greeting.id);
+  assert.ok(before.grillSummary && before.spec);
+  const rework = () => mock.requests.find((x) => JSON.stringify(x.messages ?? []).includes("Rework the spec (.scratch/greeting/spec.md)"));
+
+  const r = await api("POST", `/api/sessions/${greeting.id}/move`, { column: "todo" });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.phase, "grill");
+  assert.equal(await columnOf(greeting.id), "todo");
+  const s = await summary(greeting.id);
+  assert.equal(s.activeRun, greeting.id, "back on the plan conversation");
+  assert.equal(s.grillSummary, null);
+  assert.equal(s.spec, null);
+  assert.equal(s.specRef, ".scratch/greeting/spec.md", "the spec ref is kept");
+  assert.equal(s.attention, null);
+
+  // The grill runs again with the rework prompt, and the pipeline waits for it: no skip ahead.
+  const decision = await waitFor(async () => (await summary(greeting.id)).pending.find((p: any) => p.kind === "decision"));
+  assert.match(decision.title, /shared understanding/);
+  assert.ok(rework(), "the grill gets the rework prompt with the kept spec ref");
+  const text = JSON.stringify(rework().messages);
+  assert.match(text, /<skill name=\\"grill-with-docs\\"[^]*Rework the spec/);
+  assert.match(text, /update the existing spec issue/i);
+  assert.match(text, /close every ticket issue .*drops/i);
+  assert.ok(text.includes("add a greeting"), "the plan conversation keeps its history");
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal((await summary(greeting.id)).phase, "grill", "the pipeline waits for the grill");
+  assert.equal((await api("POST", `/api/sessions/${greeting.id}/respond`, { requestId: decision.id, value: decision.options[0] })).status, 200);
+  await waitFor(async () => (await summary(greeting.id)).phase === "spec");
+  assert.equal(await columnOf(greeting.id), "todo");
+});
+
+test("a backward move clears the card's attention", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const blockedCard = async (number: number, title: string) => {
+    gh.seedSubIssues("kevin", "demo", { number, title, body: "## Solution\nSomething." }, [{ number: number + 1, title: "Do it", body: "Do it. BLOCKME" }]);
+    const s = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title, issueRef: `kevin/demo#${number}`, mode: "pipeline", startFrom: "tickets" })).json;
+    await waitFor(async () => (await board()).find((c) => c.id === s.id && c.attention));
+    return s.id as string;
+  };
+  // A blocked ticket's card in Doing, moved to Issues.
+  const a = await blockedCard(30, "Blocked to Issues");
+  assert.equal((await api("POST", `/api/sessions/${a}/move`, { column: "issues" })).status, 200);
+  const paused = (await board()).find((c) => c.id === a);
+  assert.equal(paused.column, "issues");
+  assert.equal(paused.attention, null);
+  // Issues → To do reworks a paused card too.
+  assert.equal((await api("POST", `/api/sessions/${a}/move`, { column: "todo" })).status, 200);
+  assert.equal(await columnOf(a), "todo");
+  // A blocked ticket's card in Doing, moved to To do: the rework names its spec issue.
+  const b = await blockedCard(40, "Blocked to To do");
+  assert.equal((await api("POST", `/api/sessions/${b}/move`, { column: "todo" })).status, 200);
+  const card = (await board()).find((c) => c.id === b);
+  assert.equal(card.column, "todo");
+  assert.equal(card.attention, null);
+  await waitFor(() => mock.requests.some((r) => /Rework the spec \(\S*issues\/40\)/.test(JSON.stringify(r.messages ?? []))));
+});
