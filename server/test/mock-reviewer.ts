@@ -16,10 +16,11 @@ export type ReviewerReply = {
  * A scripted frontier reviewer, speaking the API its provider uses:
  * - "anthropic": `POST /v1/messages` (x-api-key), a JSON verdict in the reply text;
  * - "openai": `POST /chat/completions` (Bearer or x-api-key), a JSON verdict in the reply text.
- * Queued `replies` answer first; otherwise it answers by the call in the state:
- * `rm -rf /mnt` is denied, `ssh` is escalated, any other `rm` is allowed; a reviewer configured
- * with `defaultVerdict: "escalate"` instead escalates anything the script does not name.
- * With `key`, every request without that API key gets 401, like the public APIs.
+ * Queued `replies` answer first. Otherwise: when `defaultVerdict` is set, every non-queued
+ * call is answered with it (the subject script stays off); when it is not set, it answers by
+ * the call in the state: `rm -rf /mnt` is denied, `ssh` is escalated, any other `rm` is
+ * allowed, anything else is allowed too. With `key`, every request without that API key gets
+ * 401, like the public APIs.
  */
 export function startMockReviewer(opts: { provider: "anthropic" | "openai"; model: string; key?: string; defaultVerdict?: "allow" | "escalate" }): Promise<{
   url: string;
@@ -52,19 +53,19 @@ export function startMockReviewer(opts: { provider: "anthropic" | "openai"; mode
     // Both providers send the state object as the user message's content string.
     const userMsg = (body.messages ?? []).find((m: any) => m.role === "user");
     const state = typeof userMsg?.content === "string" ? userMsg.content : JSON.stringify(body);
-    const reply = replies.shift() ?? scriptFor(/"command":\s*"([^"]*)"/.exec(state)?.[1] ?? "", opts.defaultVerdict);
-    if (reply.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs));
+    const reply = replies.shift() ?? (opts.defaultVerdict ? undefined : scriptFor(/"command":\s*"([^"]*)"/.exec(state)?.[1] ?? ""));
+    if (reply?.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs));
     answered++;
     if (res.destroyed) return;
-    if (reply.status && reply.status !== 200) return send(res, reply.status, reply.body ?? { error: { message: "mock failure" } });
-    if (reply.body !== undefined) return send(res, 200, reply.body);
-    const verdict = { decision: reply.decision ?? (opts.defaultVerdict ?? "allow"), reason: reply.reason ?? `mock reviewer ${(opts.defaultVerdict ?? "allow") === "allow" ? "allows" : "escalates"} it` };
+    if (reply?.status && reply.status !== 200) return send(res, reply.status, reply.body ?? { error: { message: "mock failure" } });
+    if (reply?.body !== undefined) return send(res, 200, reply.body);
+    const verdict = { decision: reply?.decision ?? (opts.defaultVerdict ?? "allow"), reason: reply?.reason ?? `mock reviewer ${(opts.defaultVerdict ?? "allow") === "allow" ? "allows" : "escalates"} it` };
     // The request names no tools, so a model answers in text: the JSON verdict in the content text.
     if (opts.provider === "anthropic") {
-      const text = reply.text ?? JSON.stringify({ decision: verdict.decision, reason: verdict.reason });
+      const text = reply?.text ?? JSON.stringify({ decision: verdict.decision, reason: verdict.reason });
       return send(res, 200, { id: "msg_mock", type: "message", role: "assistant", model: opts.model, content: [{ type: "text", text }], stop_reason: "end_turn" });
     }
-    send(res, 200, { id: "mock", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: reply.text ?? JSON.stringify(verdict) }, finish_reason: "stop" }] });
+    send(res, 200, { id: "mock", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: reply?.text ?? JSON.stringify(verdict) }, finish_reason: "stop" }] });
   });
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
@@ -84,10 +85,9 @@ export function startMockReviewer(opts: { provider: "anthropic" | "openai"; mode
   });
 }
 
-function scriptFor(command: string, fallback: "allow" | "escalate" = "allow"): Required<Pick<ReviewerReply, "decision" | "reason">> {
+function scriptFor(command: string): Required<Pick<ReviewerReply, "decision" | "reason">> {
   if (command.includes("rm -rf /mnt")) return { decision: "deny", reason: "Deletes data outside the worktree; that is not part of the task." };
   if (/^\s*ssh(\s|$)/.test(command)) return { decision: "escalate", reason: "Reaches a machine beyond the task; I cannot judge the target." };
-  // A reviewer configured to escalate by default is conservative: it does not auto-allow `rm`.
-  if (fallback !== "escalate" && command.includes("rm ")) return { decision: "allow", reason: "Routine cleanup for the task." };
-  return fallback === "escalate" ? { decision: "escalate", reason: "mock reviewer escalates it" } : { decision: "allow", reason: "Routine for the task." };
+  if (command.includes("rm ")) return { decision: "allow", reason: "Routine cleanup for the task." };
+  return { decision: "allow", reason: "Routine for the task." };
 }

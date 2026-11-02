@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.ts";
 import { notificationsEnabled, setNotifications, useStore } from "../store.tsx";
-import type { ApprovalRule, ApprovalSettings, AutoApproveSettings, JudgeModels, JudgeProtocol, ModelSettings, ProbeResult, ReviewerProvider, ReviewerSettings } from "../types.ts";
+import type { ApprovalRule, ApprovalSettings, AutoApproveSettings, JudgeKind, JudgeModels, JudgeProtocol, ModelSettings, ProbeResult, ReviewerProvider, ReviewerSettings } from "../types.ts";
 import { REVIEWER_DEFAULT_URL } from "../types.ts";
 import { PageHeader, Spinner } from "../ui.tsx";
 
@@ -223,6 +223,8 @@ function AutoApproveForm() {
   const [token, setToken] = useState("");
   const [rkey, setRkey] = useState("");
   const [list, setList] = useState<JudgeModels | string | null>(null);
+  const [agentModels, setAgentModels] = useState<string[] | null>(null);
+  const [agentProbe, setAgentProbe] = useState<string | null>(null);
   const [test, setTest] = useState<{ ok: boolean; message: string } | "running" | null>(null);
   const [rtest, setRtest] = useState<{ ok: boolean; message: string } | "running" | null>(null);
   useEffect(() => {
@@ -239,10 +241,26 @@ function AutoApproveForm() {
     }
   };
   useEffect(() => {
-    if (a) void listModels(a.judge.baseUrl);
+    if (a && a.judge.kind === "jev") void listModels(a.judge.baseUrl);
     // List once on load; afterwards on demand.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [a === null]);
+
+  /** The agent's own endpoint (the model settings' base URL): where the local kind's model ids live. */
+  useEffect(() => {
+    if (!a || a.judge.kind !== "local") return;
+    setAgentProbe("Checking…");
+    api
+      .post<string[]>("/api/models", { baseUrl: "" })
+      .then((ids) => {
+        setAgentModels(ids);
+        setAgentProbe(`${ids.length} model${ids.length === 1 ? "" : "s"} at the agent's endpoint`);
+      })
+      .catch((e) => {
+        setAgentModels(null);
+        setAgentProbe(`Unreachable: ${(e as Error).message}`);
+      });
+  }, [a?.judge.kind]);
 
   if (!a) return <Spinner />;
   const setJudge = (patch: Partial<AutoApproveSettings["judge"]>) => setA({ ...a, judge: { ...a.judge, ...patch } });
@@ -323,68 +341,97 @@ function AutoApproveForm() {
         permissions in every session
       </label>
       <label>
-        Risk judge URL
-        <div className="row gap">
-          <input
-            className="input mono grow"
-            value={a.judge.baseUrl}
-            placeholder="https://api.typesafe.ai/v1 or http://llama-swap:8080/v1"
-            onChange={(e) => setJudge({ baseUrl: e.target.value })}
-          />
-          <button type="button" className="btn btn-sm" onClick={() => listModels(a.judge.baseUrl)}>
-            List models
-          </button>
-        </div>
-        {typeof list === "string" && <span className={`small ${list.endsWith("…") ? "muted" : "text-error"}`}>{list}</span>}
-        {listed && <span className="muted small">{PROTOCOL_LABEL[listed.protocol]}</span>}
-      </label>
-      <label>
-        Model
-        {listed && listed.models.length > 0 ? (
-          <select className="input mono" value={a.judge.model} onChange={(e) => setJudge({ model: e.target.value })}>
-            {!listed.models.includes(a.judge.model) && <option value={a.judge.model}>{a.judge.model} (not served here)</option>}
-            {listed.models.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <input className="input mono" value={a.judge.model} onChange={(e) => setJudge({ model: e.target.value })} />
+        Risk judge
+        <select className="input" value={a.judge.kind} onChange={(e) => setJudge({ kind: e.target.value as JudgeKind })}>
+          <option value="jev">Jev API</option>
+          <option value="local">Local model (the agent's endpoint)</option>
+        </select>
+        {a.judge.kind === "local" && (
+          <span className="muted small">
+            Runs a model id on the agent's own OpenAI-compatible endpoint (the Model settings' base URL and LLM key, above), non-streaming.
+            It answers one word: SAFE, RISKY or DANGEROUS. Only SAFE passes; the other two go to the reviewer with the rating.
+          </span>
         )}
       </label>
-      <label>
-        Token{" "}
-        {!a.keys.judgeToken ? (
-          <span className="tag">not set</span>
-        ) : a.keys.tokenOrigin ? (
-          <span className="tag tag-ok">set for {a.keys.tokenOrigin}</span>
-        ) : (
-          <span className="tag tag-warn">set for no host: save it again</span>
-        )}
-        <div className="row gap">
+      {a.judge.kind === "jev" ? (
+        <>
+          <label>
+            Risk judge URL
+            <div className="row gap">
+              <input
+                className="input mono grow"
+                value={a.judge.baseUrl}
+                placeholder="https://api.typesafe.ai/v1 or http://llama-swap:8080/v1"
+                onChange={(e) => setJudge({ baseUrl: e.target.value })}
+              />
+              <button type="button" className="btn btn-sm" onClick={() => listModels(a.judge.baseUrl)}>
+                List models
+              </button>
+            </div>
+            {typeof list === "string" && <span className={`small ${list.endsWith("…") ? "muted" : "text-error"}`}>{list}</span>}
+            {listed && <span className="muted small">{PROTOCOL_LABEL[listed.protocol]}</span>}
+          </label>
+          <label>
+            Model
+            {listed && listed.models.length > 0 ? (
+              <select className="input mono" value={a.judge.model} onChange={(e) => setJudge({ model: e.target.value })}>
+                {!listed.models.includes(a.judge.model) && <option value={a.judge.model}>{a.judge.model} (not served here)</option>}
+                {listed.models.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input className="input mono" value={a.judge.model} onChange={(e) => setJudge({ model: e.target.value })} />
+            )}
+          </label>
+          <label>
+            Token{" "}
+            {!a.keys.judgeToken ? (
+              <span className="tag">not set</span>
+            ) : a.keys.tokenOrigin ? (
+              <span className="tag tag-ok">set for {a.keys.tokenOrigin}</span>
+            ) : (
+              <span className="tag tag-warn">set for no host: save it again</span>
+            )}
+            <div className="row gap">
+              <input
+                className="input mono grow"
+                type="password"
+                autoComplete="off"
+                placeholder={a.keys.judgeToken ? "Enter a new token to replace it" : "TypeSafe API key; leave empty for a local server"}
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+              />
+              <button type="button" className="btn btn-sm" disabled={!token.trim()} onClick={() => saveToken(token.trim())}>
+                Save token
+              </button>
+              {a.keys.judgeToken && (
+                <button type="button" className="btn btn-sm btn-ghost" onClick={() => saveToken(null)}>
+                  Remove
+                </button>
+              )}
+            </div>
+            <span className="muted small">
+              Stored encrypted and never shown again. It is sent only to the host it was saved for, and never given to the agent.
+            </span>
+          </label>
+        </>
+      ) : (
+        <label>
+          Judge model id
           <input
-            className="input mono grow"
-            type="password"
-            autoComplete="off"
-            placeholder={a.keys.judgeToken ? "Enter a new token to replace it" : "TypeSafe API key; leave empty for a local server"}
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
+            className="input mono"
+            list="judge-model-ids"
+            value={a.judge.model}
+            onChange={(e) => setJudge({ model: e.target.value })}
           />
-          <button type="button" className="btn btn-sm" disabled={!token.trim()} onClick={() => saveToken(token.trim())}>
-            Save token
-          </button>
-          {a.keys.judgeToken && (
-            <button type="button" className="btn btn-sm btn-ghost" onClick={() => saveToken(null)}>
-              Remove
-            </button>
-          )}
-        </div>
-        <span className="muted small">
-          Stored encrypted and never shown again. It is sent only to the host it was saved for, and never given to the agent.
-        </span>
-      </label>
-      {protocol === "systemone" && (
+          <datalist id="judge-model-ids">{agentModels?.map((id) => <option key={id} value={id} />)}</datalist>
+          {agentProbe && <span className={`small ${agentProbe.startsWith("Unreachable") ? "text-error" : "muted"}`}>{agentProbe}</span>}
+        </label>
+      )}
+      {protocol === "systemone" && a.judge.kind === "jev" && (
         <div className="row gap wrap">
           <label>
             Yes above

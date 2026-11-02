@@ -58,9 +58,9 @@ async function waitFor<T>(fn: () => T | undefined | false | Promise<T | undefine
   }
 }
 
-/** Save the reviewer settings (and key) so the saved judge's next non-safe call goes to it. */
+/** Save the reviewer settings (and key, bound to its URL) so the saved judge's next non-safe call goes to it. */
 const useReviewer = (r: { provider: "anthropic" | "openai"; baseUrl: string; model: string; key: string }) => {
-  auto.saveAutoApproveKey(secrets, { key: "reviewerKey", value: r.key });
+  auto.saveReviewerKey(secrets, { key: "reviewerKey", value: r.key, baseUrl: r.baseUrl });
   auto.saveAutoApproveSettings(db, { reviewer: { provider: r.provider, baseUrl: r.baseUrl, model: r.model } });
 };
 
@@ -121,6 +121,7 @@ before(async () => {
 
   secrets = new SecretStore(db, process.env.WORKBENCH_MASTER_KEY!);
   auto.saveAutoApproveKey(secrets, { key: "judgeToken", value: JUDGE_TOKEN, baseUrl: jev.url });
+  auto.saveReviewerKey(secrets, { key: "reviewerKey", value: CLAUDE_KEY, baseUrl: claude.url });
   mgr = new SessionManager(db, secrets, async () => ({
     GIT_AUTHOR_NAME: "t",
     GIT_AUTHOR_EMAIL: "t@t",
@@ -138,7 +139,6 @@ before(async () => {
     judge: { baseUrl: jev.url, model: "jev-latest", yesAbove: 0.7, noBelow: 0.3 },
     reviewer: { provider: "anthropic", baseUrl: claude.url, model: "claude-mock" },
   });
-  auto.saveAutoApproveKey(secrets, { key: "reviewerKey", value: CLAUDE_KEY });
 });
 
 beforeEach(() => {
@@ -301,6 +301,21 @@ test("the user's answers stay exactly as before: Deny and a typed note block, wi
   const denied = await denyWith(sessionId, "Deny");
   assert.match(JSON.stringify(denied.content), /The user denied/);
   assert.ok(!JSON.stringify(denied.content).includes("auto-approve reviewer"));
+});
+
+test("a reviewer key saved for one origin is not sent to the other host", { skip }, async () => {
+  auto.saveReviewerKey(secrets, { key: "reviewerKey", value: CLAUDE_KEY, baseUrl: claude.url });
+  auto.saveAutoApproveSettings(db, { reviewer: { provider: "anthropic", baseUrl: gpt.url, model: "claude-mock" } });
+  const v = await auto.reviewPermission(
+    { tool: "bash", subject: "rm -rf build", reasons: ["rm -r / -f"], session: { title: "Review", task: "please rm", repo: "me/demo", worktree: "/w" } },
+    { title: "Review", task: "please rm", phase: "direct", repo: "me/demo", branch: "pi/x", worktree: "/w", sshHosts: [], recent: "" },
+    auto.getAutoApproveSettings(db),
+    auto.savedReviewerKey(secrets),
+  );
+  assert.equal(v.outcome, "failed", "no key for this host: the call fails");
+  assert.match(v.note, /HTTP 401/);
+  // Re-binding the key to the settings' host works again.
+  useReviewer({ provider: "anthropic", baseUrl: claude.url, model: "claude-mock", key: CLAUDE_KEY });
 });
 
 test("the reviewer key never reaches pi: not its environment, not the mock LLM's requests", { skip }, async () => {

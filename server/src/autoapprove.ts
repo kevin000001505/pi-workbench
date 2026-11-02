@@ -1,8 +1,9 @@
 import { config } from "./config.ts";
 import type { Db } from "./db.ts";
 import { getSetting, putSetting } from "./db.ts";
-import { complete } from "./llm.ts";
-import type { SecretStore } from "./secrets.ts";
+import { complete, listModelsAt } from "./llm.ts";
+import { GLOBAL_SCOPE, type SecretStore } from "./secrets.ts";
+import { getModelSettings, LLM_KEY_ENV } from "./settings.ts";
 
 /**
  * Auto-approve (GLOSSARY.md, ADR 0002): a permission goes to the risk judge before the user. The
@@ -34,9 +35,12 @@ export type JudgeToken = { judgeToken?: string; tokenOrigin?: string };
 export type ReviewerKey = { reviewerKey?: string; keyOrigin?: string };
 
 export type JudgeProtocol = "systemone" | "openai";
+/** Which judge the user picked: the Jev API, or a local model on the agent's own endpoint. */
+export type JudgeKind = "jev" | "local";
 export type AutoApproveSettings = {
   enabled: boolean;
   judge: {
+    kind: JudgeKind;
     baseUrl: string;
     model: string;
     /** Detected from the URL's model list when the settings are saved. */
@@ -55,7 +59,7 @@ export type AutoApproveSettings = {
 
 const DEFAULTS: AutoApproveSettings = {
   enabled: false,
-  judge: { baseUrl: "https://api.typesafe.ai/v1", model: "jev-latest", protocol: "systemone", yesAbove: 0.7, noBelow: 0.3 },
+  judge: { kind: "jev", baseUrl: "https://api.typesafe.ai/v1", model: "jev-latest", protocol: "systemone", yesAbove: 0.7, noBelow: 0.3 },
   reviewer: { provider: "anthropic", baseUrl: "https://api.anthropic.com", model: "" },
 };
 
@@ -82,12 +86,21 @@ export function getAutoApproveSettings(db: Db): AutoApproveSettings {
 }
 
 const pickJudge = (j: AutoApproveSettings["judge"]): AutoApproveSettings["judge"] => ({
+  kind: j.kind,
   baseUrl: j.baseUrl,
   model: j.model,
   protocol: j.protocol,
   yesAbove: j.yesAbove,
   noBelow: j.noBelow,
 });
+
+/** The judge's name the transcript and the cards show: the model id, or the kind for a local judge. */
+export const judgeName = (j: AutoApproveSettings["judge"]) => (j.kind === "local" ? "local judge" : j.model);
+
+/** The endpoint and key of the agent's own model (llama-swap): where the "local" judge kind runs. */
+export function localJudge(db: Db, secrets: SecretStore): { baseUrl: string; apiKey?: string } {
+  return { baseUrl: getModelSettings(db).baseUrl, apiKey: secrets.get(GLOBAL_SCOPE, LLM_KEY_ENV) };
+}
 
 /** The reviewer's public API when a provider is picked and no URL is given for it. */
 const REVIEWER_DEFAULT_URL: Record<AutoApproveSettings["reviewer"]["provider"], string> = {
@@ -120,6 +133,7 @@ export function saveAutoApproveSettings(db: Db, input: Partial<AutoApproveSettin
 }
 
 function validateJudge(j: AutoApproveSettings["judge"]) {
+  if (j.kind !== "jev" && j.kind !== "local") throw bad(`Unknown judge kind ${String(j.kind)}`);
   httpUrl(j.baseUrl, "The judge URL must be an http:// or https:// URL");
   if (typeof j.model !== "string" || !j.model.trim()) throw bad("Pick the judge model");
   if (j.protocol !== "systemone" && j.protocol !== "openai") throw bad(`Unknown judge protocol ${String(j.protocol)}`);
@@ -141,13 +155,29 @@ function validateReviewer(r: AutoApproveSettings["reviewer"]) {
  * URL does not serve, and store the protocol the model speaks. An unchanged judge is not asked, so
  * the switch can always be turned off, even while the judge is down. When no reviewer URL is
  * given and the provider changes, the provider's public API is stored for it.
+ * The "local" kind runs on the agent's own endpoint (the model settings' base URL and LLM key);
+ * Save lists that endpoint's models instead.
  */
 export async function configureAutoApprove(db: Db, secrets: SecretStore, input: Partial<AutoApproveSettings>) {
   const saved = getAutoApproveSettings(db).judge;
-  if (!input.judge || (input.judge.baseUrl === saved.baseUrl && input.judge.model === saved.model)) {
-    return saveAutoApproveSettings(db, { ...input, judge: input.judge && { ...input.judge, protocol: saved.protocol } });
+  const inJ = input.judge;
+  const kind: JudgeKind = inJ?.kind === "local" || inJ?.kind === "jev" ? inJ.kind : saved.kind;
+  const unchanged =
+    !inJ ||
+    (kind === "jev" && inJ.baseUrl === saved.baseUrl && inJ.model === saved.model) ||
+    (kind === "local" && inJ.model === saved.model && saved.kind === "local");
+  if (unchanged) {
+    return saveAutoApproveSettings(db, { ...input, judge: inJ && { ...inJ, kind, protocol: saved.protocol } });
   }
-  const judge = pickJudge({ ...saved, ...input.judge, protocol: "systemone" });
+  if (kind === "local") {
+    const judge = pickJudge({ ...saved, ...inJ, kind, protocol: "openai" });
+    validateJudge(judge);
+    const { apiKey } = localJudge(db, secrets);
+    const listed = await listModelsAt(getModelSettings(db), undefined, apiKey);
+    if (!listed.includes(judge.model)) throw bad(`${judge.model} is not served at the agent's endpoint (it serves: ${listed.join(", ") || "nothing"})`);
+    return saveAutoApproveSettings(db, { ...input, judge: { ...judge, protocol: "openai" } });
+  }
+  const judge = pickJudge({ ...saved, ...inJ, kind, protocol: "systemone" });
   validateJudge(judge);
   const token = savedJudgeToken(secrets);
   const listed = await listJudgeModels(judge.baseUrl, token);
@@ -346,16 +376,18 @@ const stateOf = (p: Permission) => ({
   session: p.session,
 });
 
-/** Ask the risk judge about one permission. Never throws: a failure is a verdict too. */
-export async function judgePermission(p: Permission, settings: AutoApproveSettings, saved: JudgeToken): Promise<Verdict> {
+/** Ask the risk judge about one permission. Never throws: a failure is a verdict too.
+ * The "local" kind calls the agent's own endpoint (the model settings' base URL and LLM key),
+ * given by `local`; the other kinds use the saved judge URL and judge token. */
+export async function judgePermission(p: Permission, settings: AutoApproveSettings, saved: JudgeToken, local?: { baseUrl: string; apiKey?: string }): Promise<Verdict> {
   const j = settings.judge;
-  const by = j.model;
-  const token = tokenFor(j.baseUrl, saved);
-  if (j.protocol === "openai") {
+  const by = judgeName(j);
+  if (j.kind === "local" || j.protocol === "openai") {
+    const ep = j.kind === "local" && local ? { url: local.baseUrl, key: local.apiKey } : { url: j.baseUrl, key: tokenFor(j.baseUrl, saved) };
     let reply: string;
     try {
       const call = { maxTokens: 1024, timeoutMs: config.autoApproveTimeoutMs, temperature: 0 };
-      reply = await complete({ baseUrl: j.baseUrl, modelId: j.model }, token, CHAT_PROMPT, JSON.stringify(stateOf(p), null, 2), call);
+      reply = await complete({ baseUrl: ep.url, modelId: j.model }, ep.key, CHAT_PROMPT, JSON.stringify(stateOf(p), null, 2), call);
     } catch (err) {
       const { status, body } = err as { status?: number; body?: string };
       return { outcome: "failed", by, note: `${by} failed: ${status ? `HTTP ${status}${serverSays(body ?? "")}` : why(err)}` };
@@ -366,6 +398,7 @@ export async function judgePermission(p: Permission, settings: AutoApproveSettin
     return { outcome: "user", by, rating: word, detail: word.toUpperCase(), note: `${by} rated this ${word}.` };
   }
 
+  const token = tokenFor(j.baseUrl, saved);
   let res: Response;
   let text: string;
   try {
@@ -608,9 +641,10 @@ const HARMLESS: Permission = {
   session: { title: "Settings test", task: "List the files in the worktree.", repo: "example/repo", worktree: "/data/worktrees/example" },
 };
 
-/** Settings → Test: ask the saved judge about a harmless call and report whether it answered. */
-export async function testJudge(settings: AutoApproveSettings, saved: JudgeToken) {
-  const v = await judgePermission(HARMLESS, settings, saved);
+/** Settings → Test: ask the saved judge about a harmless call and report whether it answered.
+ * The "local" kind is asked at the agent's own endpoint. */
+export async function testJudge(settings: AutoApproveSettings, saved: JudgeToken, local?: { baseUrl: string; apiKey?: string }) {
+  const v = await judgePermission(HARMLESS, settings, saved, local);
   if (v.outcome === "failed") return { ok: false, message: v.note };
   return { ok: true, message: `${v.by} answered for \`ls\`: ${v.outcome === "allow" ? "safe" : v.rating} (${v.detail}).` };
 }

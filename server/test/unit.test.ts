@@ -2,17 +2,19 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
+import { startMockJudge } from "./mock-judge.ts";
 import { applyEvent, emptyTranscript, withMessages } from "../../shared/transcript.ts";
-import { autoApproveView, getAutoApproveSettings, reviewPermission, saveAutoApproveKey, saveAutoApproveSettings, savedJudgeToken, savedReviewerKey, transcriptExcerpt } from "../src/autoapprove.ts";
+import { autoApproveView, configureAutoApprove, getAutoApproveSettings, judgePermission, localJudge, reviewPermission, saveAutoApproveKey, saveAutoApproveSettings, savedJudgeToken, savedReviewerKey, testJudge, transcriptExcerpt } from "../src/autoapprove.ts";
+import { startMockLlm } from "./mock-llm.ts";
 import { startMockReviewer } from "./mock-reviewer.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
 import { openDb } from "../src/db.ts";
 import { redact } from "../src/git.ts";
 import { checkRequestOrigin, Router } from "../src/http.ts";
 import { requireTrackedRepo } from "../src/repos.ts";
-import { assertUserScope, SecretStore, userSecrets } from "../src/secrets.ts";
-import { DEFAULT_RULES, getApprovalSettings, saveApprovalSettings, saveModelSettings } from "../src/settings.ts";
+import { GLOBAL_SCOPE, assertUserScope, SecretStore, userSecrets } from "../src/secrets.ts";
+import { DEFAULT_RULES, getApprovalSettings, LLM_KEY_ENV, saveApprovalSettings, saveModelSettings } from "../src/settings.ts";
 import { listSkills, parseFrontmatter } from "../src/skills.ts";
 
 const tmpDb = () => openDb(path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wb-")), "t.db"));
@@ -299,7 +301,7 @@ test("auto-approve settings: off by default, validated on save", () => {
   const db = tmpDb();
   const s = getAutoApproveSettings(db);
   assert.equal(s.enabled, false);
-  assert.deepEqual(s.judge, { baseUrl: "https://api.typesafe.ai/v1", model: "jev-latest", protocol: "systemone", yesAbove: 0.7, noBelow: 0.3 });
+  assert.deepEqual(s.judge, { kind: "jev", baseUrl: "https://api.typesafe.ai/v1", model: "jev-latest", protocol: "systemone", yesAbove: 0.7, noBelow: 0.3 });
   const judge = (patch: Record<string, unknown>) => ({ judge: { ...getAutoApproveSettings(db).judge, ...patch } }) as any;
   for (const baseUrl of ["ftp://x", ["https://j.example/v1"], 42]) assert.throws(() => saveAutoApproveSettings(db, judge({ baseUrl })), /judge URL/);
   for (const model of ["", "  ", 7]) assert.throws(() => saveAutoApproveSettings(db, judge({ model })), /model/);
@@ -315,7 +317,7 @@ test("auto-approve settings: off by default, validated on save", () => {
   }
   assert.equal(getAutoApproveSettings(db).enabled, true, "a rejected save changes nothing");
   saveAutoApproveSettings(db, judge({ extra: "x" }));
-  assert.deepEqual(Object.keys(getAutoApproveSettings(db).judge).sort(), ["baseUrl", "model", "noBelow", "protocol", "yesAbove"]);
+  assert.deepEqual(Object.keys(getAutoApproveSettings(db).judge).sort(), ["baseUrl", "kind", "model", "noBelow", "protocol", "yesAbove"]);
 });
 
 test("a stored auto-approve switch that is not exactly true reads as off", () => {
@@ -376,8 +378,8 @@ test("reviewer settings validate and keep their shape", () => {
 test("the reviewer key is write-only and never reaches a pi environment", () => {
   const db = tmpDb();
   const store = new SecretStore(db, "test-master-key-0123456789");
-  saveAutoApproveKey(store, { key: "reviewerKey", value: "  claude-secret  " });
-  assert.deepEqual(savedReviewerKey(store), { reviewerKey: "claude-secret", keyOrigin: undefined });
+  saveAutoApproveKey(store, { key: "reviewerKey", value: "  claude-secret  ", baseUrl: "https://reviewer.example" });
+  assert.deepEqual(savedReviewerKey(store), { reviewerKey: "claude-secret", keyOrigin: "https://reviewer.example" });
   assert.ok(!JSON.stringify(store.envFor()).includes("claude-secret"));
   assert.ok(!JSON.stringify(store.envFor("me/app")).includes("claude-secret"));
   const view = autoApproveView(db, store);
@@ -386,7 +388,7 @@ test("the reviewer key is write-only and never reaches a pi environment", () => 
   for (const bad of [{ key: "reviewerKey", value: "" }, { key: "reviewerKey", value: "   " }, { key: "reviewerKey", value: 5 }]) {
     assert.throws(() => saveAutoApproveKey(store, bad), (e: any) => e.status === 400, JSON.stringify(bad));
   }
-  assert.deepEqual(savedReviewerKey(store), { reviewerKey: "claude-secret", keyOrigin: undefined }, "a refused save changes nothing");
+  assert.deepEqual(savedReviewerKey(store), { reviewerKey: "claude-secret", keyOrigin: "https://reviewer.example" }, "a refused save changes nothing");
   saveAutoApproveKey(store, { key: "reviewerKey", value: null });
   assert.deepEqual(savedReviewerKey(store), { reviewerKey: undefined, keyOrigin: undefined });
   assert.equal(autoApproveView(db, store).keys.reviewerKey, false);
@@ -509,6 +511,143 @@ test("waitsOnUser: judging and reviewing do not wait; waiting, escalated, and fa
   assert.equal(waitsOnUser({ judge: { state: "waiting" }, review: { state: "reviewing" } }), false);
   assert.equal(waitsOnUser({ judge: { state: "waiting" }, review: { state: "escalated" } }), true);
   assert.equal(waitsOnUser({ judge: { state: "failed" }, review: { state: "failed" } }), true);
+});
+
+// --- issue #20: the local judge kind --------------------------------------------------------
+
+/** Judge settings for the local kind, pointing the model id at a mock endpoint. */
+const LOCAL_SETTINGS = (baseUrl: string): any => ({
+  enabled: true,
+  judge: { kind: "local", baseUrl, model: "mock-judge", protocol: "openai", yesAbove: 0.7, noBelow: 0.3 },
+  reviewer: { provider: "anthropic", baseUrl: "https://x.example", model: "" },
+});
+
+const PUSH = { ...PERM, subject: "git push origin HEAD", reasons: ["git push"] };
+
+let localMock: Awaited<ReturnType<typeof startMockLlm>>;
+let localStore: any;
+let localDb: any;
+
+before(async () => {
+  localMock = await startMockLlm();
+  localDb = tmpDb();
+  localStore = new SecretStore(localDb, "local-test-master-key-0123");
+  saveModelSettings(localDb, { baseUrl: localMock.url });
+  localStore.set(GLOBAL_SCOPE, LLM_KEY_ENV, "llm-secret");
+});
+after(async () => {
+  await localMock.close();
+});
+
+test("the judge kind defaults to jev; local and jev are the only kinds", () => {
+  const db = tmpDb();
+  assert.equal(getAutoApproveSettings(db).judge.kind, "jev");
+  for (const kind of ["local-judge", "", 7]) assert.throws(() => saveAutoApproveSettings(db, { judge: { kind } }), /kind/);
+  const saved = saveAutoApproveSettings(db, { judge: { kind: "local", baseUrl: "http://agent:8080/v1", model: "m", protocol: "openai" } });
+  assert.equal(saved.judge.kind, "local");
+  assert.equal(saved.judge.protocol, "openai");
+  // Saving only the switch keeps the kind.
+  assert.deepEqual(saveAutoApproveSettings(db, { enabled: true }).judge, saved.judge);
+});
+
+test("localJudge returns the model settings' endpoint and the LLM key", () => {
+  const l = localJudge(localDb, localStore);
+  assert.equal(l.baseUrl, localMock.url);
+  assert.equal(l.apiKey, "llm-secret");
+  const db2 = tmpDb();
+  const store2 = new SecretStore(db2, "local-test-master-key-0123");
+  saveModelSettings(db2, { baseUrl: "http://other:8080/v1" });
+  assert.deepEqual(localJudge(db2, store2), { baseUrl: "http://other:8080/v1", apiKey: undefined });
+});
+
+test("configureAutoApprove: the local kind probes the model settings' endpoint, not a judge URL", async () => {
+  const saved = await configureAutoApprove(localDb, localStore, { enabled: true, judge: { kind: "local", model: "mock-judge", baseUrl: localMock.url } });
+  assert.equal(saved.judge.kind, "local");
+  assert.equal(saved.judge.protocol, "openai");
+  const probe = localMock.requests.find((r) => r.path?.endsWith("/v1/models"));
+  assert.ok(probe, "the probe went to the agent's endpoint");
+  assert.equal(probe.auth, "Bearer llm-secret", "with the LLM key");
+  // A model the agent's endpoint does not serve is refused, and the refused save changes nothing.
+  await assert.rejects(configureAutoApprove(localDb, localStore, { judge: { kind: "local", model: "nope-model" } }), /nope-model.*not served/);
+  assert.equal(getAutoApproveSettings(localDb).judge.model, "mock-judge");
+  // Re-saving unchanged local settings does not probe again.
+  const from = localMock.requests.length;
+  await configureAutoApprove(localDb, localStore, { judge: { kind: "local", model: "mock-judge", baseUrl: localMock.url } });
+  assert.equal(localMock.requests.length, from, "unchanged: no probe");
+});
+
+test("configureAutoApprove: switching the kind away from the saved kind probes the new endpoint", async () => {
+  // Saved: the local kind. Input: jev, same model name: the endpoint changed, so probe.
+  const jev = await startMockJudge({ protocol: "systemone", model: "mock-judge" });
+  try {
+    const from = localMock.requests.length;
+    await configureAutoApprove(localDb, localStore, { judge: { kind: "jev", model: "mock-judge", baseUrl: jev.url } });
+    assert.equal(getAutoApproveSettings(localDb).judge.kind, "jev");
+    assert.ok(jev.requests.some((r) => r.path === "/v1/models"), "the new endpoint was probed");
+    assert.equal(localMock.requests.length, from, "the agent's endpoint was not asked");
+  } finally {
+    await jev.close();
+    // Back to local for the remaining tests; the agent's endpoint is probed again.
+    await configureAutoApprove(localDb, localStore, { judge: { kind: "local", model: "mock-judge", baseUrl: localMock.url } });
+  }
+});
+
+test("judgePermission: the local kind judges on the agent's endpoint with the LLM key", async () => {
+  const local = localJudge(localDb, localStore);
+  const v = await judgePermission(PUSH, LOCAL_SETTINGS(localMock.url), savedJudgeToken(localStore), local);
+  assert.deepEqual(v, { outcome: "allow", by: "local judge", detail: "SAFE" });
+  const req = localMock.requests.find((r) => r.path === "/v1/chat/completions" && r.model === "mock-judge" && r.stream === false);
+  assert.ok(req, "the judge call went to the agent's endpoint");
+  assert.equal(req.auth, "Bearer llm-secret");
+  assert.ok(JSON.stringify(req.messages).includes("git push origin HEAD"), "the call's state");
+  assert.equal(req.temperature, 0);
+});
+
+test("judgePermission: the local kind's RISKY and DANGEROUS go to the reviewer with the rating", async () => {
+  const local = localJudge(localDb, localStore);
+  for (const [perm, word] of [[PERM, "risky"], [{ ...PERM, subject: "rm -rf /mnt/data", reasons: ["rm -r / -f"] }, "dangerous"]] as const) {
+    const v = await judgePermission(perm, LOCAL_SETTINGS(localMock.url), savedJudgeToken(localStore), local);
+    assert.equal(v.outcome, "user", word);
+    assert.equal(v.by, "local judge");
+    assert.equal(v.rating, word);
+    assert.equal(v.detail, word.toUpperCase());
+    assert.match(v.note, new RegExp(word), word);
+  }
+});
+
+test("judgePermission: a local judge reply that is not a level word fails, and a think block is stripped", async () => {
+  const local = localJudge(localDb, localStore);
+  localMock.judgeReplies.push({ text: "Probably fine, I think." });
+  const bad = await judgePermission(PUSH, LOCAL_SETTINGS(localMock.url), savedJudgeToken(localStore), local);
+  assert.equal(bad.outcome, "failed");
+  assert.equal(bad.note, "local judge failed: the answer was not SAFE, RISKY or DANGEROUS");
+  localMock.judgeReplies.push({ text: "  \n\n SAFE" });
+  const think = await judgePermission(PUSH, LOCAL_SETTINGS(localMock.url), savedJudgeToken(localStore), local);
+  assert.deepEqual(think, { outcome: "allow", by: "local judge", detail: "SAFE" });
+  localMock.judgeReplies.push({ status: 500, body: JSON.stringify({ src: "llama-swap", error: { message: "upstream command exited prematurely" } }) });
+  const err = await judgePermission(PUSH, LOCAL_SETTINGS(localMock.url), savedJudgeToken(localStore), local);
+  assert.equal(err.outcome, "failed");
+  assert.equal(err.note, "local judge failed: HTTP 500: upstream command exited prematurely");
+});
+
+test("judgePermission: the local kind without a local endpoint falls back to the saved judge URL", async () => {
+  const from = localMock.requests.length;
+  const v = await judgePermission(PUSH, LOCAL_SETTINGS(localMock.url), savedJudgeToken(localStore));
+  assert.equal(v.outcome, "allow");
+  const req = localMock.requests.slice(from).find((r) => r.path === "/v1/chat/completions" && r.model === "mock-judge" && r.stream === false);
+  assert.ok(req);
+  assert.equal(req.auth, undefined, "no saved judge token: no auth header");
+});
+
+test("testJudge: the local kind asks the agent's endpoint and reports the word", async () => {
+  const ok = await testJudge(getAutoApproveSettings(localDb), savedJudgeToken(localStore), localJudge(localDb, localStore));
+  assert.equal(ok.ok, true);
+  assert.match(ok.message, /local judge/);
+  assert.match(ok.message, /safe/);
+  localMock.judgeReplies.push({ status: 401 });
+  const bad = await testJudge(getAutoApproveSettings(localDb), savedJudgeToken(localStore), localJudge(localDb, localStore));
+  assert.equal(bad.ok, false);
+  assert.match(bad.message, /HTTP 401/);
 });
 
 test("the Secrets page cannot see, set, or delete the auto-approve scope", () => {
