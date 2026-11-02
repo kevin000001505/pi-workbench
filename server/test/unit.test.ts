@@ -425,7 +425,7 @@ test("reviewPermission: a reviewer without a model id or key fails with a note",
   assert.match(noKey.note, /API key/);
 });
 
-test("reviewPermission: the anthropic reviewer's forced tool verdict is parsed, and no key leaves the server", async () => {
+test("reviewPermission: the anthropic reviewer reads a JSON verdict from the reply, and no key leaves the server", async () => {
   const m = await startMockReviewer({ provider: "anthropic", model: "claude-mock", key: "claude-secret" });
   try {
     const v = await reviewPermission(PERM, CTX, REVIEW_SETTINGS(m.url), "claude-secret");
@@ -433,8 +433,9 @@ test("reviewPermission: the anthropic reviewer's forced tool verdict is parsed, 
     const req = m.requests.find((r) => r.path === "/v1/messages")!;
     assert.equal(req.key, "claude-secret");
     assert.equal(req.body.model, "claude-mock");
-    assert.equal(req.body.tools?.[0]?.name, "verdict", "the verdict is a forced tool call");
-    assert.equal(req.body.tool_choice?.name, "verdict");
+    assert.equal(req.body.tools, undefined, "no tools offered: the verdict is reply JSON");
+    assert.equal(req.body.tool_choice, undefined, "no forced tool choice: not all models support it");
+    assert.match(JSON.stringify(req.body.system), /JSON object/);
     const state = JSON.stringify(req.body);
     assert.match(state, /rm -rf build/);
     assert.match(state, /Tidy the demo/);

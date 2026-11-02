@@ -1,9 +1,10 @@
 /**
  * Reviewer (issue #18): a permission the risk judge did not rate safe goes to the frontier
  * reviewer (Anthropic or OpenAI) instead of the user. The reviewer returns a structured verdict:
- * allow (that one call only), escalate (a deny is an escalation for now), or a failure that
- * falls back to the user. A real `pi --mode rpc` process against the scripted mock LLM, driven
- * through SessionManager, like auto-approve.test.ts; the judge and the reviewer are scripted mocks.
+ * allow (that one call only), deny (blocks the call with the reviewer's wording), or escalate
+ * (the card waits for the user); a failure falls back to the user. A real `pi --mode rpc`
+ * process against the scripted mock LLM, driven through SessionManager, like auto-approve.test.ts;
+ * the judge and the reviewer are scripted mocks.
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -233,11 +234,21 @@ const REVIEW = {
   tool: "bash",
   subject: "rm -rf build",
   reasons: ["rm -r / -f"],
-  rating: "risky" as const,
+  session: { title: "Review", task: "please rm the build dir", repo: "me/demo", worktree: "/w" },
+};
+
+/** The reviewer context for `REVIEW`: the rating, the judge's probabilities, and the session facts. */
+const REVIEW_CTX = {
+  title: "Review",
+  task: "please rm the build dir",
+  phase: "direct",
+  repo: "me/demo",
+  branch: "pi/review-x",
+  worktree: "/w",
+  sshHosts: [{ alias: "Media", user: "kevin", hostname: "192.168.1.218" }],
+  recent: "user: hello there\nassistant: Hello from the mock model.",
+  rating: "risky",
   judgeDetail: "deletes_data 0.90 · reaches_outside 0.10 · hard_to_undo 0.60 · fits_task 0.80",
-  session: { title: "Review", task: "please rm the build dir", repo: "me/demo", branch: "pi/review-x", worktree: "/w", phase: "direct" },
-  transcript: "user: hello there\nassistant: Hello from the mock model.",
-  ssh: [{ alias: "Media", user: "kevin", hostname: "192.168.1.218" }],
 };
 
 /** Bind the right key to the right host, point the settings at the mock, and review `REVIEW`. */
@@ -247,7 +258,7 @@ async function reviewAgainst(which: "claude" | "gpt", replies: { text?: string; 
   m.replies.length = 0;
   for (const r of replies) m.replies.push(r);
   await enable(which === "claude" ? ANTHROPIC : OPENAI);
-  return auto.reviewPermission(REVIEW, auto.getAutoApproveSettings(db), auto.savedReviewerKey(secrets));
+  return auto.reviewPermission(REVIEW, REVIEW_CTX, auto.getAutoApproveSettings(db), auto.savedReviewerKey(secrets));
 }
 
 test("the reviewer request carries the call, the rating and the session context", async () => {
@@ -268,25 +279,26 @@ test("the reviewer request carries the call, the rating and the session context"
 });
 
 test("a structured allow verdict allows, with the model's reason", async () => {
-  const v = await reviewAgainst("claude", [{ text: '{"verdict":"allow","reason":"contained, fits the task"}' }]);
+  const v = await reviewAgainst("claude", [{ text: '{"decision":"allow","reason":"contained, fits the task"}' }]);
   assert.equal(v.outcome, "allow");
   assert.equal(v.by, "Claude");
-  assert.match(v.note, /contained, fits the task/);
+  assert.match(v.reason, /contained, fits the task/);
 });
 
-test("an escalate verdict and a deny verdict both wait for the user (deny for now)", async () => {
+test("a deny verdict and an escalate verdict both carry the model's reason", async () => {
   for (const verdict of ["escalate", "deny"]) {
-    const v = await reviewAgainst("claude", [{ text: `{"verdict":"${verdict}","reason":"could break the remote"}` }]);
-    assert.equal(v.outcome, "escalate", verdict);
-    assert.match(v.note, /could break the remote/);
+    const v = await reviewAgainst("claude", [{ text: `{"decision":"${verdict}","reason":"could break the remote"}` }]);
+    assert.equal(v.outcome, verdict);
+    assert.equal(v.by, "Claude");
+    assert.match(v.reason, /could break the remote/);
   }
 });
 
 for (const [name, reply, why] of [
   ["an HTTP 500", { status: 500, body: JSON.stringify({ error: { message: "overloaded" } }) }, /HTTP 500/],
-  ["a timeout", { text: '{"verdict":"allow"}', delayMs: 3000 }, /no answer within/],
+  ["a timeout", { text: '{"decision":"allow"}', delayMs: 3000 }, /no answer within/],
   ["garbage text", { text: "I think this is fine, probably safe." }, /verdict/],
-  ["a JSON with an unknown verdict", { text: '{"verdict":"maybe","reason":"?"}' }, /verdict/],
+  ["a JSON with an unknown verdict", { text: '{"decision":"maybe","reason":"?"}' }, /verdict/],
   ["an empty reply", { text: "" }, /verdict/],
 ] as const) {
   test(`reviewer ${name}: falls back to the user with a note`, async () => {
@@ -301,19 +313,19 @@ test("the OpenAI provider works too, selected by the setting, with a Bearer key"
   const v = await reviewAgainst("gpt", []);
   assert.equal(v.outcome, "allow");
   assert.equal(v.by, "OpenAI");
-  const req = gpt.requests.slice(from).find((r) => r.path === "/v1/chat/completions")!;
+  const req = gpt.requests.slice(from).find((r) => r.path === "/chat/completions")!;
   assert.equal(req.auth, `Bearer ${OPENAI_KEY}`);
 });
 
 test("a key saved for one origin is not sent to the other host", async () => {
   auto.saveReviewerKey(secrets, { key: "reviewerKey", value: ANTHROPIC_KEY, baseUrl: claude.url });
   await enable(OPENAI);
-  const v = await auto.reviewPermission(REVIEW, auto.getAutoApproveSettings(db), auto.savedReviewerKey(secrets));
+  const v = await auto.reviewPermission(REVIEW, REVIEW_CTX, auto.getAutoApproveSettings(db), auto.savedReviewerKey(secrets));
   assert.equal(v.outcome, "failed", "no key for this host: the call fails");
   assert.match(v.note, /403|no key|invalid/i);
   // Re-binding the key to the OpenAI host works.
   auto.saveReviewerKey(secrets, { key: "reviewerKey", value: OPENAI_KEY, baseUrl: gpt.url });
-  const ok = await auto.reviewPermission(REVIEW, auto.getAutoApproveSettings(db), auto.savedReviewerKey(secrets));
+  const ok = await auto.reviewPermission(REVIEW, REVIEW_CTX, auto.getAutoApproveSettings(db), auto.savedReviewerKey(secrets));
   assert.equal(ok.outcome, "allow");
   auto.saveReviewerKey(secrets, { key: "reviewerKey", value: ANTHROPIC_KEY, baseUrl: claude.url });
 });
@@ -335,7 +347,7 @@ test("Settings → Test reports whether the saved reviewer answers with a verdic
 test("a risky call the reviewer allows runs, with an allowed-by line", { skip }, async () => {
   await enable();
   jev.replies.push({ nouls: RISKY });
-  claude.replies.push({ text: '{"verdict":"allow","reason":"routine for the task"}' });
+  claude.replies.push({ text: '{"decision":"allow","reason":"routine for the task"}' });
   const added = await run(sessionId, "please rm the build dir");
   const result = added.find((m: any) => m.role === "toolResult");
   assert.ok(!JSON.stringify(result.content).includes("denied"), "the call was not blocked");
@@ -358,12 +370,12 @@ test("an OpenAI reviewer allows too, end to end, selected by the setting", { ski
   await enable(OPENAI);
   auto.saveReviewerKey(secrets, { key: "reviewerKey", value: OPENAI_KEY, baseUrl: gpt.url });
   jev.replies.push({ nouls: RISKY });
-  gpt.replies.push({ text: '{"verdict":"allow","reason":"openai said ok"}' });
+  gpt.replies.push({ text: '{"decision":"allow","reason":"openai said ok"}' });
   const added = await run(sessionId, "please rm the build dir");
   const line = added.find((m: any) => m.role === "autoAnswer");
   assert.equal(line.by, "OpenAI");
   assert.match(line.detail, /openai said ok/);
-  const review = gpt.requests.filter((r) => r.path === "/v1/chat/completions").at(-1)!;
+  const review = gpt.requests.filter((r) => r.path === "/chat/completions").at(-1)!;
   assert.equal(review.auth, `Bearer ${OPENAI_KEY}`);
   assert.ok(JSON.stringify(review.body).includes("rm -rf build"), "the call went to the OpenAI mock");
   // Back to the Anthropic mock for the remaining tests.
@@ -374,7 +386,7 @@ test("an OpenAI reviewer allows too, end to end, selected by the setting", { ski
 test("a dangerous call the reviewer escalates waits for the user with the rating and the reason", { skip }, async () => {
   await enable();
   jev.replies.push({ nouls: DANGEROUS });
-  claude.replies.push({ text: '{"verdict":"escalate","reason":"force-push could break the remote"}' });
+  claude.replies.push({ text: '{"decision":"escalate","reason":"force-push could break the remote"}' });
   const req = await reviewedCard(sessionId, "please push");
   assert.equal(req.judge.state, "waiting");
   assert.equal(req.judge.rating, "dangerous");
@@ -385,20 +397,9 @@ test("a dangerous call the reviewer escalates waits for the user with the rating
   await deny(sessionId, req);
 });
 
-test("a deny verdict waits for the user for now, with the model's reason", { skip }, async () => {
-  await enable();
-  jev.replies.push({ nouls: DANGEROUS });
-  claude.replies.push({ text: '{"verdict":"deny","reason":"unrelated to the task"}' });
-  const req = await reviewedCard(sessionId, "please push");
-  assert.equal(req.reviewer.state, "waiting");
-  assert.match(req.reviewer.note, /unrelated to the task/);
-  assert.equal(mgr.summary(sessionId).status, "waiting");
-  await deny(sessionId, req);
-});
-
 for (const [name, reply, why] of [
   ["an HTTP 500", { status: 500, body: JSON.stringify({ error: { message: "overloaded" } }) }, /HTTP 500/],
-  ["a timeout", { text: '{"verdict":"allow"}', delayMs: 3000 }, /no answer within/],
+  ["a timeout", { text: '{"decision":"allow"}', delayMs: 3000 }, /no answer within/],
   ["garbage", { text: "seems fine to me, probably" }, /verdict/],
 ] as const) {
   test(`reviewer ${name}: the card waits for the user with a failure note`, { skip }, async () => {
@@ -417,7 +418,7 @@ for (const [name, reply, why] of [
 test("while the reviewer thinks, the card shows reviewing and the session is not waiting on the user", { skip }, async () => {
   await enable();
   jev.replies.push({ nouls: RISKY });
-  claude.replies.push({ text: '{"verdict":"escalate","reason":"slow"}', delayMs: 800 });
+  claude.replies.push({ text: '{"decision":"escalate","reason":"slow"}', delayMs: 800 });
   await mgr.send(sessionId, "please rm the build dir");
   const reviewing = await waitFor(
     () => mgr.summary(sessionId).pending.find((x: any) => x.kind === "permission" && x.reviewer?.state === "reviewing"),
@@ -437,8 +438,8 @@ test("an automatic allow is one call only: the next matching call is reviewed ag
   await enable();
   jev.replies.push({ nouls: RISKY }, { nouls: RISKY });
   claude.replies.push(
-    { text: '{"verdict":"allow","reason":"first"}' },
-    { text: '{"verdict":"escalate","reason":"second, now escalate"}' },
+    { text: '{"decision":"allow","reason":"first"}' },
+    { text: '{"decision":"escalate","reason":"second, now escalate"}' },
   );
   const first = await run(sessionId, "please rm the build dir");
   assert.equal(first.find((m: any) => m.role === "autoAnswer")?.detail, "first");
@@ -454,7 +455,7 @@ test("the reviewer request in the session carries the session context: branch, p
   await mgr.send(sessionId, "transcript marker 7749");
   await settle(sessionId);
   jev.replies.push({ nouls: RISKY });
-  claude.replies.push({ text: '{"verdict":"allow","reason":"ok"}' });
+  claude.replies.push({ text: '{"decision":"allow","reason":"ok"}' });
   const from = claude.requests.length;
   await run(sessionId, "please rm the build dir");
   const req = claude.requests.slice(from).find((r) => r.path === "/v1/messages")!;
@@ -484,7 +485,7 @@ test("the reviewer key never reaches pi: not its environment, not the agent's re
 test("the user's answer during review wins: pi gets exactly one answer and no late allow", { skip }, async () => {
   await enable();
   jev.replies.push({ nouls: RISKY });
-  claude.replies.push({ text: '{"verdict":"allow","reason":"late"}', delayMs: 1000 });
+  claude.replies.push({ text: '{"decision":"allow","reason":"late"}', delayMs: 1000 });
   await mgr.send(sessionId, "please rm the build dir");
   const req = await waitFor(
     () => {

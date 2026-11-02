@@ -28,6 +28,7 @@ process.env.WORKBENCH_MASTER_KEY = "rev-master-key-0123456789";
 process.env.SKILLS_DIR = path.join(tmp, "skills");
 process.env.HOME = path.join(tmp, "agent-home");
 process.env.AUTO_APPROVE_TIMEOUT_MS = "1500";
+process.env.REVIEWER_TIMEOUT_MS = "1500";
 process.env.PI_EXTENSION = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "pi-extension", "workbench.ts");
 
 const JUDGE_TOKEN = "jev-secret-token";
