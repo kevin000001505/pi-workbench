@@ -101,6 +101,10 @@ export type Ticket = {
   status: "ready" | "running" | "done" | "blocked";
   note: string | null;
   runId: string | null;
+  /** The rescue of a ticket the stop rule stopped. */
+  rescueState: "diagnosing" | "fixing" | "rescued" | "failed" | null;
+  rescueRunId: string | null;
+  fixRunId: string | null;
 };
 
 export type Repo = { id: string; owner: string; name: string; defaultBranch: string; private: boolean; needsSetup: boolean };

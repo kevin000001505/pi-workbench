@@ -14,11 +14,15 @@ import {
 } from "../../shared/transcript.ts";
 import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
 import type { Db, RepoRow, SessionRow, TicketRow } from "./db.ts";
-import type { GitEnv } from "./git.ts";
+import { git, type GitEnv } from "./git.ts";
 import {
   allDone,
+  type Diagnosis,
+  fixPrompt,
   grillPrompt,
   implementPrompt,
+  RESCUES_PER_SPEC,
+  rescuePrompt,
   nextTicket,
   type Phase,
   PIPELINE_TOOLS,
@@ -28,6 +32,7 @@ import {
   type TicketSeed,
   ticketsFromSubIssues,
   ticketsPrompt,
+  validateDiagnosis,
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
@@ -146,6 +151,10 @@ type Live = {
   /** finish_ticket's (or finish_review's) report for the current run, applied when the run settles. */
   finished?: { status: "done" | "blocked"; note: string };
   lastSettleAborted: boolean;
+  /** finish_diagnosis's report for the current rescue run, applied when the run settles. */
+  diagnosis?: Diagnosis;
+  /** The worktree's HEAD and status when the rescue run started; it must leave them as found. */
+  rescueBase?: { runId: string; worktree: string };
   /** The stop rule watching the live implement-phase run, and its clock. */
   watch?: { rule: StopRule; timer: NodeJS.Timeout };
   /** The missing-TypeSafe-skill toast went out; the summary keeps showing the state after it. */
@@ -184,7 +193,15 @@ const toTicket = (r: TicketRow): Ticket => ({
   status: r.status as Ticket["status"],
   note: r.note,
   runId: r.run_id,
+  rescueState: (r.rescue_state as Ticket["rescueState"]) ?? null,
+  rescueRunId: r.rescue_run_id,
+  fixRunId: r.fix_run_id,
 });
+
+/** The worktree as git sees it: HEAD and the porcelain status. A rescue run must leave it unchanged. */
+async function worktreeState(dir: string) {
+  return `${(await git(dir, ["rev-parse", "HEAD"])).trim()}\n${await git(dir, ["status", "--porcelain", "--untracked-files=all"])}`;
+}
 
 /**
  * Owns every session: its row, its worktree and, while it runs, its `pi --mode rpc` process.
@@ -314,7 +331,11 @@ export class SessionManager extends EventEmitter {
       activeRun: this.runOf(row),
       runs: [
         { id: row.id, label: row.mode === "pipeline" ? "Plan" : "Conversation" },
-        ...tickets.filter((t) => t.runId).map((t) => ({ id: t.runId!, label: `#${t.num} ${t.title}` })),
+        ...tickets.flatMap((t) => [
+          ...(t.runId ? [{ id: t.runId, label: `#${t.num} ${t.title}` }] : []),
+          ...(t.rescueRunId ? [{ id: t.rescueRunId, label: `#${t.num} rescue` }] : []),
+          ...(t.fixRunId ? [{ id: t.fixRunId, label: `#${t.num} fix` }] : []),
+        ]),
         ...(row.review_run ? [{ id: row.review_run, label: "Review" }] : []),
       ],
     };
@@ -493,8 +514,9 @@ export class SessionManager extends EventEmitter {
       this.rescueProxy!.configure({ baseUrl: reviewer.baseUrl, provider: reviewer.provider, key: key.reviewerKey, keyOrigin: key.keyOrigin });
       env[RESCUE_TOKEN_ENV] = this.rescueProxy!.mint(runId);
     }
-    const ticket = this.tickets(id).find((t) => t.runId === runId);
-    const label = ticket ? ` · #${ticket.num}` : runId === row.review_run ? " · review" : "";
+    const ticket = this.tickets(id).find((t) => [t.runId, t.rescueRunId, t.fixRunId].includes(runId));
+    const kind = ticket?.rescueRunId === runId ? " rescue" : ticket?.fixRunId === runId ? " fix" : "";
+    const label = ticket ? ` · #${ticket.num}${kind}` : runId === row.review_run ? " · review" : "";
     s.error = null;
     s.stderr = [];
     const proc = new RpcProcess(
@@ -626,6 +648,8 @@ export class SessionManager extends EventEmitter {
       for (const t of tickets) insert.run(id, t.number, t.title, t.body, JSON.stringify(t.blockedBy), t.trackerRef ?? null);
     } else if (name === "finish_ticket" && row.phase === "implement" && (args.status === "done" || args.status === "blocked")) {
       s.finished = { status: args.status, note: String(args.note ?? "").trim() };
+    } else if (name === "finish_diagnosis" && row.phase === "implement") {
+      s.diagnosis = validateDiagnosis(args);
     } else if (name === "finish_review" && row.phase === "review") {
       s.finished = { status: "done", note: String(args.note ?? "").trim() };
     }
@@ -921,20 +945,26 @@ export class SessionManager extends EventEmitter {
 
   private async afterTicketRun(id: string, s: Live) {
     const row = this.row(id);
-    const ticket = this.tickets(id).find((t) => t.status === "running" && t.runId === this.runOf(row));
+    const runId = this.runOf(row);
+    const ticket = this.tickets(id).find((t) => t.status === "running" && [t.runId, t.rescueRunId, t.fixRunId].includes(runId));
     if (!ticket) return;
+    if (runId === ticket.rescueRunId) return this.afterRescueRun(id, s, ticket);
+    const fix = runId === ticket.fixRunId;
     const report = s.finished;
     s.finished = undefined;
     const stopped = s.watch?.rule.reason;
+    this.unwatch(s);
     if (stopped) {
       // The stop rule aborted the run: not a user abort, and not a report the run made.
-      this.unwatch(s);
       const why = describeStopReason(stopped);
-      this.updateTicket(id, ticket.num, { status: "blocked", note: `Stopped by ${why}`, stop_reason: JSON.stringify(stopped), finished_at: Date.now() });
-      this.flag(id, `Ticket #${ticket.num} hit the stop rule: ${why}. Retry it, mark it done, or reply to the agent.`);
+      this.updateTicket(id, ticket.num, { stop_reason: JSON.stringify(stopped) });
+      if (fix) return this.rescueFailed(id, ticket, `Ticket #${ticket.num}'s fix run hit the stop rule: ${why}`);
+      await this.rescue(id, s, ticket, why);
     } else if (report?.status === "done") {
-      this.updateTicket(id, ticket.num, { status: "done", note: report.note || null, finished_at: Date.now() });
+      this.updateTicket(id, ticket.num, { status: "done", note: report.note || null, finished_at: Date.now(), ...(fix ? { rescue_state: "rescued" } : {}) });
       await this.runNext(id);
+    } else if (fix) {
+      this.rescueFailed(id, ticket, report ? `Ticket #${ticket.num}'s fix run is blocked: ${report.note || "no reason given"}` : `Ticket #${ticket.num}'s fix run stopped without finishing`);
     } else if (report?.status === "blocked") {
       this.updateTicket(id, ticket.num, { status: "blocked", note: report.note || null, finished_at: Date.now() });
       this.flag(id, `Ticket #${ticket.num} is blocked: ${report.note || "no reason given"}. Retry it, mark it done, or reply to the agent.`);
@@ -943,6 +973,79 @@ export class SessionManager extends EventEmitter {
     } else {
       this.flag(id, `Ticket #${ticket.num} stopped without finishing. Reply to the agent, retry it, or mark it done.`);
     }
+  }
+
+  /**
+   * A ticket run hit the stop rule: start a rescue run on the Reviewer's model, unless the rescue
+   * is off (no Reviewer model), the ticket had its one rescue, or the spec had its three.
+   */
+  private async rescue(id: string, s: Live, ticket: Ticket, why: string) {
+    const row = this.row(id);
+    const stuck = (reason: string) => {
+      this.updateTicket(id, ticket.num, { status: "blocked", note: `Stopped by ${why}`, finished_at: Date.now() });
+      this.flag(id, `Ticket #${ticket.num} hit the stop rule: ${why}. ${reason} Retry it, mark it done, or reply to the agent.`);
+    };
+    if (!this.rescueProxy || !getAutoApproveSettings(this.db).reviewer.model) return stuck("The rescue is off (the Reviewer has no model).");
+    if (ticket.rescueRunId) return stuck("It already had its rescue.");
+    if (this.tickets(id).filter((t) => t.rescueRunId).length >= RESCUES_PER_SPEC) return stuck(`The spec already had ${RESCUES_PER_SPEC} rescues.`);
+    const startCommit = this.db.prepare("SELECT start_commit FROM tickets WHERE session_id = ? AND num = ?").get(id, ticket.num) as { start_commit: string | null };
+    // The handoff is built from facts the server holds, not from the stuck model's summary.
+    const diff = startCommit.start_commit
+      ? `${await git(row.worktree, ["diff", startCommit.start_commit]).catch(() => "")}${await git(row.worktree, ["status", "--porcelain"]).then((st) => (st.trim() ? `\n# git status --porcelain\n${st}` : "")).catch(() => "")}`
+      : "";
+    const stuckRun = ticket.runId!;
+    const toolErrors = readSessionFile(stuckRun)
+      .filter((m: any) => m.role === "toolResult" && m.isError)
+      .slice(-5)
+      .map((m: any) => `${m.toolName}: ${toolText(m).slice(0, 500)}`);
+    const prompt = rescuePrompt({
+      ticket,
+      spec: row.spec,
+      specRef: row.spec_ref,
+      stopReason: why,
+      startCommit: startCommit.start_commit,
+      diff,
+      toolErrors,
+      sessionFile: findSessionFile(config.piSessionsDir, stuckRun) ?? null,
+    });
+    const runId = `${id}-t${ticket.num}-rescue-${Date.now().toString(36)}`;
+    this.updateTicket(id, ticket.num, { rescue_run_id: runId, rescue_state: "diagnosing", note: `Stopped by ${why}; a rescue run diagnoses it.` });
+    await this.switchRun(id, runId, true);
+    s.rescueBase = { runId, worktree: await worktreeState(row.worktree) };
+    this.watch(id);
+    await this.send(id, prompt);
+  }
+
+  /** The rescue run settled: start a fix run on a diagnosis, otherwise flag. Each outcome used the ticket's rescue. */
+  private async afterRescueRun(id: string, s: Live, ticket: Ticket) {
+    const row = this.row(id);
+    const report = s.diagnosis;
+    s.diagnosis = undefined;
+    const stopped = s.watch?.rule.reason;
+    this.unwatch(s);
+    const base = s.rescueBase?.runId === ticket.rescueRunId ? s.rescueBase.worktree : undefined;
+    s.rescueBase = undefined;
+    if (stopped) return this.rescueFailed(id, ticket, `Ticket #${ticket.num}'s rescue run hit the stop rule: ${describeStopReason(stopped)}`);
+    if (base !== undefined && (await worktreeState(row.worktree)) !== base) {
+      return this.rescueFailed(id, ticket, `Ticket #${ticket.num}'s rescue run changed the worktree; it must leave it as found. Check the changes`);
+    }
+    if (!report) return this.rescueFailed(id, ticket, `Ticket #${ticket.num}'s rescue run stopped without finish_diagnosis`);
+    this.updateTicket(id, ticket.num, { diagnosis: JSON.stringify(report) });
+    if (report.status === "no_loop") return this.rescueFailed(id, ticket, `Ticket #${ticket.num}'s rescue could not build a feedback loop (an unclear ticket or a broken environment?): ${report.note || "no note"}`);
+    if (report.status === "failed") return this.rescueFailed(id, ticket, `Ticket #${ticket.num}'s rescue found no cause: every hypothesis failed: ${report.note || "no note"}`);
+    // Diagnosed: a fresh local run writes the fix, test-first, from the diagnosis.
+    const runId = `${id}-t${ticket.num}-fix-${Date.now().toString(36)}`;
+    this.updateTicket(id, ticket.num, { fix_run_id: runId, rescue_state: "fixing", note: `Diagnosed: ${report.note || report.chain![0]}` });
+    await this.switchRun(id, runId, true);
+    this.watch(id);
+    const finished = this.tickets(id).filter((x) => x.status === "done");
+    await this.send(id, fixPrompt(ticket, row.spec, row.spec_ref, finished, report));
+  }
+
+  /** The rescue did not work out: the ticket is blocked, and there is no second rescue for it. */
+  private rescueFailed(id: string, ticket: Ticket, reason: string) {
+    this.updateTicket(id, ticket.num, { status: "blocked", rescue_state: "failed", note: reason, finished_at: Date.now() });
+    this.flag(id, `${reason}. Retry it, mark it done, or reply to the agent.`);
   }
 
   private async afterReviewRun(id: string, s: Live) {
@@ -983,7 +1086,10 @@ export class SessionManager extends EventEmitter {
       return;
     }
     const runId = `${id}-t${t.num}-${Date.now().toString(36)}`;
-    this.updateTicket(id, t.num, { status: "running", run_id: runId, started_at: Date.now(), finished_at: null });
+    // The commit the ticket's first run started from: a rescue's diff starts there.
+    const startCommit = this.db.prepare("SELECT start_commit FROM tickets WHERE session_id = ? AND num = ?").get(id, t.num) as { start_commit: string | null };
+    const head = startCommit.start_commit ?? (await git(this.row(id).worktree, ["rev-parse", "HEAD"]).then((h) => h.trim(), () => null));
+    this.updateTicket(id, t.num, { status: "running", run_id: runId, started_at: Date.now(), finished_at: null, start_commit: head });
     await this.switchRun(id, runId, true);
     const row = this.row(id);
     const finished = this.tickets(id).filter((x) => x.status === "done");
@@ -1145,6 +1251,9 @@ export function readSessionFile(runId: string): AgentMessage[] {
   }
   return messages;
 }
+
+/** A tool result's text. */
+const toolText = (m: any): string => (typeof m.content === "string" ? m.content : Array.isArray(m.content) ? m.content.map((b: any) => b?.text ?? "").join("") : "");
 
 function findSessionFile(dir: string, runId: string): string | undefined {
   let entries: fs.Dirent[];

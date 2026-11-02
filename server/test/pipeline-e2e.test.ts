@@ -69,7 +69,7 @@ before(async () => {
   writePiConfig(db, proxy.url);
 
   // Skills the pipeline invokes; pi expands /skill:name from these.
-  for (const name of ["grill-with-docs", "to-spec", "to-tickets", "tdd", "code-review", "setup-matt-pocock-skills"]) {
+  for (const name of ["grill-with-docs", "to-spec", "to-tickets", "tdd", "code-review", "setup-matt-pocock-skills", "diagnosing-bugs", "retro"]) {
     fs.mkdirSync(path.join(config.skillsDir, name), { recursive: true });
     fs.writeFileSync(path.join(config.skillsDir, name, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} test skill\n---\n${name} body\n`);
   }
@@ -357,6 +357,7 @@ test("a ticket that repeats one bash call trips the repeat limit: the session is
   const attention = await flagged(s.id);
   assert.match(attention, /Ticket #1 hit the stop rule: the repeat limit/);
   assert.match(attention, /tests failed: expected Hello/);
+  assert.match(attention, /The rescue is off \(the Reviewer has no model\)/);
   assert.match(attention, /\d\d:\d\d/, "it says when");
   assert.ok(notices(s.id).includes(attention), "a notification says the same");
   await settled(s.id);
@@ -464,4 +465,132 @@ test("an idle run's clock is paused: a ticket that stopped without finishing doe
     config.stopRuleMinuteMs = minute;
     savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 });
   }
+});
+
+// --- rescue and fix runs (issue #40) -----------------------------------------------------------
+
+/** The Reviewer on (openai, the mock's origin): stuck tickets get a rescue run. */
+function rescueOn() {
+  auto.saveReviewerKey(secrets, { key: "reviewerKey", value: RESCUE_KEY, baseUrl: mock.url });
+  auto.saveAutoApproveSettings(db, { reviewer: { provider: "openai", baseUrl: mock.url, model: "mock-rescue" } });
+}
+/** A session from a spec whose tickets have these bodies, each blocked by the one before. */
+async function solveAll(bodies: string[]) {
+  const n = (specNum += 10);
+  const subs = bodies.map((body, i) => ({ number: n + 1 + i, title: `Ticket ${i + 1}`, body, ...(i ? { blockedBy: [n + i] } : {}) }));
+  ghMock.seedSubIssues("me", "demo", { number: n, title: `Spec ${n}`, body: "## Solution\nRescue me." }, subs);
+  return mgr.create({ repoId: "me/demo", title: `Spec ${n}`, issueRef: `me/demo#${n}`, mode: "pipeline", startFrom: "tickets" });
+}
+
+test("a looping ticket gets a rescue run, a diagnosed result starts a fix run, the fix finishes the ticket, and the pipeline goes on", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { savePipelineSettings } = await import("../src/settings.ts");
+  savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 });
+  rescueOn();
+  const before = mock.requests.length;
+  const s = await solveAll(["Greet the user. DIRTYME LOOPME HANDOFF-A", "Document it."]);
+  const done = await waitFor(() => {
+    const x = mgr.summary(s.id);
+    return x.phase === "done" || x.attention ? x : undefined;
+  }, 90_000);
+  assert.equal(done.attention, null);
+  assert.deepEqual(done.tickets.map((t: any) => `${t.num}:${t.status}:${t.rescueState}`), ["1:done:rescued", "2:done:null"]);
+  assert.deepEqual(done.runs.map((r: any) => r.label), ["Plan", "#1 Ticket 1", "#1 rescue", "#1 fix", "#2 Ticket 2", "Review"]);
+
+  // The rescue went to the Reviewer model through the proxy, with the Reviewer key in the header.
+  const rescue = mock.requests.slice(before).find((r) => r.model === "mock-rescue");
+  assert.ok(rescue, "the rescue run called the Reviewer model");
+  assert.equal(rescue.auth, `Bearer ${RESCUE_KEY}`);
+  // The handoff is built from facts.
+  const handoff = JSON.stringify(rescue.messages);
+  assert.match(handoff, /<skill name=\\"diagnosing-bugs\\"/);
+  assert.match(handoff, /HANDOFF-A/, "the ticket");
+  assert.match(handoff, /issues\/\d+/, "the spec pointer");
+  assert.match(handoff, /the repeat limit/, "the stop reason");
+  assert.match(handoff, /## Start commit\\n[0-9a-f]{40}/, "the start commit");
+  assert.match(handoff, /## Diff since the start commit[\s\S]*README.md[\s\S]*\+half-done/, "the diff, uncommitted changes included");
+  assert.match(handoff, /## The stuck run's last tool errors\\n- bash: tests failed: expected Hello/, "the stuck run's last tool errors");
+  assert.match(handoff, /\.jsonl/, "the stuck run's session file");
+  assert.match(handoff, /do not use ask_user/);
+  assert.match(handoff, /Phases 1 to 4 only/);
+  assert.match(handoff, /Do not commit/);
+  assert.match(handoff, /\[DEBUG-\.\.\.\]/);
+  assert.match(handoff, /leave the worktree as you found it/);
+
+  // The fix run is local, carries the diagnosis, and writes the regression test first.
+  const fix = mock.requests.slice(before).find((r) => r.model !== "mock-rescue" && JSON.stringify(r.messages ?? []).includes("## Diagnosis"));
+  assert.ok(fix, "the fix run ran on the local model");
+  const fixText = JSON.stringify(fix.messages);
+  assert.match(fixText, /<skill name=\\"tdd\\"/);
+  assert.match(fixText, /Command: echo red/);
+  assert.match(fixText, /work.txt:1 has no greeting/);
+  assert.match(fixText, /regression test first/);
+});
+
+/** Run one stuck ticket whose rescue or fix goes wrong; wait for the flag. */
+async function rescueFails(body: string) {
+  const { savePipelineSettings } = await import("../src/settings.ts");
+  savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 });
+  rescueOn();
+  const s = await solveOne(body);
+  const attention = await flagged(s.id);
+  await settled(s.id);
+  return { s, attention, ticket: mgr.summary(s.id).tickets[0], labels: mgr.summary(s.id).runs.map((r: any) => r.label) };
+}
+
+test("a rescue run that changes the worktree flags the session, and the ticket's rescue is used", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { attention, ticket, labels } = await rescueFails("Greet. LOOPME RESCUE_DIRTY");
+  assert.match(attention, /Ticket #1's rescue run changed the worktree/);
+  assert.equal(ticket.status, "blocked");
+  assert.equal(ticket.rescueState, "failed");
+  assert.ok(!labels.includes("#1 fix"), "no fix run starts");
+});
+
+for (const [word, says] of [["RESCUE_NOLOOP", /could not build a feedback loop[\s\S]*Rescue says no_loop/], ["RESCUE_FAILED", /found no cause: every hypothesis failed[\s\S]*Rescue says failed/]] as const) {
+  test(`a rescue that reports ${word.slice(7).toLowerCase()} flags the session and counts as a used rescue`, { skip: !hasPi && "pi CLI not found" }, async () => {
+    const { attention, ticket, labels } = await rescueFails(`Greet. LOOPME ${word}`);
+    assert.match(attention, says);
+    assert.equal(ticket.rescueState, "failed");
+    assert.ok(ticket.rescueRunId, "the rescue is used");
+    assert.ok(labels.includes("#1 rescue") && !labels.includes("#1 fix"));
+  });
+}
+
+test("a rescue run that trips the stop rule flags the session and counts as a used rescue", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { attention, ticket } = await rescueFails("Greet. LOOPME RESCUE_LOOP");
+  assert.match(attention, /Ticket #1's rescue run hit the stop rule: the repeat limit/);
+  assert.equal(ticket.rescueState, "failed");
+});
+
+test("a rescue run with no finish_diagnosis report flags the session and counts as a used rescue", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { attention, ticket } = await rescueFails("Greet. LOOPME RESCUE_SILENT");
+  assert.match(attention, /Ticket #1's rescue run stopped without finish_diagnosis/);
+  assert.equal(ticket.rescueState, "failed");
+});
+
+test("a fix run that trips the stop rule flags the session, with no second rescue", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { attention, ticket, labels } = await rescueFails("Greet. LOOPME FIXLOOPME");
+  assert.match(attention, /Ticket #1's fix run hit the stop rule/);
+  assert.equal(ticket.rescueState, "failed");
+  assert.equal(labels.filter((l: string) => l === "#1 rescue").length, 1);
+});
+
+test("a blocked fix run flags the session; a manual Retry keeps the rescue count, so a second rescue is refused", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { s, attention, ticket } = await rescueFails("Greet. LOOPME FIXBLOCKME");
+  assert.match(attention, /Ticket #1's fix run is blocked: The diagnosis did not help/);
+  assert.equal(ticket.rescueState, "failed");
+  const rescues = mock.requests.filter((r) => r.model === "mock-rescue").length;
+  await mgr.pipelineAction(s.id, "retry");
+  const again = await flagged(s.id);
+  assert.match(again, /Ticket #1 hit the stop rule: the repeat limit[\s\S]*It already had its rescue/);
+  assert.equal(mock.requests.filter((r) => r.model === "mock-rescue").length, rescues, "no second rescue run");
+});
+
+test("a fourth rescue in one spec is refused and flags", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { savePipelineSettings } = await import("../src/settings.ts");
+  savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 });
+  rescueOn();
+  const s = await solveAll(["One. LOOPME", "Two. LOOPME", "Three. LOOPME", "Four. LOOPME"]);
+  const attention = await waitFor(() => mgr.summary(s.id).attention, 120_000);
+  assert.match(attention, /Ticket #4 hit the stop rule[\s\S]*The spec already had 3 rescues/);
+  assert.deepEqual(mgr.summary(s.id).tickets.map((t: any) => t.rescueState), ["rescued", "rescued", "rescued", null]);
 });

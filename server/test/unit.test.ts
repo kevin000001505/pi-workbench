@@ -759,3 +759,19 @@ test("the Secrets page cannot see, set, or delete the auto-approve scope", () =>
   assert.doesNotThrow(() => assertUserScope("gone/repo", () => true));
   assert.throws(() => assertUserScope("wb:auto-approve", () => true), (e: any) => e.status === 400);
 });
+
+test("validateDiagnosis: a diagnosis needs a command and a file:line causal chain; no_loop and failed need only a note", async () => {
+  const { validateDiagnosis } = await import("../src/pipeline.ts");
+  assert.deepEqual(validateDiagnosis({ status: "diagnosed", command: " npm test ", chain: ["src/a.ts:12 reads null", " src/b.ts:3 never sets it"], note: "n" }), {
+    status: "diagnosed",
+    command: "npm test",
+    chain: ["src/a.ts:12 reads null", "src/b.ts:3 never sets it"],
+    note: "n",
+  });
+  assert.deepEqual(validateDiagnosis({ status: "no_loop", note: " no env " }), { status: "no_loop", note: "no env" });
+  assert.throws(() => validateDiagnosis({ status: "fixed", note: "" }), /status must be/);
+  assert.throws(() => validateDiagnosis({ status: "diagnosed", chain: ["a.ts:1 x"], note: "" }), /red-capable command/);
+  assert.throws(() => validateDiagnosis({ status: "diagnosed", command: "npm test", chain: [], note: "" }), /causal chain/);
+  assert.throws(() => validateDiagnosis({ status: "diagnosed", command: "npm test", chain: ["a.ts:1 x", "somewhere in b.ts"], note: "" }), /file:line \(got "somewhere in b.ts"\)/);
+  assert.equal(validateDiagnosis({ status: "diagnosed", command: "c", chain: ["a.ts:1"], harness: "file x", note: "" }).harness, "file x");
+});

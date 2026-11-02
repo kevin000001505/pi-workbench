@@ -155,9 +155,14 @@ function pipelineScript(userText: string, step: number, lastResult: string): Rep
     if (step === 1) return { tool: { name: "finish_review", args: { note: "Fixed one naming issue" } } };
     return { text: "Review done." };
   }
+  if (userText.includes('<skill name="diagnosing-bugs"')) return rescueScript(userText, step);
   if (userText.includes('<skill name="tdd"')) {
     const num = /Ticket #(\d+)/.exec(userText)?.[1] ?? "?";
-    const stuck = stuckTicket(userText, step);
+    // A fix run carries the rescue's diagnosis: the stuck-ticket words no longer apply.
+    const fixing = userText.includes("## Diagnosis");
+    if (fixing && userText.includes("FIXBLOCKME")) return step === 0 ? { tool: { name: "finish_ticket", args: { status: "blocked", note: "The diagnosis did not help" } } } : { text: "Blocked." };
+    if (fixing && userText.includes("FIXLOOPME")) return { tool: { name: "bash", args: { command: "echo fixing; exit 1" } } };
+    const stuck = fixing ? undefined : stuckTicket(userText, step);
     if (stuck) return stuck;
     const push = userText.includes("PUSHME") ? " && git push -q origin HEAD" : "";
     if (step === 0) return { tool: { name: "bash", args: { command: `echo "ticket ${num}" >> work.txt && git add -A && git commit -qm "Ticket ${num}"${push} && echo committed` } } };
@@ -172,7 +177,7 @@ function pipelineScript(userText: string, step: number, lastResult: string): Rep
 
 /**
  * Ticket bodies that drive the stop rule (issue #39):
- * - LOOPME: the same failing bash call forever (the repeat limit)
+ * - LOOPME: the same failing bash call forever (the repeat limit); DIRTYME first edits README.md
  * - WANDERME: a different bash call each step (the tool-call limit)
  * - SLOWME: a long `sleep` (the time limit); with ASKME, an ask_user first (the clock pauses)
  * - CYCLEME: test, write, test, write, test, then finish_ticket done (a TDD cycle, never a loop)
@@ -180,6 +185,8 @@ function pipelineScript(userText: string, step: number, lastResult: string): Rep
  * - SILENTME: a text reply, no finish_ticket
  */
 function stuckTicket(userText: string, step: number): Reply | undefined {
+  // DIRTYME: an uncommitted change first, so the rescue handoff has a diff.
+  if (userText.includes("DIRTYME") && step === 0) return { tool: { name: "bash", args: { command: "echo half-done >> README.md" } } };
   if (userText.includes("LOOPME")) return { tool: { name: "bash", args: { command: "echo tests failed: expected Hello; exit 1" } } };
   if (userText.includes("WANDERME")) return { tool: { name: "bash", args: { command: `echo call ${step}` } } };
   if (userText.includes("SLOWME")) {
@@ -199,6 +206,33 @@ function stuckTicket(userText: string, step: number): Reply | undefined {
     return step === 0 ? { tool: { name: "finish_ticket", args: { status: "done", note: "Quick" } } } : { text: "Quick." };
   }
   return undefined;
+}
+
+/**
+ * A rescue run (/skill:diagnosing-bugs, issue #40), by words in the ticket body it hands off:
+ * - RESCUE_NOLOOP / RESCUE_FAILED: finish_diagnosis no_loop / failed
+ * - RESCUE_SILENT: a text reply, no finish_diagnosis
+ * - RESCUE_DIRTY: leaves a [DEBUG-1] line in work.txt, then reports diagnosed
+ * - RESCUE_LOOP: the same probe forever (the stop rule)
+ * - otherwise: one probe, then diagnosed with a command and a file:line chain
+ */
+function rescueScript(userText: string, step: number): Reply {
+  if (userText.includes("RESCUE_LOOP")) return { tool: { name: "bash", args: { command: "echo probe" } } };
+  if (userText.includes("RESCUE_SILENT")) return { text: "I looked around." };
+  for (const [word, status] of [["RESCUE_NOLOOP", "no_loop"], ["RESCUE_FAILED", "failed"]] as const) {
+    if (userText.includes(word)) return step === 0 ? { tool: { name: "finish_diagnosis", args: { status, note: `Rescue says ${status}` } } } : { text: "Reported." };
+  }
+  const probe = userText.includes("RESCUE_DIRTY") ? 'echo "[DEBUG-1] probe" >> work.txt' : "git log --oneline -1";
+  if (step === 0) return { tool: { name: "bash", args: { command: probe } } };
+  if (step === 1) {
+    return {
+      tool: {
+        name: "finish_diagnosis",
+        args: { status: "diagnosed", command: "echo red", chain: ["work.txt:1 has no greeting", "hello.txt:1 is never written"], note: "Found it" },
+      },
+    };
+  }
+  return { text: "Diagnosed." };
 }
 
 function script(messages: { role: string; content: unknown }[]): Reply {

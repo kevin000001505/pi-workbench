@@ -7,6 +7,8 @@
  * - spec: /skill:to-spec in the same conversation; ends when the agent calls save_spec.
  * - tickets: /skill:to-tickets in the same conversation; ends when the agent calls record_tickets.
  * - implement: one fresh run per ticket with /skill:tdd, in dependency order; each ends with finish_ticket.
+ *   A ticket run the stop rule stops gets a rescue run (/skill:diagnosing-bugs on the Reviewer's
+ *   model; ends with finish_diagnosis), and a diagnosed result a fix run (/skill:tdd plus the diagnosis).
  * - review: one fresh /skill:code-review run over the whole branch that fixes what it finds; ends with finish_review.
  */
 
@@ -21,7 +23,16 @@ export type Ticket = {
   status: "ready" | "running" | "done" | "blocked";
   note: string | null;
   runId: string | null;
+  /** The rescue of a ticket the stop rule stopped: null, diagnosing, fixing, rescued or failed. */
+  rescueState: RescueState | null;
+  rescueRunId: string | null;
+  fixRunId: string | null;
 };
+
+export type RescueState = "diagnosing" | "fixing" | "rescued" | "failed";
+
+/** A spec gets at most this many rescues; each ticket gets one. */
+export const RESCUES_PER_SPEC = 3;
 
 export type TicketInput = { number: number; title: string; body: string; blockedBy?: number[]; trackerRef?: string };
 
@@ -49,7 +60,7 @@ export function ticketsFromSubIssues(subs: SubIssueSeed[]): TicketInput[] {
   }));
 }
 
-export const PIPELINE_TOOLS = ["save_grill_summary", "save_spec", "record_tickets", "finish_ticket", "finish_review"] as const;
+export const PIPELINE_TOOLS = ["save_grill_summary", "save_spec", "record_tickets", "finish_ticket", "finish_review", "finish_diagnosis"] as const;
 
 /** Specs longer than this go to ticket runs as a pointer only (implement-spec: "communicate through context pointers"). */
 const SPEC_INLINE_LIMIT = 40_000;
@@ -162,4 +173,95 @@ ${tickets.map((t) => `- #${t.num} ${t.title}${t.trackerRef ? ` (${t.trackerRef})
 [pi-workbench pipeline: final review of the whole branch]
 Fix every issue the review raises, run the tests, and commit the fixes to the current branch. Do not push.
 Then call finish_review with a short note of what you found and fixed.`;
+}
+
+/** What a rescue run reports with finish_diagnosis. */
+export type Diagnosis = {
+  status: "diagnosed" | "no_loop" | "failed";
+  /** diagnosed: one command that goes red on the bug. */
+  command?: string;
+  /** diagnosed: the causal chain, one `file:line` step each. */
+  chain?: string[];
+  /** Optional harness files the rescue wrote and removed, as text, for the fix run to recreate. */
+  harness?: string;
+  note: string;
+};
+
+const FILE_LINE = /\S+:\d+/;
+
+/** Check finish_diagnosis's arguments; the extension applies the same rules, so the model can retry. */
+export function validateDiagnosis(input: any): Diagnosis {
+  const status = input?.status;
+  if (status !== "diagnosed" && status !== "no_loop" && status !== "failed") throw new Error("status must be diagnosed, no_loop or failed");
+  const note = typeof input.note === "string" ? input.note.trim() : "";
+  if (status !== "diagnosed") return { status, note };
+  const command = typeof input.command === "string" ? input.command.trim() : "";
+  if (!command) throw new Error("a diagnosis needs the red-capable command");
+  const chain = Array.isArray(input.chain) ? input.chain.map((c: unknown) => String(c).trim()).filter(Boolean) : [];
+  if (chain.length === 0) throw new Error("a diagnosis needs the causal chain");
+  const bad = chain.find((c: string) => !FILE_LINE.test(c));
+  if (bad) throw new Error(`every causal chain step needs a file:line (got "${bad}")`);
+  const harness = typeof input.harness === "string" && input.harness.trim() ? input.harness.trim() : undefined;
+  return { status, command, chain, ...(harness ? { harness } : {}), note };
+}
+
+/** The facts the server hands a rescue run: nothing from the stuck model's own summary. */
+export type RescueHandoff = {
+  ticket: Ticket;
+  spec: string | null;
+  specRef: string | null;
+  stopReason: string;
+  startCommit: string | null;
+  diff: string;
+  toolErrors: string[];
+  sessionFile: string | null;
+};
+
+const DIFF_LIMIT = 20_000;
+
+export function rescuePrompt(h: RescueHandoff) {
+  const diff = h.diff.length > DIFF_LIMIT ? `${h.diff.slice(0, DIFF_LIMIT)}\n… (cut; run the git diff yourself for the rest)` : h.diff;
+  return `/skill:diagnosing-bugs Ticket #${h.ticket.num}: ${h.ticket.title} is stuck: the local model hit the stop rule. Find the cause; do not fix it.
+
+## Ticket${h.ticket.trackerRef ? ` (${h.ticket.trackerRef})` : ""}
+${h.ticket.body}
+
+## Spec
+${h.specRef ? `See ${h.specRef}.` : specSection(h.spec, h.specRef)}
+
+## Stop reason
+${h.stopReason}
+
+## Start commit
+${h.startCommit ?? "(not recorded)"}
+
+## Diff since the start commit, uncommitted changes included
+${diff.trim() ? `\`\`\`diff\n${diff}\n\`\`\`` : "(no changes)"}
+
+## The stuck run's last tool errors
+${h.toolErrors.length ? h.toolErrors.map((e) => `- ${e}`).join("\n") : "- none"}
+
+## The stuck run's session file
+${h.sessionFile ?? "(not found)"}
+
+[pi-workbench pipeline: rescue run]
+The user is away: do not use ask_user. Rank your hypotheses yourself and go on.
+Follow diagnosing-bugs Phases 1 to 4 only: build the feedback loop, reproduce, rank hypotheses, instrument. Do not fix the bug. Do not commit.
+Remove every [DEBUG-...] log you add, and leave the worktree as you found it. The server checks.
+Then call finish_diagnosis: status "diagnosed" with one red-capable command and the causal chain (one file:line step each), and the harness files as text if the fix run needs them;
+"no_loop" if you cannot build a feedback loop (an unclear ticket, a broken environment); "failed" if every hypothesis failed. Add a short note.`;
+}
+
+/** A fix run: the ticket's implement prompt, plus the rescue run's diagnosis. */
+export function fixPrompt(ticket: Ticket, spec: string | null, specRef: string | null, finished: Ticket[], d: Diagnosis) {
+  return `${implementPrompt(ticket, spec, specRef, finished)}
+
+## Diagnosis
+An earlier run on this ticket got stuck. A rescue run found the cause. Write the regression test first, with tdd: it must go red with this command, then fix the cause.
+
+Command: ${d.command}
+
+Causal chain:
+${(d.chain ?? []).map((c) => `- ${c}`).join("\n")}
+${d.harness ? `\nHarness files:\n${d.harness}\n` : ""}${d.note ? `\nNote: ${d.note}\n` : ""}`;
 }
