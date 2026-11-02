@@ -286,6 +286,46 @@ export default function workbench(pi: ExtensionAPI) {
       return { content: [{ type: "text", text: `Ticket marked ${params.status}. Stop here.` }], details: {} };
     },
   });
+
+  pi.registerTool({
+    name: "finish_diagnosis",
+    label: "Finish diagnosis",
+    description:
+      "pi-workbench pipeline (rescue run): report the diagnosis of a stuck ticket. diagnosed needs one red-capable command and the causal chain, one file:line step each; no_loop means you could not build a feedback loop; failed means every hypothesis failed.",
+    parameters: Type.Object({
+      status: Type.Union([Type.Literal("diagnosed"), Type.Literal("no_loop"), Type.Literal("failed")]),
+      command: Type.Optional(Type.String({ description: "diagnosed: one command that goes red on the bug" })),
+      chain: Type.Optional(Type.Array(Type.String(), { description: "diagnosed: the causal chain, each step with a file:line" })),
+      harness: Type.Optional(Type.String({ description: "Harness files the fix run needs, as text" })),
+      note: Type.String({ description: "A short note" }),
+    }),
+    async execute(_id, params) {
+      const problem = checkDiagnosis(params);
+      if (problem) return { content: [{ type: "text", text: `Not recorded: ${problem}. Fix it and call finish_diagnosis again.` }], details: {}, isError: true };
+      return { content: [{ type: "text", text: `Diagnosis recorded (${params.status}). Stop here.` }], details: {} };
+    },
+  });
+
+  pi.registerTool({
+    name: "finish_retro",
+    label: "Finish retro",
+    description: "pi-workbench pipeline (retro run): report the proposed changes. Propose only; the retro edits nothing.",
+    parameters: Type.Object({ report: Type.String({ description: "The proposals: each names the exact file or setting it changes, and why" }) }),
+    async execute(_id, params) {
+      if (!params.report.trim()) return { content: [{ type: "text", text: "report is empty" }], details: {}, isError: true };
+      return { content: [{ type: "text", text: "Retro recorded. Stop here." }], details: {} };
+    },
+  });
+}
+
+/** Same rules as the server's validateDiagnosis, so the model hears about mistakes and retries. */
+function checkDiagnosis(d: { status: string; command?: string; chain?: string[] }): string | null {
+  if (d.status !== "diagnosed") return null;
+  if (!d.command?.trim()) return "a diagnosis needs the red-capable command";
+  const chain = (d.chain ?? []).map((c) => c.trim()).filter(Boolean);
+  if (chain.length === 0) return "a diagnosis needs the causal chain";
+  const bad = chain.find((c) => !/\S+:\d+/.test(c));
+  return bad ? `every causal chain step needs a file:line (got "${bad}")` : null;
 }
 
 function findSkill(name: string, cwd: string): string | undefined {

@@ -11,6 +11,7 @@ const STEPS: { phase: Phase; label: string }[] = [
   { phase: "tickets", label: "Tickets" },
   { phase: "implement", label: "Implement" },
   { phase: "review", label: "Review" },
+  { phase: "retro", label: "Retro" },
   { phase: "done", label: "Done" },
 ];
 
@@ -31,6 +32,8 @@ export const phaseLabel = (s: SessionSummary) => {
       return running ? `Ticket ${running.num} · ${done}/${s.tickets.length} done` : `${done}/${s.tickets.length} tickets done`;
     case "review":
       return `Reviewing all ${s.tickets.length} tickets`;
+    case "retro":
+      return "Retro of the rescued tickets";
     case "done":
       return s.tickets.length ? `All ${s.tickets.length} tickets done` : "Pipeline stopped";
     default:
@@ -44,6 +47,8 @@ const refLabel = (ref: string) => {
   return issue ? `#${issue[1]}` : ref.split("/").pop() || ref;
 };
 
+const RESCUE_LABEL = { diagnosing: "rescue: diagnosing", fixing: "rescue: fixing", rescued: "rescued", failed: "rescue failed" } as const;
+
 function TicketRow({ t, all, viewing, onView }: { t: Ticket; all: Ticket[]; viewing: boolean; onView: (runId: string) => void }) {
   const [open, setOpen] = useState(false);
   const waitingOn = t.blockedBy.filter((b) => all.find((x) => x.num === b)?.status !== "done");
@@ -54,6 +59,7 @@ function TicketRow({ t, all, viewing, onView }: { t: Ticket; all: Ticket[]; view
         <span className="ticket-num mono">#{t.num}</span>
         <span className="ticket-title">{t.title}</span>
         {t.status === "ready" && waitingOn.length > 0 && <span className="muted small">after #{waitingOn.join(", #")}</span>}
+        {t.rescueState && <span className={`tag ticket-rescue ticket-rescue-${t.rescueState}`} title="The stop rule stopped this ticket; a rescue run on the Reviewer model diagnoses it, then a fix run fixes it">{RESCUE_LABEL[t.rescueState]}</span>}
         {t.trackerRef && <span className="tag mono ticket-ref" title={t.trackerRef}>{refLabel(t.trackerRef)}</span>}
       </button>
       {open && (
@@ -67,6 +73,16 @@ function TicketRow({ t, all, viewing, onView }: { t: Ticket; all: Ticket[]; view
           {t.runId && (
             <button className="btn btn-sm" onClick={() => onView(t.runId!)}>
               {viewing ? "Viewing this run" : "View this ticket's run"}
+            </button>
+          )}
+          {t.rescueRunId && (
+            <button className="btn btn-sm" onClick={() => onView(t.rescueRunId!)}>
+              View the rescue run
+            </button>
+          )}
+          {t.fixRunId && (
+            <button className="btn btn-sm" onClick={() => onView(t.fixRunId!)}>
+              View the fix run
             </button>
           )}
         </div>

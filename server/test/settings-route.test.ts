@@ -78,3 +78,27 @@ test("pipeline stop-rule settings: defaults on read, stored on write", async () 
   const after = await api("GET", "/api/settings");
   assert.deepEqual(after.json.pipeline, { timeLimitMinutes: 45, repeatLimit: 3, toolCallLimit: 300 });
 });
+
+test("the server runs the rescue proxy: a saved Reviewer model points models.json at a loopback listener that wants a live token", async () => {
+  await waitReady();
+  const { config } = await import("../src/config.ts");
+  const models = () => JSON.parse(fs.readFileSync(path.join(config.piAgentDir, "models.json"), "utf8"));
+  // The Reviewer is off by default: no rescue provider.
+  assert.equal(models().providers["workbench-rescue"], undefined);
+
+  const put = await api("PUT", "/api/settings/auto-approve", { reviewer: { provider: "openai", baseUrl: "https://reviewer.example/v1", model: "frontier-1" } });
+  assert.equal(put.status, 200);
+  const rescue = models().providers["workbench-rescue"];
+  assert.ok(rescue, "saving a Reviewer model generates the rescue provider");
+  assert.equal(rescue.models[0].id, "frontier-1");
+  const proxyUrl = new URL(rescue.baseUrl);
+  assert.equal(proxyUrl.hostname, "127.0.0.1");
+  assert.notEqual(proxyUrl.port, new URL(base).port, "the proxy is a second listener, not the UI port");
+  // The listener answers, and refuses a request without a live token.
+  const res = await fetch(`${rescue.baseUrl}/chat/completions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  assert.equal(res.status, 401);
+
+  // An empty Reviewer model turns it off again.
+  await api("PUT", "/api/settings/auto-approve", { reviewer: { model: "" } });
+  assert.equal(models().providers["workbench-rescue"], undefined);
+});
