@@ -115,7 +115,7 @@ function textOf(content: unknown): string {
  *   PUSHME) → finish_ticket (blocked if the ticket says BLOCKME) → done
  * - code-review: commit a fix and `git push` it (a gated call) → finish_review → done
  */
-function pipelineScript(userText: string, step: number, lastResult: string): Reply | undefined {
+function pipelineScript(userText: string, step: number, lastResult: string, conversation = ""): Reply | undefined {
   if (userText.includes('<skill name="grill-with-docs"')) {
     if (step === 0) return { tool: { name: "ask_user", args: { question: "We build a greeting file plus tests. Have we reached a shared understanding?", options: ["Yes, that's the plan", "Not yet"] } } };
     if (step === 1 && /Yes/.test(lastResult)) return { tool: { name: "save_grill_summary", args: { summary: "Build hello.txt saying Hello, with a test. No UI." } } };
@@ -125,7 +125,11 @@ function pipelineScript(userText: string, step: number, lastResult: string): Rep
   if (userText.includes('<skill name="to-spec"')) {
     if (step === 0) return { tool: { name: "ask_user", args: { question: "Test at the file level, through one seam: the hello.txt contents. OK?", options: ["Yes", "No"] } } };
     if (step === 1) return { tool: { name: "bash", args: { command: "mkdir -p .scratch/greeting && echo spec > .scratch/greeting/spec.md && echo published" } } };
-    if (step === 2) return { tool: { name: "save_spec", args: { spec: "## Problem Statement\nNo greeting.\n## Solution\nhello.txt says Hello.", trackerRef: ".scratch/greeting/spec.md" } } };
+    if (step === 2) {
+      // A task that says `GHSPEC <url>` publishes its spec as that GitHub issue.
+      const issue = /GHSPEC (\S+)/.exec(conversation)?.[1];
+      return { tool: { name: "save_spec", args: { spec: "## Problem Statement\nNo greeting.\n## Solution\nhello.txt says Hello.", trackerRef: issue ?? ".scratch/greeting/spec.md" } } };
+    }
     return { text: "Spec published." };
   }
   if (userText.includes('<skill name="to-tickets"')) {
@@ -171,7 +175,8 @@ function script(messages: { role: string; content: unknown }[]): Reply {
   const lastUser = messages[lastUserIdx];
   const userText = textOf(lastUser?.content);
   const step = messages.slice(lastUserIdx + 1).filter((m) => m.role === "assistant").length;
-  const piped = pipelineScript(userText, step, last?.role === "tool" ? textOf(last.content) : "");
+  const conversation = messages.filter((m) => m.role === "user").map((m) => textOf(m.content)).join("\n");
+  const piped = pipelineScript(userText, step, last?.role === "tool" ? textOf(last.content) : "", conversation);
   if (piped) return piped;
   if (last?.role === "tool") {
     const result = textOf(last.content).split("\n")[0].slice(0, 80);

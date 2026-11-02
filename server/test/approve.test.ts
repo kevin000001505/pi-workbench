@@ -218,6 +218,30 @@ test("a merge conflict keeps the card in Review with the conflict as its attenti
   assert.ok(!fs.existsSync(worktree));
 });
 
+test("a board-created card's spec issue gets a Closes line, so Approve closes it with the tickets", { skip: !hasPi && "pi CLI not found" }, async () => {
+  await setup();
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/ship", title: "Spec issue", prompt: "add a greeting GHSPEC https://github.com/kevin/ship/issues/40", baseBranch: "develop" })).json;
+  // Drive the card to Review: answer every question and permission, Solve all in Issues, skip a blocked ticket.
+  const card = await waitFor(async () => {
+    const x = await summary(s.id);
+    const req = x.pending.find((p: any) => p.kind === "decision" || p.kind === "permission");
+    if (req) await api("POST", `/api/sessions/${s.id}/respond`, { requestId: req.id, value: req.options[0] });
+    else if (x.phase === "ready" && x.status === "idle") await api("POST", `/api/sessions/${s.id}/move`, { column: "doing" });
+    else if (x.phase === "implement" && x.attention) await api("POST", `/api/sessions/${s.id}/pipeline`, { action: "skip" });
+    return (await board()).find((c) => c.id === s.id && c.column === "review");
+  }, 180_000);
+  assert.equal(card.specRef, "https://github.com/kevin/ship/issues/40");
+  const pr = gh.pulls.find((p) => p.number === card.pr.number);
+  assert.equal([...pr.body.matchAll(/Closes #40\b/g)].length, 1, pr.body);
+
+  await waitFor(async () => (await summary(s.id)).status !== "running");
+  const before = gh.closed.length;
+  const r = await approve(s.id);
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.phase, "done");
+  assert.deepEqual(gh.closed.slice(before), [{ ref: "kevin/ship#40", by: "api" }]);
+});
+
 test("Approve refuses a card outside Review, and a request from another site", { skip: !hasPi && "pi CLI not found" }, async () => {
   await setup();
   const s = (await api("POST", "/api/sessions", { repoId: "kevin/ship", title: "Not yet", prompt: "add a farewell" })).json;
