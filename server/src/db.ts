@@ -36,6 +36,8 @@ export type SessionRow = {
   spec_ref: string | null;
   /** pi session id of the final code-review run. */
   review_run: string | null;
+  /** pi session id of the last merge run, which resolves a conflict that Approve found. */
+  merge_run: string | null;
   /** finish_review's note from the last review run, for the card detail. */
   review_note: string | null;
   /** When the card last reached Done; the board lists Done newest first by it. */
@@ -147,6 +149,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ["sessions", "typesafe_skill", "INTEGER NOT NULL DEFAULT 0"],
   ["sessions", "review_note", "TEXT"],
   ["sessions", "done_at", "INTEGER"],
+  ["sessions", "merge_run", "TEXT"],
   ["tickets", "start_commit", "TEXT"],
   ["tickets", "stop_reason", "TEXT"],
   ["tickets", "rescue_run_id", "TEXT"],

@@ -8,6 +8,8 @@
  * - tickets: /skill:to-tickets in the same conversation; ends when the agent calls record_tickets.
  * - implement: one fresh run per ticket with /skill:tdd, in dependency order; each ends with finish_ticket.
  * - review: one fresh /skill:code-review run over the whole branch that fixes what it finds; ends with finish_review.
+ * - merge: when Approve finds a conflict that `git merge` cannot settle, one fresh
+ *   /skill:resolving-merge-conflicts run finishes the merge in the worktree; ends with finish_merge.
  */
 
 /** `ready`: the tickets are recorded and the session waits for Solve all. `pr`: reviewed, PR open. */
@@ -50,7 +52,7 @@ export function ticketsFromSubIssues(subs: SubIssueSeed[]): TicketInput[] {
   }));
 }
 
-export const PIPELINE_TOOLS = ["save_grill_summary", "save_spec", "record_tickets", "finish_ticket", "finish_review"] as const;
+export const PIPELINE_TOOLS = ["save_grill_summary", "save_spec", "record_tickets", "finish_ticket", "finish_review", "finish_merge"] as const;
 
 /** Specs longer than this go to ticket runs as a pointer only (implement-spec: "communicate through context pointers"). */
 const SPEC_INLINE_LIMIT = 40_000;
@@ -176,4 +178,17 @@ Commit any docs you changed (glossary, ADRs) to the current branch. Do not push.
 Then call save_grill_summary with a short summary of the new decisions, and stop.
 In the to-spec and to-tickets steps that follow, do not publish new issues for this feature: update the existing spec issue, ${spec}, in place, and update its ticket issues.
 Close every ticket issue that the new breakdown drops. record_tickets lists the full new breakdown.`;
+}
+
+/** The merge run: Approve found a conflict, and `git merge origin/<base>` stopped on these files. */
+export function mergePrompt(base: string, reason: string, files: string[]) {
+  return `/skill:resolving-merge-conflicts Finish the merge of origin/${base} into this branch: ${reason}.
+
+## Conflicted files
+${files.map((f) => `- ${f}`).join("\n")}
+
+[pi-workbench pipeline: merge conflict on Approve]
+The merge is in progress in this worktree. Resolve every conflicted hunk, run the checks, and commit the merge to the current branch. Do not push; the workbench pushes.
+Then call finish_merge with status "resolved" and a short note of how you reconciled each side.
+If you cannot resolve it, call finish_merge with status "failed" and explain why.`;
 }

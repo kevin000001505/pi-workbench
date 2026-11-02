@@ -14,7 +14,7 @@ import {
 } from "../../shared/transcript.ts";
 import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
 import type { Db, RepoRow, SessionRow, TicketRow } from "./db.ts";
-import type { GitEnv } from "./git.ts";
+import { git, type GitEnv } from "./git.ts";
 import type { Delivery, MergeResult } from "./delivery.ts";
 import { closedIssues } from "./prs.ts";
 import {
@@ -22,6 +22,7 @@ import {
   grillPrompt,
   reworkPrompt,
   implementPrompt,
+  mergePrompt,
   nextTicket,
   type Phase,
   PIPELINE_TOOLS,
@@ -149,7 +150,7 @@ type Live = {
   setupRunning: boolean;
   /** Arguments of pipeline tool calls in flight, by toolCallId. */
   toolArgs: Map<string, { name: string; args: any }>;
-  /** finish_ticket's (or finish_review's) report for the current run, applied when the run settles. */
+  /** finish_ticket's (or finish_review's, or finish_merge's) report for the current run, applied when the run settles. */
   finished?: { status: "done" | "blocked"; note: string };
   lastSettleAborted: boolean;
   /** The missing-TypeSafe-skill toast went out; the summary keeps showing the state after it. */
@@ -217,6 +218,8 @@ export class SessionManager extends EventEmitter {
   private summaryTimers = new Map<string, NodeJS.Timeout>();
   /** Sessions whose Approve is in flight, so a second click does not merge twice. */
   private approving = new Set<string>();
+  /** Sessions whose merge run resolves a conflict now; Approve waits for it to finish. */
+  private resolving = new Set<string>();
 
   constructor(db: Db, secrets: SecretStore, gitEnv: () => Promise<GitEnv>, refreshSsh?: () => void, fetchTicketSeed?: (ref: string) => Promise<TicketSeed>, rescueProxy?: RescueProxy, delivery?: Delivery) {
     super();
@@ -329,6 +332,7 @@ export class SessionManager extends EventEmitter {
         { id: row.id, label: row.mode === "pipeline" ? "Plan" : "Conversation" },
         ...tickets.filter((t) => t.runId).map((t) => ({ id: t.runId!, label: `#${t.num} ${t.title}` })),
         ...(row.review_run ? [{ id: row.review_run, label: "Review" }] : []),
+        ...(row.merge_run ? [{ id: row.merge_run, label: "Merge" }] : []),
       ],
     };
   }
@@ -504,7 +508,7 @@ export class SessionManager extends EventEmitter {
       env[RESCUE_TOKEN_ENV] = this.rescueProxy!.mint(runId);
     }
     const ticket = this.tickets(id).find((t) => t.runId === runId);
-    const label = ticket ? ` · #${ticket.num}` : runId === row.review_run ? " · review" : "";
+    const label = ticket ? ` · #${ticket.num}` : runId === row.review_run ? " · review" : runId === row.merge_run ? " · merge" : "";
     s.error = null;
     s.stderr = [];
     const proc = new RpcProcess(
@@ -634,6 +638,8 @@ export class SessionManager extends EventEmitter {
       s.finished = { status: args.status, note: String(args.note ?? "").trim() };
     } else if (name === "finish_review" && row.phase === "review") {
       s.finished = { status: "done", note: String(args.note ?? "").trim() };
+    } else if (name === "finish_merge" && row.phase === "pr" && row.merge_run === this.runOf(row) && (args.status === "resolved" || args.status === "failed")) {
+      s.finished = { status: args.status === "resolved" ? "done" : "blocked", note: String(args.note ?? "").trim() };
     }
     this.emitSummary(id, true);
   }
@@ -921,6 +927,8 @@ export class SessionManager extends EventEmitter {
       await this.afterTicketRun(id, s);
     } else if (row.phase === "review" && row.review_run === this.runOf(row)) {
       await this.afterReviewRun(id, s);
+    } else if (row.phase === "pr" && row.merge_run && row.merge_run === this.runOf(row) && this.resolving.has(id)) {
+      await this.afterMergeRun(id, s);
     }
     this.emitSummary(id, true);
   }
@@ -1099,7 +1107,7 @@ export class SessionManager extends EventEmitter {
    */
   async approve(id: string) {
     const row = this.row(id);
-    if (row.phase !== "pr" || this.approving.has(id)) throw Object.assign(new Error("Only a card in Review with its PR open can be approved."), { status: 409 });
+    if (row.phase !== "pr" || this.approving.has(id) || this.resolving.has(id)) throw Object.assign(new Error("Only a card in Review with its PR open can be approved."), { status: 409 });
     this.approving.add(id);
     try {
       const { repo } = this.repoOf(id);
@@ -1119,9 +1127,65 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  /** The merge stopped on a conflict. The card stays in Review; #52 starts the resolve run here. */
+  /**
+   * The merge stopped on a conflict; the card stays in Review. Merge the base branch into the
+   * worktree: a clean merge is pushed at once, and one that stops on conflicts goes to a fresh
+   * merge run with resolving-merge-conflicts, which `afterMergeRun` finishes.
+   */
   private async mergeConflict(id: string, reason: string) {
-    this.flag(id, `${reason}. Resolve it on the branch, then approve again.`);
+    const row = this.row(id);
+    const env = await this.gitEnv();
+    const sh = (args: string[]) => git(row.worktree, args, env);
+    try {
+      await sh(["fetch", "-q", "origin", row.base_branch]);
+      await sh(["merge", "--no-edit", `origin/${row.base_branch}`]);
+    } catch (err) {
+      const files = (await sh(["diff", "--name-only", "--diff-filter=U"]).catch(() => "")).split("\n").filter(Boolean);
+      if (!files.length) {
+        await sh(["merge", "--abort"]).catch(() => {});
+        this.flag(id, `${reason}, and the workbench could not merge ${row.base_branch} into the branch: ${(err as Error).message}. Resolve it on the branch, then approve again.`);
+        return;
+      }
+      // Switch to the merge run before anyone hears about it.
+      const runId = `${id}-merge-${Date.now().toString(36)}`;
+      this.update(id, { merge_run: runId, attention: null });
+      this.resolving.add(id);
+      await this.switchRun(id, runId, true);
+      this.emit("event", id, { type: "wb_notify", message: `${reason}. A merge run resolves it now.`, level: "info" });
+      await this.send(id, mergePrompt(row.base_branch, reason, files)).catch((err2) => {
+        this.resolving.delete(id);
+        this.flag(id, `The merge run could not start: ${(err2 as Error).message}. Resolve the conflict on the branch, then approve again.`);
+      });
+      return;
+    }
+    await this.pushResolved(id, `${row.base_branch} merged into the branch with no conflicting lines`);
+  }
+
+  /** The merge run settled: push a resolved merge; else undo the half-done merge and say why. */
+  private async afterMergeRun(id: string, s: Live) {
+    const report = s.finished;
+    s.finished = undefined;
+    this.resolving.delete(id);
+    if (report?.status === "done") {
+      await this.pushResolved(id, report.note);
+      return;
+    }
+    const row = this.row(id);
+    await git(row.worktree, ["merge", "--abort"], await this.gitEnv()).catch(() => {});
+    const why = report ? report.note || "no reason given" : s.lastSettleAborted ? "the run was stopped" : "the run stopped without finishing";
+    this.flag(id, `The merge conflict was not resolved: ${why}. Resolve it on the branch, then approve again.`);
+  }
+
+  /** Push the merge to the PR's branch; the card stays in Review for a second Approve. */
+  private async pushResolved(id: string, note: string) {
+    const row = this.row(id);
+    try {
+      await git(row.worktree, ["push", "-q", "origin", `HEAD:refs/heads/${row.branch}`], await this.gitEnv());
+    } catch (err) {
+      this.flag(id, `The merge conflict is resolved, but the push failed: ${(err as Error).message}. Push the branch, then approve again.`);
+      return;
+    }
+    this.flag(id, `The merge conflict with ${row.base_branch} is resolved and pushed${note ? ` (${note})` : ""}. Read the resolution, then approve again.`);
   }
 
   /**
