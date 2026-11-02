@@ -18,6 +18,7 @@ import type { GitEnv } from "./git.ts";
 import {
   allDone,
   grillPrompt,
+  reworkPrompt,
   implementPrompt,
   nextTicket,
   type Phase,
@@ -1031,7 +1032,34 @@ export class SessionManager extends EventEmitter {
    */
   private readonly moves: Partial<Record<`${Column}>${Column}`, (id: string) => Promise<void>>> = {
     "issues>doing": (id) => this.solveAll(id),
+    "doing>issues": (id) => this.pause(id),
+    "qa>issues": (id) => this.pause(id),
+    "review>issues": (id) => this.pause(id),
+    "issues>todo": (id) => this.rework(id),
+    "doing>todo": (id) => this.rework(id),
+    "qa>todo": (id) => this.rework(id),
+    "review>todo": (id) => this.rework(id),
   };
+
+  /**
+   * Stop the live run and wait in `ready`; ticket statuses stay, and an open PR stays open for the
+   * next review to push to. The phase changes first, so the stopped run's settle moves nothing.
+   */
+  private async pause(id: string) {
+    this.update(id, { phase: "ready", attention: null });
+    await this.stop(id);
+  }
+
+  /**
+   * Plan again: stop the live run, go back to the plan conversation, and grill with the rework
+   * prompt. The grill summary and spec are cleared (the spec ref stays), so afterSettled does not
+   * skip ahead; send() clears the attention, and record_tickets replaces the ticket rows.
+   */
+  private async rework(id: string) {
+    this.update(id, { phase: "grill", grill_summary: null, spec: null });
+    await this.switchRun(id, id, false);
+    await this.send(id, reworkPrompt(this.row(id).spec_ref));
+  }
 
   /** Solve all: the paused session implements its tickets, one fresh run each. */
   private async solveAll(id: string) {
