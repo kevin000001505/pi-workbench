@@ -14,8 +14,8 @@ export type ReviewerReply = {
 
 /**
  * A scripted frontier reviewer, speaking the API its provider uses:
- * - "anthropic": `POST /v1/messages` with a forced `verdict` tool call;
- * - "openai": `POST /chat/completions` with a JSON verdict in the reply text.
+ * - "anthropic": `POST /v1/messages` (x-api-key), a JSON verdict in the reply text;
+ * - "openai": `POST /chat/completions` (Bearer or x-api-key), a JSON verdict in the reply text.
  * Queued `replies` answer first. Otherwise: when `defaultVerdict` is set, every non-queued
  * call is answered with it (the subject script stays off); when it is not set, it answers by
  * the call in the state: `rm -rf /mnt` is denied, `ssh` is escalated, any other `rm` is
@@ -57,23 +57,13 @@ export function startMockReviewer(opts: { provider: "anthropic" | "openai"; mode
     if (reply?.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs));
     answered++;
     if (res.destroyed) return;
-    if (reply.status && reply.status !== 200) return send(res, reply.status, reply.body ?? { error: { message: "mock failure" } });
-    if (reply.body !== undefined) return send(res, 200, reply.body);
+    if (reply?.status && reply.status !== 200) return send(res, reply.status, reply.body ?? { error: { message: "mock failure" } });
+    if (reply?.body !== undefined) return send(res, 200, reply.body);
     const verdict = { decision: reply?.decision ?? (opts.defaultVerdict ?? "allow"), reason: reply?.reason ?? `mock reviewer ${(opts.defaultVerdict ?? "allow") === "allow" ? "allows" : "escalates"} it` };
+    // The request names no tools, so a model answers in text: the JSON verdict in the content text.
     if (opts.provider === "anthropic") {
-      if (!(body.tools ?? []).length) {
-        const text = reply?.text ?? JSON.stringify({ verdict: verdict.decision, reason: verdict.reason });
-        return send(res, 200, { id: "msg_mock", type: "message", role: "assistant", model: opts.model, content: [{ type: "text", text }], stop_reason: "end_turn" });
-      }
-      return send(res, 200, {
-        id: "msg_mock",
-        type: "message",
-        role: "assistant",
-        model: opts.model,
-        content: [{ type: "tool_use", id: "toolu_mock", name: "verdict", input: verdict }],
-        stop_reason: "tool_use",
-        usage: { input_tokens: 400, output_tokens: 30 },
-      });
+      const text = reply?.text ?? JSON.stringify({ decision: verdict.decision, reason: verdict.reason });
+      return send(res, 200, { id: "msg_mock", type: "message", role: "assistant", model: opts.model, content: [{ type: "text", text }], stop_reason: "end_turn" });
     }
     send(res, 200, { id: "mock", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: reply?.text ?? JSON.stringify(verdict) }, finish_reason: "stop" }] });
   });

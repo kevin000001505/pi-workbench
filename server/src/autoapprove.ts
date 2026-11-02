@@ -31,7 +31,7 @@ const SECRET_NAMES = {
 } as const;
 /** The judge token and the origin it was saved for: it is only ever sent to that origin. */
 export type JudgeToken = { judgeToken?: string; tokenOrigin?: string };
-/** The reviewer key and the origin it was saved for: it is only ever sent to that origin. */
+/** The reviewer key and the origin it was saved for: a bound key is only ever sent to that origin. */
 export type ReviewerKey = { reviewerKey?: string; keyOrigin?: string };
 
 export type JudgeProtocol = "systemone" | "openai";
@@ -65,20 +65,24 @@ const DEFAULTS: AutoApproveSettings = {
 
 const bad = (message: string) => Object.assign(new Error(message), { status: 400 });
 
-/** Parse an http(s) URL from the request, or refuse it with `message`. */
+/** Parse an http(s) URL from the request, or refuse it with `message`. A URL with no host is refused. */
 function httpUrl(value: unknown, message: string): URL {
   let url: URL | undefined;
   try {
     url = typeof value === "string" ? new URL(value) : undefined;
   } catch {}
-  if (!url || (url.protocol !== "http:" && url.protocol !== "https:")) throw bad(message);
+  if (!url || (url.protocol !== "http:" && url.protocol !== "https:") || !url.hostname) throw bad(message);
   return url;
 }
 
 export function getAutoApproveSettings(db: Db): AutoApproveSettings {
   const saved = getSetting<Partial<AutoApproveSettings>>(db, "autoApprove") ?? {};
   // A safety switch: anything stored but a real `true` reads as off.
-  return { enabled: saved.enabled === true, judge: pickJudge({ ...DEFAULTS.judge, ...saved.judge }), reviewer: pickReviewer({ ...DEFAULTS.reviewer, ...saved.reviewer }) };
+  return {
+    enabled: saved.enabled === true,
+    judge: pickJudge({ ...DEFAULTS.judge, ...saved.judge }),
+    reviewer: { provider: saved.reviewer?.provider ?? DEFAULTS.reviewer.provider, baseUrl: saved.reviewer?.baseUrl ?? DEFAULTS.reviewer.baseUrl, model: saved.reviewer?.model ?? DEFAULTS.reviewer.model },
+  };
 }
 
 const pickJudge = (j: AutoApproveSettings["judge"]): AutoApproveSettings["judge"] => ({
@@ -98,17 +102,30 @@ export function localJudge(db: Db, secrets: SecretStore): { baseUrl: string; api
   return { baseUrl: getModelSettings(db).baseUrl, apiKey: secrets.get(GLOBAL_SCOPE, LLM_KEY_ENV) };
 }
 
-const pickReviewer = (r: AutoApproveSettings["reviewer"]): AutoApproveSettings["reviewer"] => ({
-  provider: r.provider,
-  baseUrl: r.baseUrl,
-  model: r.model,
-});
+/** The reviewer's public API when a provider is picked and no URL is given for it. */
+const REVIEWER_DEFAULT_URL: Record<AutoApproveSettings["reviewer"]["provider"], string> = {
+  anthropic: "https://api.anthropic.com",
+  openai: "https://api.openai.com/v1",
+};
+
+/** A reviewer patch keeps the saved URL unless the provider changes, then the provider's public API. */
+const pickReviewer = (cur: AutoApproveSettings["reviewer"], input: Partial<AutoApproveSettings>["reviewer"]): AutoApproveSettings["reviewer"] => {
+  if (!input) return cur;
+  const provider = input.provider ?? cur.provider;
+  if (provider !== "anthropic" && provider !== "openai") throw bad(`Unknown reviewer provider ${String(provider)}`);
+  const baseUrl = input.baseUrl === undefined && provider !== cur.provider ? REVIEWER_DEFAULT_URL[provider] : input.baseUrl ?? cur.baseUrl;
+  httpUrl(baseUrl, "The reviewer URL must be an http:// or https:// URL");
+  const model = input.model ?? cur.model;
+  // An empty model refuses the save; the saved empty model is the "reviewer off" state.
+  if (!model || typeof model !== "string" || !model.trim()) throw bad("Pick a reviewer model");
+  return { provider, baseUrl, model };
+};
 
 /** Validate and store. The protocol must already be known; `configureAutoApprove` detects it. */
 export function saveAutoApproveSettings(db: Db, input: Partial<AutoApproveSettings>): AutoApproveSettings {
   const cur = getAutoApproveSettings(db);
   if (input.enabled !== undefined && typeof input.enabled !== "boolean") throw bad("Auto-approve must be on or off (true or false)");
-  const next: AutoApproveSettings = { enabled: input.enabled ?? cur.enabled, judge: pickJudge({ ...cur.judge, ...input.judge }), reviewer: pickReviewer({ ...cur.reviewer, ...input.reviewer }) };
+  const next: AutoApproveSettings = { enabled: input.enabled ?? cur.enabled, judge: pickJudge({ ...cur.judge, ...input.judge }), reviewer: pickReviewer(cur.reviewer, input.reviewer) };
   validateJudge(next.judge);
   validateReviewer(next.reviewer);
   putSetting(db, "autoApprove", next);
@@ -126,7 +143,7 @@ function validateJudge(j: AutoApproveSettings["judge"]) {
   }
 }
 
-/** The URL must always be a valid http(s) one; an empty model id is the "not configured" state. */
+/** The URL must always be a valid http(s) one; the model must be a string (an empty id is the "reviewer off" state). */
 function validateReviewer(r: AutoApproveSettings["reviewer"]) {
   httpUrl(r.baseUrl, "The reviewer URL must be an http:// or https:// URL");
   if (r.provider !== "anthropic" && r.provider !== "openai") throw bad(`Unknown reviewer provider ${String(r.provider)}`);
@@ -136,7 +153,8 @@ function validateReviewer(r: AutoApproveSettings["reviewer"]) {
 /**
  * Settings → Save: when the judge URL or model changes, list the URL's models, refuse a model the
  * URL does not serve, and store the protocol the model speaks. An unchanged judge is not asked, so
- * the switch can always be turned off, even while the judge is down.
+ * the switch can always be turned off, even while the judge is down. When no reviewer URL is
+ * given and the provider changes, the provider's public API is stored for it.
  * The "local" kind runs on the agent's own endpoint (the model settings' base URL and LLM key);
  * Save lists that endpoint's models instead.
  */
@@ -270,7 +288,11 @@ export function savedReviewerKey(secrets: SecretStore): ReviewerKey {
   return { reviewerKey: secrets.get(AUTO_APPROVE_SCOPE, SECRET_NAMES.reviewerKey), keyOrigin: secrets.get(AUTO_APPROVE_SCOPE, SECRET_NAMES.reviewerKeyOrigin) };
 }
 
-/** Keys are write-only: set with a value and the reviewer URL it belongs to; cleared with null. */
+/**
+ * Keys are write-only: set with a value and, optionally, the reviewer URL it belongs to; cleared
+ * with null. A key without a URL is bound to no host and goes to whatever reviewer URL the
+ * settings name; a URL with it re-binds the key to that origin.
+ */
 export function saveReviewerKey(secrets: SecretStore, body: { key?: unknown; value?: unknown; baseUrl?: unknown }) {
   if (body.key !== "reviewerKey") throw bad(`Unknown key ${String(body.key)}`);
   if (body.value === null) {
@@ -278,11 +300,10 @@ export function saveReviewerKey(secrets: SecretStore, body: { key?: unknown; val
     return secrets.delete(AUTO_APPROVE_SCOPE, SECRET_NAMES.reviewerKeyOrigin);
   }
   if (typeof body.value !== "string" || !body.value.trim()) throw bad("Value is empty");
-  const origin = httpUrl(body.baseUrl, "Say which reviewer URL (http:// or https://) the key is for").origin;
-  secrets.setAll(AUTO_APPROVE_SCOPE, [
-    [SECRET_NAMES.reviewerKey, body.value.trim()],
-    [SECRET_NAMES.reviewerKeyOrigin, origin],
-  ]);
+  let origin: string | undefined;
+  if (body.baseUrl !== undefined) origin = httpUrl(body.baseUrl, "Say which reviewer URL (http:// or https://) the key is for").origin;
+  if (!origin) secrets.delete(AUTO_APPROVE_SCOPE, SECRET_NAMES.reviewerKeyOrigin);
+  secrets.setAll(AUTO_APPROVE_SCOPE, [[SECRET_NAMES.reviewerKey, body.value.trim()], ...(origin ? [[SECRET_NAMES.reviewerKeyOrigin, origin]] : [])]);
 }
 
 // --- judging -------------------------------------------------------------------------------
@@ -473,25 +494,18 @@ export const reviewerName = (settings: AutoApproveSettings) => (settings.reviewe
 const REVIEWER_SYSTEM = [
   "You review one tool call that a coding agent wants to run on the user's machines.",
   "A risk judge already rated the call (see rating); you make the final call.",
-  "Decide with the verdict tool:",
+  "Decide one of:",
   "- allow: the call is safe to run for this task. Routine is routine; do not escalate the ordinary.",
   "- deny: the call is a wrong or risky approach the agent can redo differently. Give a short reason the agent will read and act on.",
   "- escalate: the call could damage data, other machines, or services beyond the task, or you cannot judge it from the context. Give a short reason for the user.",
   "Give a one or two sentence reason in every case.",
 ].join("\n");
 
-const VERDICT_TOOL = {
-  name: "verdict",
-  description: "Your verdict on the tool call.",
-  input_schema: {
-    type: "object",
-    properties: {
-      decision: { type: "string", enum: ["allow", "deny", "escalate"] },
-      reason: { type: "string" },
-    },
-    required: ["decision", "reason"],
-  },
-};
+/**
+ * Both reviewers answer with one JSON object instead of a forced tool call: `tool_choice`
+ * "tool" and "any" are rejected with HTTP 400 by models that do not support forced tools.
+ */
+const VERDICT_REPLY = 'Reply with exactly one JSON object: {"decision": "allow" | "deny" | "escalate", "reason": "..."}';
 
 const reviewerState = (p: Permission, ctx: ReviewContext) => ({
   call: { tool: p.tool, command: p.subject },
@@ -519,6 +533,16 @@ const readVerdict = (v: unknown): { decision: "allow" | "deny" | "escalate"; rea
   return { decision: o.decision, reason: o.reason };
 };
 
+/**
+ * The reviewer's key for `url`: a key bound to an origin goes only there; a key saved without a
+ * URL is not bound to a host and goes to the configured reviewer URL; a string key is a test hook.
+ */
+const keyFor = (url: string, saved: ReviewerKey | string | undefined): string | undefined => {
+  if (typeof saved === "string") return saved;
+  if (!saved?.reviewerKey) return undefined;
+  return saved.keyOrigin ? (new URL(url).origin === saved.keyOrigin ? saved.reviewerKey : undefined) : saved.reviewerKey;
+};
+
 /** Ask the reviewer about a call the judge did not rate safe. Never throws: a failure is a verdict too. */
 export async function reviewPermission(p: Permission, ctx: ReviewContext, settings: AutoApproveSettings, saved: ReviewerKey | string | undefined): Promise<ReviewVerdict> {
   const by = reviewerName(settings);
@@ -531,19 +555,17 @@ export async function reviewPermission(p: Permission, ctx: ReviewContext, settin
     let text: string;
     try {
       const url = `${settings.reviewer.baseUrl.replace(/\/+$/, "")}/v1/messages`;
-      const key = typeof saved === "string" ? saved : saved?.keyOrigin && new URL(url).origin === saved.keyOrigin ? saved.reviewerKey : undefined;
+      const key = keyFor(url, saved);
       res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(key ? { "x-api-key": key } : {}), "anthropic-version": "2023-06-01" },
         body: JSON.stringify({
           model: settings.reviewer.model,
           max_tokens: 1024,
-          system: REVIEWER_SYSTEM,
+          system: `${REVIEWER_SYSTEM}\n${VERDICT_REPLY}`,
           messages: [{ role: "user", content: JSON.stringify(state) }],
-          tools: [VERDICT_TOOL],
-          tool_choice: { type: "tool", name: "verdict" },
         }),
-        signal: AbortSignal.timeout(config.autoApproveTimeoutMs),
+        signal: AbortSignal.timeout(config.reviewerTimeoutMs),
       });
       text = await res.text();
     } catch (err) {
@@ -554,17 +576,23 @@ export async function reviewPermission(p: Permission, ctx: ReviewContext, settin
     try {
       parsed = JSON.parse(text);
     } catch {}
-    const use = (parsed?.content ?? []).find?.((b: any) => b?.type === "tool_use");
-    const verdict = use ? readVerdict(use.input) : undefined;
-    if (!verdict) return { outcome: "failed", by, note: `${by} failed: the verdict was unreadable (expected decision allow, deny or escalate with a reason)` };
+    const reply = (parsed?.content ?? []).filter?.((b: any) => b?.type === "text").map((b: any) => String(b?.text ?? "")).join(" ");
+    let verdict: { decision: "allow" | "deny" | "escalate"; reason: string } | undefined;
+    const json = /\{[\s\S]*\}/.exec(reply)?.[0];
+    if (json) {
+      try {
+        verdict = readVerdict(JSON.parse(json));
+      } catch {}
+    }
+    if (!verdict) return { outcome: "failed", by, note: `${by} failed: the verdict was unreadable (expected a JSON object with decision allow, deny or escalate and a reason)` };
     return { outcome: verdict.decision, by, reason: verdict.reason };
   }
   let reply: string;
   try {
-    const call = { maxTokens: 1024, timeoutMs: config.autoApproveTimeoutMs, temperature: 0 };
+    const call = { maxTokens: 1024, timeoutMs: config.reviewerTimeoutMs, temperature: 0 };
     const url = `${settings.reviewer.baseUrl.replace(/\/+$/, "")}/chat/completions`;
-    const key = typeof saved === "string" ? saved : saved?.keyOrigin && new URL(url).origin === saved.keyOrigin ? saved.reviewerKey : undefined;
-    reply = await complete({ baseUrl: settings.reviewer.baseUrl, modelId: settings.reviewer.model }, key, `${REVIEWER_SYSTEM} Reply with one JSON object: {"decision": "allow" | "deny" | "escalate", "reason": "..."}. Nothing else.`, JSON.stringify(state, null, 2), call);
+    const key = keyFor(url, saved);
+    reply = await complete({ baseUrl: settings.reviewer.baseUrl, modelId: settings.reviewer.model }, key, `${REVIEWER_SYSTEM}\n${VERDICT_REPLY}. Nothing else.`, JSON.stringify(state, null, 2), call);
   } catch (err) {
     const { status, body } = err as { status?: number; body?: string };
     return { outcome: "failed", by, note: `${by} failed: ${status ? `HTTP ${status}${serverSays(body ?? "")}` : why(err)}` };
@@ -576,7 +604,7 @@ export async function reviewPermission(p: Permission, ctx: ReviewContext, settin
       verdict = readVerdict(JSON.parse(json));
     } catch {}
   }
-  if (!verdict) return { outcome: "failed", by, note: `${by} failed: the verdict was unreadable (expected decision allow, deny or escalate with a reason)` };
+  if (!verdict) return { outcome: "failed", by, note: `${by} failed: the verdict was unreadable (expected a JSON object with decision allow, deny or escalate and a reason)` };
   return { outcome: verdict.decision, by, reason: verdict.reason };
 }
 
