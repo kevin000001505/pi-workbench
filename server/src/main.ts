@@ -3,7 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import path from "node:path";
-import { boardCards } from "../../shared/board.ts";
+import { boardCards, DONE_PAGE, limitDone } from "../../shared/board.ts";
 import { config, TYPESAFE_SKILL } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { GitEnv } from "./git.ts";
@@ -153,7 +153,10 @@ const router = new Router()
   // --- board ---------------------------------------------------------------------------------
   .on("GET", "/api/board", ({ query }) => {
     const repo = requireTrackedRepo(db, query.get("repo") ?? "");
-    return { cards: boardCards(sessions.list().filter((s) => s.repoId === repo.id)) };
+    // `done` is how many Done cards to list, newest first; the board's "show more" raises it.
+    const done = query.has("done") ? Number(query.get("done")) : DONE_PAGE;
+    if (!Number.isInteger(done) || done < 0) throw new HttpError(400, "done must be a whole number of cards");
+    return limitDone(boardCards(sessions.list().filter((s) => s.repoId === repo.id)), done);
   })
 
   // --- sessions -----------------------------------------------------------------------------

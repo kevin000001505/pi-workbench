@@ -115,6 +115,8 @@ export type SessionSummary = {
   spec: string | null;
   specRef: string | null;
   reviewNote: string | null;
+  /** When the card last reached Done. */
+  doneAt: number | null;
   /** The GitHub issue this session solves, e.g. `owner/name#123`; null for plain sessions. */
   issueRef: string | null;
   /** The session's own auto-approve setting, and whether auto-approve is in effect for it now. */
@@ -225,6 +227,8 @@ export class SessionManager extends EventEmitter {
   }
 
   private update(id: string, fields: Partial<SessionRow>) {
+    // Every way into Done stamps when it happened, for the board's Done history.
+    if (fields.phase === "done" && fields.done_at === undefined) fields = { ...fields, done_at: Date.now() };
     const keys = Object.keys(fields);
     this.db.prepare(`UPDATE sessions SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`).run(
       ...keys.map((k) => (fields as any)[k]),
@@ -304,6 +308,7 @@ export class SessionManager extends EventEmitter {
       spec: row.spec,
       specRef: row.spec_ref,
       reviewNote: row.review_note,
+      doneAt: row.done_at,
       issueRef: row.issue_ref,
       autoApprove: autoApproveMode(row.auto_approve),
       autoApproveActive: this.autoApproveActive(row),

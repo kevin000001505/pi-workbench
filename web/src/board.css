@@ -140,3 +140,42 @@
 .kz-detail-tickets .title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .kz-detail-tickets .note { margin: 4px 0 0; color: var(--kz-muted); font-size: 13px; }
 @media (max-width: 700px) { .kz-detail { padding: 16px; } }
+
+/* Board tools: the filter (f), search (/ or ⌘K) and New card (n). */
+.kz-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.kz-filter {
+  display: inline-flex; align-items: center; gap: 6px; background: var(--kz-hover); border-radius: 99px;
+  padding: 4px 12px 4px 10px; color: var(--kz-muted);
+}
+.kz-filter.on { background: var(--kz-active); color: var(--kz-text); }
+.kz-filter .icon svg { width: 14px; height: 14px; }
+.kz-filter input { border: 0; background: none; color: var(--kz-text); font: inherit; width: 140px; padding: 2px 0; }
+.kz-btn:disabled { opacity: .5; cursor: default; }
+.kz-more {
+  border: 0; background: none; color: var(--kz-muted); font-size: 13px; padding: 6px 4px; text-align: left;
+}
+.kz-more:hover, .kz-more:focus-visible { color: var(--kz-text); text-decoration: underline; }
+
+/* New card and Search: a dialog over a dimmed board. */
+.kz-modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .3); z-index: 50; }
+.kz-modal {
+  position: fixed; z-index: 51; top: 12vh; left: 50%; transform: translateX(-50%); width: min(520px, calc(100vw - 32px));
+  background: var(--kz-bg); color: var(--kz-text); border: 1px solid var(--kz-border); border-radius: 18px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .2); padding: 18px; display: flex; flex-direction: column; gap: 10px;
+}
+.kz-modal h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.kz-modal .actions { display: flex; justify-content: flex-end; gap: 8px; }
+.kz-field {
+  width: 100%; border: 1px solid var(--kz-border); background: var(--kz-col); color: var(--kz-text);
+  border-radius: 12px; padding: 8px 12px; font: inherit; resize: vertical;
+}
+.kz-field:focus { border-color: var(--kz-faint); }
+.kz-search .results { display: flex; flex-direction: column; gap: 2px; max-height: 50vh; overflow-y: auto; }
+.kz-search .result {
+  display: flex; align-items: center; gap: 10px; border: 0; background: none; text-align: left;
+  border-radius: 10px; padding: 8px 10px;
+}
+.kz-search .result.selected { background: var(--kz-hover); }
+.kz-search .result .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kz-search .result .meta { color: var(--kz-faint); font-size: 12px; }
+.kz-search .note { color: var(--kz-muted); padding: 8px 10px; }

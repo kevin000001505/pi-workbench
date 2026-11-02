@@ -194,3 +194,33 @@ test("a card started from a spec's ticket issues skips Issues: Doing, then QA, t
   const withPr = (await board()).find((c) => c.id === s.id);
   assert.deepEqual(withPr.pr, { number: pr.json.number, url: pr.json.url, state: null });
 });
+
+test("Done lists merged cards newest first, and a done limit hides the older ones", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "history");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/history" })).status, 200);
+  const ids: string[] = [];
+  for (const title of ["First", "Second", "Third"]) {
+    const s = (await api("POST", "/api/sessions", { repoId: "kevin/history", title, prompt: `add ${title}` })).json;
+    await waitFor(async () => (await summary(s.id)).pending.some((p: any) => p.kind === "decision"));
+    // The pipeline panel's Stop ends the card in Done.
+    assert.equal((await api("POST", `/api/sessions/${s.id}/pipeline`, { action: "stop" })).status, 200);
+    await waitFor(async () => (await summary(s.id)).phase === "done");
+    ids.push(s.id);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  // A later message in an older card's session does not move it up: Done sorts by when the card got there.
+  const touched = (await summary(ids[2])).updatedAt;
+  assert.equal((await api("POST", `/api/sessions/${ids[0]}/prompt`, { message: "one more thing" })).status, 200);
+  assert.ok((await summary(ids[0])).updatedAt > touched, "the older card's session is now the latest updated");
+  const all = await api("GET", "/api/board?repo=kevin/history");
+  assert.deepEqual(all.json.cards.map((c: any) => [c.title, c.column]), [["Third", "done"], ["Second", "done"], ["First", "done"]]);
+  assert.equal(all.json.doneHidden, 0);
+
+  const two = await api("GET", "/api/board?repo=kevin/history&done=2");
+  assert.equal(two.status, 200);
+  assert.deepEqual(two.json.cards.map((c: any) => c.title), ["Third", "Second"]);
+  assert.equal(two.json.doneHidden, 1);
+  // "Show more" raises the limit.
+  assert.deepEqual((await api("GET", "/api/board?repo=kevin/history&done=3")).json.cards.length, 3);
+  assert.equal((await api("GET", "/api/board?repo=kevin/history&done=nope")).status, 400);
+});
