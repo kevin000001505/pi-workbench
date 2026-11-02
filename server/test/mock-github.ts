@@ -13,11 +13,14 @@ export function startMockGitHub(root: string, login = "kevin") {
   const issues: any[] = []; // repo-scoped: { owner, name, ...issue }; the issues feed carries pull-request entries too
   const comments: any[] = []; // { owner, name, issueNumber, ...comment }
   const subIssueSeeds: Record<string, any> = {};
-  // Every PR head's check runs; a test edits it. Set a pull's `mergeable_state` to "dirty" for a conflict.
+  // Every PR head's check runs; a test edits it. Set a pull's `mergeable_state` to "dirty" for a conflict,
+  // or its `merge_refusal` to a message for a merge that branch protection refuses.
   const checkRuns: { name: string; status: string; conclusion: string | null }[] = [
     { name: "ci", status: "completed", conclusion: "success" },
     { name: "lint", status: "in_progress", conclusion: null },
   ]; // `${owner}/${name}#${specNumber}` → { spec, subs } for the /graphql route
+  // Every issue a merge or an issue PATCH closed, in order: `{ ref: "owner/name#n", by: "merge" | "api" }`.
+  const closed: { ref: string; by: "merge" | "api" }[] = [];
   const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
 
   const createBare = (owner: string, name: string) => {
@@ -81,6 +84,17 @@ export function startMockGitHub(root: string, login = "kevin") {
 
   const seedSubIssues = (owner: string, name: string, spec: any, subs: any[]) => {
     subIssueSeeds[`${owner}/${name}#${spec.number}`] = { spec, subs };
+  };
+
+  /** Close an issue wherever the mock knows it: the issues feed, the sub-issue seeds, and `closed`. */
+  const closeIssue = (owner: string, name: string, number: number, by: "merge" | "api") => {
+    for (const i of issues) if (i.owner === owner && i.name === name && i.number === number) i.state = "closed";
+    for (const [key, seed] of Object.entries(subIssueSeeds)) {
+      if (!key.startsWith(`${owner}/${name}#`)) continue;
+      if (seed.spec.number === number) seed.spec.state = "CLOSED";
+      for (const sub of seed.subs) if (sub.number === number) sub.state = "CLOSED";
+    }
+    closed.push({ ref: `${owner}/${name}#${number}`, by });
   };
 
   const server = http.createServer(async (req, res) => {
@@ -167,10 +181,46 @@ export function startMockGitHub(root: string, login = "kevin") {
         },
       });
     }
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/.exec(p)) && req.method === "PATCH") {
+      if (body.state === "closed") closeIssue(m[1], m[2], Number(m[3]), "api");
+      return send(200, { number: Number(m[3]), state: body.state ?? "open" });
+    }
+    // Merge a PR: a set `merge_refusal` (branch protection) or a "dirty" PR is refused with 405, as GitHub does.
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)\/merge$/.exec(p)) && req.method === "PUT") {
+      const pr = pulls[Number(m[3]) - 1];
+      if (!pr) return send(404, { message: "Not Found" });
+      if (pr.merged) return send(405, { message: "Pull Request is not mergeable" });
+      if (pr.merge_refusal) return send(405, { message: pr.merge_refusal });
+      if (pr.mergeable_state === "dirty") return send(405, { message: "Pull Request is not mergeable" });
+      const bare = path.join(root, m[1], `${m[2]}.git`);
+      const git = (...args: string[]) => sh(bare, "-c", "user.name=gh", "-c", "user.email=gh@x", ...args).toString().trim();
+      const baseSha = git("rev-parse", `refs/heads/${pr.base}`);
+      const headSha = git("rev-parse", `refs/heads/${pr.head}`);
+      const tree = git("merge-tree", "--write-tree", baseSha, headSha);
+      const sha = git("commit-tree", tree, "-p", baseSha, "-p", headSha, "-m", `Merge pull request #${pr.number} from ${pr.head}`);
+      git("update-ref", `refs/heads/${pr.base}`, sha);
+      Object.assign(pr, { merged: true, merge_method: body.merge_method ?? "merge", merge_sha: sha });
+      // GitHub honours `Closes #n` only on a merge into the default branch.
+      if (pr.base === repoJson(m[1], m[2]).default_branch) {
+        for (const c of String(pr.body ?? "").matchAll(/Closes #(\d+)/g)) closeIssue(m[1], m[2], Number(c[1]), "merge");
+      }
+      return send(200, { sha, merged: true, message: "Pull Request successfully merged" });
+    }
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/git\/refs\/heads\/(.+)$/.exec(p)) && req.method === "DELETE") {
+      const bare = path.join(root, m[1], `${m[2]}.git`);
+      try {
+        sh(bare, "rev-parse", "--verify", `refs/heads/${m[3]}`);
+      } catch {
+        return send(422, { message: "Reference does not exist" });
+      }
+      sh(bare, "update-ref", "-d", `refs/heads/${m[3]}`);
+      res.writeHead(204);
+      return res.end();
+    }
     if ((m = /^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(p))) {
       const pr = pulls[Number(m[1]) - 1];
       return pr
-        ? send(200, { state: "open", merged: false, draft: !!pr.draft, mergeable_state: pr.mergeable_state ?? "clean", html_url: pr.html_url, head: { sha: "abc" }, comments: 0, review_comments: 1 })
+        ? send(200, { state: pr.merged ? "closed" : "open", merged: !!pr.merged, draft: !!pr.draft, mergeable_state: pr.mergeable_state ?? "clean", html_url: pr.html_url, head: { sha: "abc" }, comments: 0, review_comments: 1 })
         : send(404, { message: "Not Found" });
     }
     if (/\/commits\/[^/]+\/check-runs$/.test(p)) {
@@ -179,7 +229,7 @@ export function startMockGitHub(root: string, login = "kevin") {
     send(404, { message: `mock has no ${req.method} ${p}` });
   });
 
-  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; checkRuns: typeof checkRuns; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; close: () => Promise<void> }>((resolve) => {
+  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; checkRuns: typeof checkRuns; closed: typeof closed; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; close: () => Promise<void> }>((resolve) => {
     server.listen(Number(process.env.MOCK_GH_PORT ?? 0), "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
       resolve({
@@ -188,6 +238,7 @@ export function startMockGitHub(root: string, login = "kevin") {
         issues,
         comments,
         checkRuns,
+        closed,
         createBare,
         seedSubIssues,
         close: () => new Promise((r) => server.close(() => r())),

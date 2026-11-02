@@ -90,6 +90,13 @@ export function ticketsSection(tickets: Ticket[]) {
   return `\n## Tickets\n\n${lines.join("\n")}\n`;
 }
 
+/** The issue numbers the PR body's `Closes` lines name: the ticket issues, then the origin issue. */
+export function closedIssues(row: SessionRow, tickets: Ticket[]): number[] {
+  const section = ticketsSection(tickets);
+  const lines = `${section}${originCloses(row.issue_ref, section)}`;
+  return [...new Set([...lines.matchAll(/Closes #(\d+)/g)].map((m) => Number(m[1])))];
+}
+
 export async function openPr(
   row: SessionRow,
   repo: RepoRow,

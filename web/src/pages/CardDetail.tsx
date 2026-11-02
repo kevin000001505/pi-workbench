@@ -38,6 +38,19 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
     }
   };
 
+  // Approve merges the PR; GitHub's refusal or a conflict comes back as the card's attention.
+  const approve = async () => {
+    if (!confirm(approveQuestion(card))) return;
+    setBusy(true);
+    try {
+      await api.post(`/api/sessions/${card.id}/approve`, {});
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const column = COLUMNS.find((c) => c.id === card.column)?.label ?? card.column;
   const specRef = s?.specRef ?? card.specRef;
   const prUrl = card.pr?.url ?? s?.prUrl ?? null;
@@ -71,6 +84,11 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
               PR #{card.pr.number}
               {card.pr.state ? ` · ${card.pr.state}` : ""}
             </a>
+          )}
+          {s?.phase === "pr" && (
+            <button className="kz-btn primary" disabled={busy} onClick={approve} title="Merge the PR, delete the branch and the worktree">
+              {busy ? <Spinner small /> : null} Approve
+            </button>
           )}
         </div>
 
@@ -169,3 +187,7 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
     </>
   );
 }
+
+/** The confirm text for Approve, the same from the drag and from the card detail. */
+export const approveQuestion = (card: Card) =>
+  `Approve "${card.title}"? This merges PR #${card.pr?.number ?? "?"} with a merge commit, then deletes its branch and worktree.`;

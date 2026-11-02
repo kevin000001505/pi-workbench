@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type Card, type Column, COLUMNS, DONE_PAGE } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
-import { CardDetail } from "./CardDetail.tsx";
+import { approveQuestion, CardDetail } from "./CardDetail.tsx";
 import { matches, NewCard, Search, typingIn, wordsOf } from "./BoardDialogs.tsx";
 import type { Repo } from "../types.ts";
 import "../board.css";
@@ -175,6 +175,8 @@ export function Board({ repoId }: { repoId?: string }) {
     setDragged(null);
     setOver(null);
     if (!card || card.column === column) return;
+    // Review → Done is Approve: it merges the PR, so it asks first.
+    if (card.column === "review" && column === "done" && !confirm(approveQuestion(card))) return;
     api.post(`/api/sessions/${card.id}/move`, { column }).then(
       () => (setError(null), setRefetch((n) => n + 1)),
       (e) => setError(e.message),
