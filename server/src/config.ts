@@ -43,9 +43,9 @@ export const config = {
   },
 };
 
-/** The marker file setup-matt-pocock-skills writes; its absence means the repo still needs setup. */
 /** The TypeSafe skill (typesafe-ai/skills): a dir in the optional skills dir, loaded per session. */
 export const TYPESAFE_SKILL = "typesafe-ai";
+/** The marker file setup-matt-pocock-skills writes; its absence means the repo still needs setup. */
 export const SETUP_MARKER = "docs/agents/issue-tracker.md";
 export const SETUP_SKILL = "setup-matt-pocock-skills";
 export const PROVIDER_ID = "workbench";

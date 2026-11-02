@@ -30,6 +30,8 @@ import {
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
 import {
+  type AutoApproveSettings,
+  configureAutoApprove,
   getAutoApproveSettings,
   judgeName,
   judgePermission,
@@ -129,7 +131,7 @@ type Live = {
   /** False until messages were loaded from pi or its session file. */
   loaded: boolean;
   pending: Map<string, UiRequest>;
-  /** Auto-approve judgements and reviews in flight, by request id; aborting one drops its verdict. */
+  /** Auto-approve judgements and reviews in flight, by request id; aborting one hangs up its call and drops its verdict. */
   reviews: Map<string, AbortController>;
   error: string | null;
   stderr: string[];
@@ -419,6 +421,10 @@ export class SessionManager extends EventEmitter {
     const m = getModelSettings(this.db);
     fs.mkdirSync(config.piSessionsDir, { recursive: true });
     const extraSkills = this.extraSkillDirs(id);
+    // pi starts without a --skill dir it cannot find, and says nothing: say it here.
+    if (extraSkills.some((dir) => !fs.existsSync(path.join(dir, "SKILL.md")))) {
+      this.flag(id, `The TypeSafe skill is not installed (expected at ${typesafeSkillDir()}); this session runs without it.`);
+    }
     const env = await this.processEnv(row.repo_id);
     // The extension's Skill tool looks there too, so only these sessions can load them.
     if (extraSkills.length) env.PI_WORKBENCH_EXTRA_SKILLS = extraSkills.join(path.delimiter);
@@ -604,7 +610,7 @@ export class SessionManager extends EventEmitter {
       ...(ticket ? { ticket: `#${ticket.num} ${ticket.title}` } : {}),
     };
     const permission = { tool: req.tool ?? "", subject: req.subject ?? "", reasons: req.reasons ?? [], session };
-    const verdict = await judgePermission(permission, settings, savedJudgeToken(this.secrets), localJudge(this.db, this.secrets));
+    const verdict = await judgePermission(permission, settings, savedJudgeToken(this.secrets), localJudge(this.db, this.secrets), cancelled);
     // Answered by the user, dropped with its process or run, or cancelled: the verdict is stale.
     if (cancelled.aborted || !s.pending.has(req.id)) return;
     if (verdict.outcome === "allow") {
@@ -631,7 +637,7 @@ export class SessionManager extends EventEmitter {
     req.reviewer = { state: "reviewing", by: reviewerName(settings) };
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
     this.emitSummary(id, true);
-    const rv = await reviewPermission(permission, this.reviewContext(id, s, row, verdict), settings, reviewerKey);
+    const rv = await reviewPermission(permission, this.reviewContext(id, s, row, verdict), settings, reviewerKey, cancelled);
     // Answered by the user, dropped with its process or run, or cancelled: the verdict is stale.
     if (cancelled.aborted || !s.pending.has(req.id)) return;
     if (rv.outcome === "allow" || rv.outcome === "deny") {
@@ -672,13 +678,12 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Stop the judgements and reviews in flight (all, or `only` these requests): their verdicts are
-   * dropped, and a card still pending becomes an ordinary card waiting for the user.
+   * Stop the judgements and reviews in flight: their calls are hung up and their verdicts dropped,
+   * and a card still pending becomes an ordinary card waiting for the user.
    */
-  private cancelReviews(id: string, s: Live, only?: string[]) {
+  private cancelReviews(id: string, s: Live) {
     let changed = false;
     for (const [reqId, review] of [...s.reviews]) {
-      if (only && !only.includes(reqId)) continue;
       review.abort();
       s.reviews.delete(reqId);
       const req = s.pending.get(reqId);
@@ -702,6 +707,21 @@ export class SessionManager extends EventEmitter {
     s.reviews.clear();
   }
 
+  /** Rename and/or set auto-approve (PATCH /api/sessions/:id); a bad value refuses the whole update. */
+  patch(id: string, body: { title?: unknown; autoApprove?: unknown }): SessionSummary {
+    if (body.autoApprove !== undefined) autoApproveMode(body.autoApprove);
+    if (typeof body.title === "string") this.rename(id, body.title);
+    if (body.autoApprove !== undefined) this.setAutoApprove(id, body.autoApprove);
+    return this.summary(id);
+  }
+
+  /** Settings → Save (PUT /api/settings/auto-approve): store the global settings, then apply them to running sessions. */
+  async configureAutoApprove(input: Partial<AutoApproveSettings>) {
+    const saved = await configureAutoApprove(this.db, this.secrets, input);
+    this.autoApproveChanged();
+    return saved;
+  }
+
   /** Set the session's auto-approve; turning it off cancels the reviews in flight. Applies to the next permission. */
   setAutoApprove(id: string, value: unknown) {
     const mode = autoApproveMode(value);
@@ -714,10 +734,8 @@ export class SessionManager extends EventEmitter {
   /** The global switch changed: sessions that inherit it and are now off cancel their reviews in flight. */
   autoApproveChanged() {
     for (const [id, s] of this.live) {
-      try {
-        if (!this.autoApproveActive(this.row(id))) this.cancelReviews(id, s);
-        this.emitSummary(id, true);
-      } catch {}
+      if (!this.autoApproveActive(this.row(id))) this.cancelReviews(id, s);
+      this.emitSummary(id, true);
     }
   }
 
@@ -773,6 +791,8 @@ export class SessionManager extends EventEmitter {
   async stop(id: string) {
     const s = this.state(id);
     if (s.proc && !s.proc.exited) {
+      // Before the process is gone, so no verdict lands (and is recorded) while it exits.
+      this.dropReviews(s);
       s.proc.stopping = true;
       await s.proc.stop();
     }

@@ -283,6 +283,7 @@ test("aborting the run during a slow review cancels it: the card waits, and no a
   };
   const from = events.length;
   const answeredBefore = claude.answered();
+  const droppedBefore = claude.dropped();
   await mgr.abort(sessionId);
   const card = mgr.summary(sessionId).pending.find((r: any) => r.id === req.id);
   assert.equal(card.review, undefined, "the card is an ordinary waiting card");
@@ -293,6 +294,7 @@ test("aborting the run during a slow review cancels it: the card waits, and no a
   proc.write = write;
   assert.deepEqual(writes, [], "no late extension_ui_response");
   assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"));
+  assert.equal(claude.dropped(), droppedBefore + 1, "the cancelled review call was hung up on");
   await deny(sessionId, card);
 });
 

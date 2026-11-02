@@ -28,8 +28,11 @@ export function startMockReviewer(opts: { provider: "anthropic" | "openai"; mode
   replies: ReviewerReply[];
   /** Review calls answered so far (one per finished POST), for tests that wait on a late verdict. */
   answered: () => number;
+  /** Review calls the client hung up on before their answer was sent (a cancelled review). */
+  dropped: () => number;
   close: () => Promise<void>;
 }> {
+  let dropped = 0;
   const requests: { path: string; model: string; key?: string; auth?: string; xApiKey?: string; body: any }[] = [];
   const replies: ReviewerReply[] = [];
   let answered = 0;
@@ -56,7 +59,10 @@ export function startMockReviewer(opts: { provider: "anthropic" | "openai"; mode
     const reply = replies.shift() ?? (opts.defaultVerdict ? undefined : scriptFor(/"command":\s*"([^"]*)"/.exec(state)?.[1] ?? ""));
     if (reply?.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs));
     answered++;
-    if (res.destroyed) return;
+    if (res.destroyed) {
+      dropped++;
+      return;
+    }
     if (reply?.status && reply.status !== 200) return send(res, reply.status, reply.body ?? { error: { message: "mock failure" } });
     if (reply?.body !== undefined) return send(res, 200, reply.body);
     const verdict = { decision: reply?.decision ?? (opts.defaultVerdict ?? "allow"), reason: reply?.reason ?? `mock reviewer ${(opts.defaultVerdict ?? "allow") === "allow" ? "allows" : "escalates"} it` };
@@ -75,6 +81,7 @@ export function startMockReviewer(opts: { provider: "anthropic" | "openai"; mode
         requests,
         replies,
         answered: () => answered,
+        dropped: () => dropped,
         close: () =>
           new Promise<void>((r) => {
             server.closeAllConnections();

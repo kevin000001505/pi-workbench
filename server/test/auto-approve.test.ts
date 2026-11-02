@@ -618,30 +618,43 @@ test("inherit follows the global switch, also when it changes while the session 
   assert.equal(added.find((m: any) => m.role === "autoAnswer")?.answer, "allow");
 });
 
-/** Start a slow judgement, call `off` while it runs, and check the card waits and no late answer reaches pi. */
-async function offDuringReview(off: () => void) {
-  jev.replies.push({ nouls: SAFE, delayMs: 800 });
-  const req = await cardFor(sessionId, "please push");
-  assert.equal(req.judge.state, "judging");
-  const proc = mgr.live.get(sessionId).proc;
+/** Record what the server writes to pi for one request; `stop()` restores the process's write. */
+function captureWrites(id: string, reqId: string) {
+  const proc = mgr.live.get(id).proc;
   const writes: any[] = [];
   const write = proc.write.bind(proc);
   proc.write = (rec: any) => {
-    if (rec.id === req.id) writes.push(rec);
+    if (rec.id === reqId) writes.push(rec);
     return write(rec);
   };
+  return { writes, stop: () => (proc.write = write) };
+}
+
+/** Wait until the slow judge call is over (answered, or hung up on), then let the server handle it. */
+async function judgeCallOver(answeredBefore: number) {
+  await waitFor(() => jev.answered() > answeredBefore);
+  await new Promise((r) => setTimeout(r, 200));
+}
+
+/** Start a slow judgement, call `off` while it runs, and check the card waits and no late answer reaches pi. */
+async function offDuringReview(off: () => unknown) {
+  jev.replies.push({ nouls: SAFE, delayMs: 800 });
+  const req = await cardFor(sessionId, "please push");
+  assert.equal(req.judge.state, "judging");
+  const capture = captureWrites(sessionId, req.id);
   const from = events.length;
   const answeredBefore = jev.answered();
-  off();
+  const droppedBefore = jev.dropped();
+  await off();
   const card = mgr.summary(sessionId).pending.find((r: any) => r.id === req.id);
   assert.equal(card.judge, undefined, "the card is an ordinary waiting card");
   assert.equal(mgr.summary(sessionId).status, "waiting");
-  await waitFor(() => jev.answered() > answeredBefore);
-  await new Promise((r) => setTimeout(r, 200));
-  assert.deepEqual(writes, [], "no late extension_ui_response");
+  await judgeCallOver(answeredBefore);
+  capture.stop();
+  assert.deepEqual(capture.writes, [], "no late extension_ui_response");
   assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"));
+  assert.equal(jev.dropped(), droppedBefore + 1, "the cancelled judge call was hung up on");
   assert.ok(mgr.summary(sessionId).pending.some((r: any) => r.id === req.id), "the card still waits for the user");
-  proc.write = write;
   await deny(sessionId, req);
 }
 
@@ -656,14 +669,20 @@ test("turning the session off during a review cancels it: the card waits, and no
 
 test("turning auto-approve off globally during a review cancels it for a session that inherits", { skip }, async () => {
   await enable();
-  await offDuringReview(() => {
-    auto.saveAutoApproveSettings(db, { enabled: false });
-    mgr.autoApproveChanged();
-  });
+  // What Settings → Save does (PUT /api/settings/auto-approve).
+  await offDuringReview(() => mgr.configureAutoApprove({ enabled: false, judge: auto.getAutoApproveSettings(db).judge }));
+  assert.equal(auto.getAutoApproveSettings(db).enabled, false);
 });
 
-test("an unknown session auto-approve value is refused", { skip }, async () => {
+test("an unknown session auto-approve value is refused, on create and on update, before anything is saved", { skip }, async () => {
   assert.throws(() => mgr.setAutoApprove(sessionId, "maybe"), /inherit, on or off/);
+  await assert.rejects(mgr.create({ repoId: "me/demo", title: "Bad", prompt: "hi", mode: "direct", autoApprove: "maybe" }), /inherit, on or off/);
+  // What PATCH /api/sessions/:id does: the bad value refuses the whole update, title included.
+  assert.throws(() => mgr.patch(sessionId, { title: "Renamed", autoApprove: "maybe" }), /inherit, on or off/);
+  assert.equal(mgr.summary(sessionId).title, "Auto");
+  const after = mgr.patch(sessionId, { autoApprove: "off" });
+  assert.equal(after.autoApprove, "off");
+  assert.equal(mgr.patch(sessionId, { autoApprove: "inherit" }).autoApprove, "inherit");
 });
 
 // --- cancelling reviews, and concurrent permissions (issue #23) ----------------------------------
@@ -673,21 +692,16 @@ async function cutDuringJudging(cut: () => Promise<unknown>) {
   jev.replies.push({ nouls: SAFE, delayMs: 800 });
   const req = await cardFor(sessionId, "please push");
   assert.equal(req.judge.state, "judging");
-  const proc = mgr.live.get(sessionId).proc;
-  const writes: any[] = [];
-  const write = proc.write.bind(proc);
-  proc.write = (rec: any) => {
-    if (rec.id === req.id) writes.push(rec);
-    return write(rec);
-  };
+  const capture = captureWrites(sessionId, req.id);
   const from = events.length;
   const answeredBefore = jev.answered();
+  const droppedBefore = jev.dropped();
   await cut();
-  await waitFor(() => jev.answered() > answeredBefore);
-  await new Promise((r) => setTimeout(r, 200));
-  proc.write = write;
-  assert.deepEqual(writes, [], "no extension_ui_response for the request after the cut");
+  await judgeCallOver(answeredBefore);
+  capture.stop();
+  assert.deepEqual(capture.writes, [], "no extension_ui_response for the request after the cut");
   assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"), "no automatic answer after the cut");
+  assert.equal(jev.dropped(), droppedBefore + 1, "the cancelled judge call was hung up on");
   return req;
 }
 

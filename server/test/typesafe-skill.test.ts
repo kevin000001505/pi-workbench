@@ -143,11 +143,25 @@ test("a session created without the box does not list it, and cannot load it", {
 test("the skill list for the composer follows the session's choice", { skip }, async () => {
   const { listSkills } = await import("../src/skills.ts");
   const { config } = await import("../src/config.ts");
-  const withIt = mgr.list().find((x: any) => x.typesafeSkill);
-  const without = mgr.list().find((x: any) => !x.typesafeSkill);
+  const withIt = await mgr.create({ repoId: "me/demo", title: "Picker with", prompt: "", mode: "direct", typesafeSkill: true });
+  const without = await mgr.create({ repoId: "me/demo", title: "Picker without", prompt: "", mode: "direct" });
   const names = (id: string) => listSkills(config.skillsDir, undefined, mgr.extraSkillDirs(id)).map((x) => x.name);
   assert.ok(names(withIt.id).includes("typesafe-ai"));
   assert.ok(!names(without.id).includes("typesafe-ai"));
+});
+
+test("a TypeSafe session whose skill went missing starts with a warning, not silently without it", { skip }, async () => {
+  const { config } = await import("../src/config.ts");
+  const s = await mgr.create({ repoId: "me/demo", title: "Goes missing", prompt: "", mode: "direct", typesafeSkill: true });
+  await mgr.stop(s.id);
+  const dir = path.join(config.optionalSkillsDir, "typesafe-ai");
+  fs.renameSync(dir, `${dir}.off`);
+  try {
+    await mgr.start(s.id);
+    assert.match(mgr.summary(s.id).attention ?? "", /TypeSafe skill is not installed/);
+  } finally {
+    fs.renameSync(`${dir}.off`, dir);
+  }
 });
 
 test("the TypeSafe box is refused when the skill is not installed", { skip }, async () => {

@@ -66,8 +66,10 @@ export function scanSkills(root: string, source: Skill["source"]): Skill[] {
   return skills;
 }
 
-/** The skills a session in `cwd` can use: the repo's own first (pi keeps the first on a name clash). */
-/** The global skills, the repo's own (with `cwd`), and `extraDirs`: single skill dirs a session loads. */
+/**
+ * The skills a session in `cwd` can use: the repo's own first (pi keeps the first on a name clash),
+ * then the global ones, then `extraDirs` (single skill dirs only this session loads).
+ */
 export function listSkills(globalDir: string, cwd?: string, extraDirs: string[] = []): Skill[] {
   const repo = cwd
     ? [...scanSkills(path.join(cwd, ".agents", "skills"), "repo"), ...scanSkills(path.join(cwd, ".pi", "skills"), "repo")]
