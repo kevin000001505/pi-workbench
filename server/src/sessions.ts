@@ -116,8 +116,9 @@ export type SessionSummary = {
   /** The session's own auto-approve setting, and whether auto-approve is in effect for it now. */
   autoApprove: AutoApproveMode;
   autoApproveActive: boolean;
-  /** Whether the session loads the TypeSafe skill. */
+  /** Whether the session loads the TypeSafe skill, and whether that skill is missing from this install. */
   typesafeSkill: boolean;
+  typesafeSkillMissing: boolean;
   tickets: Ticket[];
   /** The conversation on screen; ticket runs each have their own. */
   activeRun: string;
@@ -294,6 +295,7 @@ export class SessionManager extends EventEmitter {
       autoApprove: autoApproveMode(row.auto_approve),
       autoApproveActive: this.autoApproveActive(row),
       typesafeSkill: row.typesafe_skill === 1,
+      typesafeSkillMissing: this.typesafeSkillMissing(row),
       tickets,
       activeRun: this.runOf(row),
       runs: [
@@ -421,9 +423,10 @@ export class SessionManager extends EventEmitter {
     const m = getModelSettings(this.db);
     fs.mkdirSync(config.piSessionsDir, { recursive: true });
     const extraSkills = this.extraSkillDirs(id);
-    // pi starts without a --skill dir it cannot find, and says nothing: say it here.
-    if (extraSkills.some((dir) => !fs.existsSync(path.join(dir, "SKILL.md")))) {
-      this.flag(id, `The TypeSafe skill is not installed (expected at ${typesafeSkillDir()}); this session runs without it.`);
+    // pi starts without a --skill dir it cannot find, and says nothing: say it here (the summary shows it too).
+    if (this.typesafeSkillMissing(row)) {
+      const message = `The TypeSafe skill is not installed (expected at ${typesafeSkillDir()}); this session runs without it.`;
+      this.emit("event", id, { type: "wb_notify", message, level: "warning" });
     }
     const env = await this.processEnv(row.repo_id);
     // The extension's Skill tool looks there too, so only these sessions can load them.
@@ -476,6 +479,8 @@ export class SessionManager extends EventEmitter {
     });
     if (!s.loaded) await this.load(id, s);
   }
+
+  private typesafeSkillMissing = (row: SessionRow) => row.typesafe_skill === 1 && !fs.existsSync(path.join(typesafeSkillDir(), "SKILL.md"));
 
   /** Skill dirs only this session loads, next to the global ones: the TypeSafe skill, when picked. */
   extraSkillDirs(id: string): string[] {
@@ -716,7 +721,7 @@ export class SessionManager extends EventEmitter {
   }
 
   /** Settings → Save (PUT /api/settings/auto-approve): store the global settings, then apply them to running sessions. */
-  async configureAutoApprove(input: Partial<AutoApproveSettings>) {
+  async applyAutoApproveSettings(input: Partial<AutoApproveSettings>) {
     const saved = await configureAutoApprove(this.db, this.secrets, input);
     this.autoApproveChanged();
     return saved;

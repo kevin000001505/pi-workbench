@@ -79,8 +79,9 @@ export type SessionSummary = {
   /** The session's own auto-approve setting, and whether auto-approve is in effect for it now. */
   autoApprove: AutoApproveMode;
   autoApproveActive: boolean;
-  /** Whether the session loads the TypeSafe skill. */
+  /** Whether the session loads the TypeSafe skill, and whether that skill is missing from this install. */
   typesafeSkill: boolean;
+  typesafeSkillMissing: boolean;
   tickets: Ticket[];
   activeRun: string;
   runs: { id: string; label: string }[];

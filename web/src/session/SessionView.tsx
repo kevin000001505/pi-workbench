@@ -151,8 +151,11 @@ export function SessionView({ id }: { id: string }) {
             )}
             <AutoApproveControl s={s} />
             {s.typesafeSkill && (
-              <span className="small muted" title="This session loads the TypeSafe skill (typesafe-ai)">
-                TypeSafe skill
+              <span
+                className={`small ${s.typesafeSkillMissing ? "danger" : "muted"}`}
+                title={s.typesafeSkillMissing ? "The TypeSafe skill is not installed; this session runs without it" : "This session loads the TypeSafe skill (typesafe-ai)"}
+              >
+                {s.typesafeSkillMissing ? "TypeSafe skill missing" : "TypeSafe skill"}
               </span>
             )}
             {s.contextTokens > 0 && (

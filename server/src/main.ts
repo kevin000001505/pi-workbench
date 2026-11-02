@@ -231,7 +231,7 @@ const router = new Router()
   // --- settings & secrets ---------------------------------------------------------------
   .on("GET", "/api/settings", () => ({ model: getModelSettings(db), approval: getApprovalSettings(db), autoApprove: autoApproveView(db, secrets) }))
   .on("PUT", "/api/settings/auto-approve", async ({ body }) => {
-    await sessions.configureAutoApprove(body);
+    await sessions.applyAutoApproveSettings(body);
     return autoApproveView(db, secrets);
   })
   .on("PUT", "/api/settings/auto-approve/keys", ({ body }) => {

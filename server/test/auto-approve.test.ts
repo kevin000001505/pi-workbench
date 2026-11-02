@@ -14,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 import { RISKY, SAFE, startMockJudge } from "./mock-judge.ts";
+import { captureWrites } from "./capture.ts";
 import { startMockLlm } from "./mock-llm.ts";
 
 const piBin = process.env.PI_BIN ?? "pi";
@@ -361,21 +362,15 @@ test("the user's answer during judging wins: pi gets exactly one answer and no l
   const req = await cardFor(sessionId, "please push");
   assert.equal(req.judge.state, "judging");
   // Watch what reaches pi for this request.
-  const proc = mgr.live.get(sessionId).proc;
-  const writes: any[] = [];
-  const write = proc.write.bind(proc);
-  proc.write = (rec: any) => {
-    if (rec.id === req.id) writes.push(rec);
-    return write(rec);
-  };
+  const capture = captureWrites(mgr.live.get(sessionId).proc, req.id);
   const from = events.length;
   const answeredBefore = jev.answered();
   await deny(sessionId, req);
   // Wait for the judge to deliver its late verdict, then let the server handle it.
   await waitFor(() => jev.answered() > answeredBefore);
   await new Promise((r) => setTimeout(r, 200));
-  proc.write = write;
-  assert.deepEqual(writes.map((w) => w.value), ["Deny"]);
+  capture.stop();
+  assert.deepEqual(capture.writes.map((w) => w.value), ["Deny"]);
   assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"), "no automatic answer after the user's");
 });
 
@@ -618,18 +613,6 @@ test("inherit follows the global switch, also when it changes while the session 
   assert.equal(added.find((m: any) => m.role === "autoAnswer")?.answer, "allow");
 });
 
-/** Record what the server writes to pi for one request; `stop()` restores the process's write. */
-function captureWrites(id: string, reqId: string) {
-  const proc = mgr.live.get(id).proc;
-  const writes: any[] = [];
-  const write = proc.write.bind(proc);
-  proc.write = (rec: any) => {
-    if (rec.id === reqId) writes.push(rec);
-    return write(rec);
-  };
-  return { writes, stop: () => (proc.write = write) };
-}
-
 /** Wait until the slow judge call is over (answered, or hung up on), then let the server handle it. */
 async function judgeCallOver(answeredBefore: number) {
   await waitFor(() => jev.answered() > answeredBefore);
@@ -641,7 +624,7 @@ async function offDuringReview(off: () => unknown) {
   jev.replies.push({ nouls: SAFE, delayMs: 800 });
   const req = await cardFor(sessionId, "please push");
   assert.equal(req.judge.state, "judging");
-  const capture = captureWrites(sessionId, req.id);
+  const capture = captureWrites(mgr.live.get(sessionId).proc, req.id);
   const from = events.length;
   const answeredBefore = jev.answered();
   const droppedBefore = jev.dropped();
@@ -670,7 +653,7 @@ test("turning the session off during a review cancels it: the card waits, and no
 test("turning auto-approve off globally during a review cancels it for a session that inherits", { skip }, async () => {
   await enable();
   // What Settings → Save does (PUT /api/settings/auto-approve).
-  await offDuringReview(() => mgr.configureAutoApprove({ enabled: false, judge: auto.getAutoApproveSettings(db).judge }));
+  await offDuringReview(() => mgr.applyAutoApproveSettings({ enabled: false, judge: auto.getAutoApproveSettings(db).judge }));
   assert.equal(auto.getAutoApproveSettings(db).enabled, false);
 });
 
@@ -692,7 +675,7 @@ async function cutDuringJudging(cut: () => Promise<unknown>) {
   jev.replies.push({ nouls: SAFE, delayMs: 800 });
   const req = await cardFor(sessionId, "please push");
   assert.equal(req.judge.state, "judging");
-  const capture = captureWrites(sessionId, req.id);
+  const capture = captureWrites(mgr.live.get(sessionId).proc, req.id);
   const from = events.length;
   const answeredBefore = jev.answered();
   const droppedBefore = jev.dropped();
@@ -738,6 +721,50 @@ test("a run switch during a slow judgement cancels it: no answer is written afte
   // The same conversation, reopened: what a switch to another run does to the old one.
   await cutDuringJudging(() => mgr.switchRun(sessionId, sessionId, false));
   assert.equal(mgr.summary(sessionId).pending.length, 0);
+  await recover();
+});
+
+test("cancelling an OpenAI-compatible judgement hangs up its call too", { skip }, async () => {
+  await enable({ baseUrl: chat.url, model: "mock-judge" });
+  chat.replies.push({ text: "SAFE", delayMs: 800 });
+  const req = await cardFor(sessionId, "please push");
+  assert.equal(req.judge.state, "judging");
+  const capture = captureWrites(mgr.live.get(sessionId).proc, req.id);
+  const answeredBefore = chat.answered();
+  const droppedBefore = chat.dropped();
+  mgr.setAutoApprove(sessionId, "off");
+  try {
+    await waitFor(() => chat.answered() > answeredBefore);
+    await new Promise((r) => setTimeout(r, 200));
+    capture.stop();
+    assert.deepEqual(capture.writes, []);
+    assert.equal(chat.dropped(), droppedBefore + 1, "the cancelled chat call was hung up on");
+  } finally {
+    mgr.setAutoApprove(sessionId, "inherit");
+  }
+  await deny(sessionId, req);
+});
+
+test("a verdict landing while the session stops is dropped: no answer, no audit line", { skip }, async () => {
+  await enable();
+  jev.replies.push({ nouls: SAFE, delayMs: 300 });
+  const req = await cardFor(sessionId, "please push");
+  assert.equal(req.judge.state, "judging");
+  // A process slow to exit: the verdict lands while it is still stopping.
+  const proc = mgr.live.get(sessionId).proc;
+  const capture = captureWrites(proc, req.id);
+  const stopProc = proc.stop.bind(proc);
+  proc.stop = async (...args: any[]) => {
+    await new Promise((r) => setTimeout(r, 1000));
+    return stopProc(...args);
+  };
+  const from = events.length;
+  await mgr.stop(sessionId);
+  capture.stop();
+  assert.deepEqual(capture.writes, []);
+  assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"), "no automatic answer recorded");
+  const stored = db.prepare("SELECT COUNT(*) AS n FROM auto_decisions WHERE request_id = ?").get(req.id) as any;
+  assert.equal(stored.n, 0);
   await recover();
 });
 

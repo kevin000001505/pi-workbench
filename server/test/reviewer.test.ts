@@ -15,6 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 import { RISKY, startMockJudge } from "./mock-judge.ts";
+import { captureWrites } from "./capture.ts";
 import { startMockLlm } from "./mock-llm.ts";
 import { startMockReviewer } from "./mock-reviewer.ts";
 
@@ -252,20 +253,14 @@ test("the user's Deny during a review wins: one answer, no late deny reaches pi"
   jev.replies.push({ nouls: RISKY, delayMs: 800 });
   claude.replies.push({ decision: "deny", reason: "late", delayMs: 1200 });
   const req = await cardFor(sessionId, "please push", (r) => r.review?.state === "reviewing");
-  const proc = mgr.live.get(sessionId).proc;
-  const writes: any[] = [];
-  const write = proc.write.bind(proc);
-  proc.write = (rec: any) => {
-    if (rec.id === req.id) writes.push(rec);
-    return write(rec);
-  };
+  const capture = captureWrites(mgr.live.get(sessionId).proc, req.id);
   const from = events.length;
   const answeredBefore = claude.answered();
   await deny(sessionId, req);
   await waitFor(() => claude.answered() > answeredBefore);
   await new Promise((r) => setTimeout(r, 200));
-  proc.write = write;
-  assert.deepEqual(writes.map((w) => w.value), ["Deny"]);
+  capture.stop();
+  assert.deepEqual(capture.writes.map((w) => w.value), ["Deny"]);
   assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"), "no automatic answer after the user's");
 });
 
@@ -274,13 +269,7 @@ test("aborting the run during a slow review cancels it: the card waits, and no a
   jev.replies.push({ nouls: RISKY });
   claude.replies.push({ decision: "allow", reason: "late", delayMs: 1200 });
   const req = await cardFor(sessionId, "please push", (r) => r.review?.state === "reviewing");
-  const proc = mgr.live.get(sessionId).proc;
-  const writes: any[] = [];
-  const write = proc.write.bind(proc);
-  proc.write = (rec: any) => {
-    if (rec.id === req.id) writes.push(rec);
-    return write(rec);
-  };
+  const capture = captureWrites(mgr.live.get(sessionId).proc, req.id);
   const from = events.length;
   const answeredBefore = claude.answered();
   const droppedBefore = claude.dropped();
@@ -291,8 +280,8 @@ test("aborting the run during a slow review cancels it: the card waits, and no a
   assert.equal(mgr.summary(sessionId).status, "waiting");
   await waitFor(() => claude.answered() > answeredBefore);
   await new Promise((r) => setTimeout(r, 200));
-  proc.write = write;
-  assert.deepEqual(writes, [], "no late extension_ui_response");
+  capture.stop();
+  assert.deepEqual(capture.writes, [], "no late extension_ui_response");
   assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"));
   assert.equal(claude.dropped(), droppedBefore + 1, "the cancelled review call was hung up on");
   await deny(sessionId, card);

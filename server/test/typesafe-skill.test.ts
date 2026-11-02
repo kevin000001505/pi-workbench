@@ -150,18 +150,27 @@ test("the skill list for the composer follows the session's choice", { skip }, a
   assert.ok(!names(without.id).includes("typesafe-ai"));
 });
 
-test("a TypeSafe session whose skill went missing starts with a warning, not silently without it", { skip }, async () => {
+test("a TypeSafe session whose skill went missing says so when it starts, without touching the pipeline's attention", { skip }, async () => {
   const { config } = await import("../src/config.ts");
   const s = await mgr.create({ repoId: "me/demo", title: "Goes missing", prompt: "", mode: "direct", typesafeSkill: true });
+  assert.equal(mgr.summary(s.id).typesafeSkillMissing, false);
   await mgr.stop(s.id);
   const dir = path.join(config.optionalSkillsDir, "typesafe-ai");
   fs.renameSync(dir, `${dir}.off`);
+  const notes: any[] = [];
+  const onEvent = (id: string, ev: any) => id === s.id && ev.type === "wb_notify" && notes.push(ev);
+  mgr.on("event", onEvent);
   try {
-    await mgr.start(s.id);
-    assert.match(mgr.summary(s.id).attention ?? "", /TypeSafe skill is not installed/);
+    // Resumed by a message, the common path: the state stays on the summary after the send.
+    await mgr.send(s.id, "hello there");
+    assert.equal(mgr.summary(s.id).typesafeSkillMissing, true);
+    assert.equal(mgr.summary(s.id).attention, null);
+    assert.ok(notes.some((n) => /TypeSafe skill is not installed/.test(n.message) && n.level === "warning"));
   } finally {
+    mgr.off("event", onEvent);
     fs.renameSync(`${dir}.off`, dir);
   }
+  assert.equal(mgr.summary(s.id).typesafeSkillMissing, false);
 });
 
 test("the TypeSafe box is refused when the skill is not installed", { skip }, async () => {
