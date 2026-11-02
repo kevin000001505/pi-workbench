@@ -11,6 +11,7 @@ const STEPS: { phase: Phase; label: string }[] = [
   { phase: "tickets", label: "Tickets" },
   { phase: "implement", label: "Implement" },
   { phase: "review", label: "Review" },
+  { phase: "retro", label: "Retro" },
   { phase: "done", label: "Done" },
 ];
 
@@ -31,6 +32,8 @@ export const phaseLabel = (s: SessionSummary) => {
       return running ? `Ticket ${running.num} · ${done}/${s.tickets.length} done` : `${done}/${s.tickets.length} tickets done`;
     case "review":
       return `Reviewing all ${s.tickets.length} tickets`;
+    case "retro":
+      return "Retro of the rescued tickets";
     case "done":
       return s.tickets.length ? `All ${s.tickets.length} tickets done` : "Pipeline stopped";
     default:

@@ -305,6 +305,17 @@ export default function workbench(pi: ExtensionAPI) {
       return { content: [{ type: "text", text: `Diagnosis recorded (${params.status}). Stop here.` }], details: {} };
     },
   });
+
+  pi.registerTool({
+    name: "finish_retro",
+    label: "Finish retro",
+    description: "pi-workbench pipeline (retro run): report the proposed changes. Propose only; the retro edits nothing.",
+    parameters: Type.Object({ report: Type.String({ description: "The proposals: each names the exact file or setting it changes, and why" }) }),
+    async execute(_id, params) {
+      if (!params.report.trim()) return { content: [{ type: "text", text: "report is empty" }], details: {}, isError: true };
+      return { content: [{ type: "text", text: "Retro recorded. Stop here." }], details: {} };
+    },
+  });
 }
 
 /** Same rules as the server's validateDiagnosis, so the model hears about mistakes and retries. */

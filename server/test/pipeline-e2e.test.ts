@@ -438,6 +438,7 @@ test("the stop rule watches only implement-phase runs: setup and review runs pas
     // The review run made five calls (a commit, three checks, finish_review) under the same limit.
     const review = mgr.summary(s.id).runs.find((r: any) => r.label === "Review");
     assert.equal(toolCalls(s.id, review.id), 4);
+    assert.ok(!mgr.summary(s.id).runs.some((r: any) => r.label === "retro"), "no rescues, no retro run");
     assert.equal(toolCalls(s.id, review.id, "finish_review"), 1);
   } finally {
     savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 });
@@ -494,7 +495,7 @@ test("a looping ticket gets a rescue run, a diagnosed result starts a fix run, t
   }, 90_000);
   assert.equal(done.attention, null);
   assert.deepEqual(done.tickets.map((t: any) => `${t.num}:${t.status}:${t.rescueState}`), ["1:done:rescued", "2:done:null"]);
-  assert.deepEqual(done.runs.map((r: any) => r.label), ["Plan", "#1 Ticket 1", "#1 rescue", "#1 fix", "#2 Ticket 2", "Review"]);
+  assert.deepEqual(done.runs.map((r: any) => r.label), ["Plan", "#1 Ticket 1", "#1 rescue", "#1 fix", "#2 Ticket 2", "Review", "retro"]);
 
   // The rescue went to the Reviewer model through the proxy, with the Reviewer key in the header.
   const rescue = mock.requests.slice(before).find((r) => r.model === "mock-rescue");
@@ -593,4 +594,79 @@ test("a fourth rescue in one spec is refused and flags", { skip: !hasPi && "pi C
   const attention = await waitFor(() => mgr.summary(s.id).attention, 120_000);
   assert.match(attention, /Ticket #4 hit the stop rule[\s\S]*The spec already had 3 rescues/);
   assert.deepEqual(mgr.summary(s.id).tickets.map((t: any) => t.rescueState), ["rescued", "rescued", "rescued", null]);
+});
+
+// --- the retro run (issue #41) -----------------------------------------------------------------
+
+/** One rescued ticket, then the review; resolves when the pipeline is done. */
+async function rescuedSpec(body: string) {
+  const { savePipelineSettings } = await import("../src/settings.ts");
+  savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 });
+  rescueOn();
+  const s = await solveOne(body);
+  const phases: string[] = [];
+  const retroOn: string[] = [];
+  const onSummary = (x: any) => {
+    if (x.id !== s.id) return;
+    if (phases.at(-1) !== x.phase) phases.push(x.phase);
+    if (x.phase === "retro") retroOn.push(x.runs.find((r: any) => r.id === x.activeRun)?.label);
+  };
+  mgr.on("summary", onSummary);
+  try {
+    const done = await waitFor(() => (mgr.summary(s.id).phase === "done" ? mgr.summary(s.id) : undefined), 90_000);
+    return { s, done, phases, retroOn };
+  } finally {
+    mgr.off("summary", onSummary);
+  }
+}
+
+test("a spec with a rescued ticket gets a retro run after the review: facts and pointers in, a report out, then done on the plan conversation", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const before = mock.requests.length;
+  const { s, done, phases, retroOn } = await rescuedSpec("Greet. LOOPME");
+  assert.deepEqual(done.runs.map((r: any) => r.label).slice(-2), ["Review", "retro"]);
+  assert.deepEqual(phases.filter((p) => ["review", "retro", "done"].includes(p)), ["review", "retro", "done"]);
+  assert.equal(done.activeRun, s.id, "back on the plan conversation");
+  // The run switched to the retro before the phase was announced, and back to the plan before done.
+  assert.equal(retroOn[0], "retro");
+  assert.ok(!retroOn.includes("Review"), "no summary shows the retro phase on the review run");
+  assert.equal(done.attention, null);
+
+  // The retro ran on the Reviewer model through the proxy, with the server's facts and the pointers.
+  const retro = mock.requests.slice(before).find((r) => r.model === "mock-rescue" && JSON.stringify(r.messages ?? []).includes('<skill name=\\"retro\\"'));
+  assert.ok(retro, "the retro run called the Reviewer model");
+  const text = JSON.stringify(retro.messages);
+  const t = done.tickets[0];
+  for (const run of [t.runId, t.rescueRunId, t.fixRunId]) assert.match(text, new RegExp(`_${run}\\.jsonl`), `the session file of ${run}`);
+  assert.match(text, /Stop rule: the repeat limit/);
+  assert.match(text, /Diagnosis: .*diagnosed/);
+  assert.match(text, /Fix result: rescued/);
+  assert.match(text, /server\/src\/pipeline.ts/);
+  assert.match(text, /Settings → Pipeline\), now: \{\\"timeLimitMinutes\\":30/);
+  assert.match(text, /Settings → Model\), now: /);
+  assert.match(text, /llama.cpp sampling settings[^.]*outside this repository/);
+  assert.match(text, /Propose only/);
+  assert.match(text, /do not commit/i);
+
+  // The report: an info notification before done, and in the retro run's own transcript.
+  const n = events.filter((e) => e.id === s.id && e.ev.type === "wb_notify");
+  const report = n.findIndex((e) => /Retro report[\s\S]*Raise the repeat limit to 4/.test(e.ev.message));
+  assert.ok(report >= 0, "the report notifies");
+  assert.equal(n[report].ev.level, "info");
+  assert.ok(n.findIndex((e) => /All tickets are done and reviewed/.test(e.ev.message)) > report, "done comes after the retro");
+  const retroRun = done.runs.find((r: any) => r.label === "retro");
+  assert.ok(mgr.runTranscript(s.id, retroRun.id).messages.some((m: any) => m.role === "toolResult" && m.toolName === "finish_retro"));
+});
+
+for (const [word, says] of [["RETRO_SILENT", /retro run stopped without finish_retro/], ["RETRO_LOOP", /retro run hit the stop rule: the repeat limit/]] as const) {
+  test(`a retro run that ${word === "RETRO_LOOP" ? "trips the stop rule" : "misses its report"} notifies the user and the pipeline still finishes`, { skip: !hasPi && "pi CLI not found" }, async () => {
+    const { s, done } = await rescuedSpec(`Greet. LOOPME ${word}`);
+    assert.equal(done.attention, null, "the PR can be created");
+    assert.ok(events.some((e) => e.id === s.id && e.ev.type === "wb_notify" && says.test(e.ev.message)));
+    assert.equal(done.activeRun, s.id);
+  });
+}
+
+test("a retro run that changes the worktree flags the session", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { done } = await rescuedSpec("Greet. LOOPME RETRO_DIRTY");
+  assert.match(done.attention ?? (await flagged(done.id)), /retro run changed the worktree/);
 });

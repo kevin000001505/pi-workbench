@@ -10,6 +10,8 @@
  *   A ticket run the stop rule stops gets a rescue run (/skill:diagnosing-bugs on the Reviewer's
  *   model; ends with finish_diagnosis), and a diagnosed result a fix run (/skill:tdd plus the diagnosis).
  * - review: one fresh /skill:code-review run over the whole branch that fixes what it finds; ends with finish_review.
+ * - retro: when a ticket had a rescue, one fresh /skill:retro run on the Reviewer's model that only
+ *   proposes changes; ends with finish_retro. It never blocks the PR.
  */
 
 export type Phase = "setup" | "grill" | "spec" | "tickets" | "implement" | "review" | "retro" | "done" | "direct";
@@ -60,7 +62,7 @@ export function ticketsFromSubIssues(subs: SubIssueSeed[]): TicketInput[] {
   }));
 }
 
-export const PIPELINE_TOOLS = ["save_grill_summary", "save_spec", "record_tickets", "finish_ticket", "finish_review", "finish_diagnosis"] as const;
+export const PIPELINE_TOOLS = ["save_grill_summary", "save_spec", "record_tickets", "finish_ticket", "finish_review", "finish_diagnosis", "finish_retro"] as const;
 
 /** Specs longer than this go to ticket runs as a pointer only (implement-spec: "communicate through context pointers"). */
 const SPEC_INLINE_LIMIT = 40_000;
@@ -264,4 +266,47 @@ Command: ${d.command}
 Causal chain:
 ${(d.chain ?? []).map((c) => `- ${c}`).join("\n")}
 ${d.harness ? `\nHarness files:\n${d.harness}\n` : ""}${d.note ? `\nNote: ${d.note}\n` : ""}`;
+}
+
+/** One rescued ticket, as the retro run sees it: the server's facts and the three runs' session files. */
+export type RetroTicket = {
+  ticket: Ticket;
+  stopReason: string | null;
+  diagnosis: string | null;
+  fixResult: string;
+  sessionFiles: { stuck: string | null; rescue: string | null; fix: string | null };
+};
+
+/** Where the retro may point its proposals: the settings it can name, with their values now. */
+export type RetroPointers = { pipeline: Record<string, unknown>; model: Record<string, unknown> };
+
+export function retroPrompt(rescued: RetroTicket[], p: RetroPointers) {
+  const tickets = rescued
+    .map((r) => {
+      const t = r.ticket;
+      return `### Ticket #${t.num}: ${t.title}${t.trackerRef ? ` (${t.trackerRef})` : ""}
+${t.body}
+
+- Stop rule: ${r.stopReason ?? "(not recorded)"}
+- Diagnosis: ${r.diagnosis ?? "(none)"}
+- Fix result: ${r.fixResult}
+- Session files: stuck run ${r.sessionFiles.stuck ?? "(not found)"}; rescue run ${r.sessionFiles.rescue ?? "(not found)"}; fix run ${r.sessionFiles.fix ?? "(none)"}`;
+    })
+    .join("\n\n");
+  return `/skill:retro Review the ${rescued.length} rescued ticket${rescued.length === 1 ? "" : "s"} of this spec: why the local model got stuck, and what would stop it next time.
+
+## Rescued tickets
+${tickets}
+
+## What a proposal can change
+- This repository: its code, tests, docs, and agent skills.
+- The pi-workbench pipeline prompts: server/src/pipeline.ts in the pi-workbench repository (grill, spec, tickets, implement, rescue, fix, review).
+- The pipeline stop-rule settings (Settings → Pipeline), now: ${JSON.stringify(p.pipeline)}
+- The local model settings (Settings → Model), now: ${JSON.stringify(p.model)}
+- The llama.cpp sampling settings (temperature, top-p, repeat penalty, and so on): these are outside this repository and outside the workbench, on the llama.cpp server's command line.
+
+[pi-workbench pipeline: retro run]
+The user is away: do not use ask_user. Propose only: name the exact file or setting each change touches, and why.
+Do not edit any file, and do not commit. The server checks that the worktree is unchanged.
+Then call finish_retro with the report.`;
 }

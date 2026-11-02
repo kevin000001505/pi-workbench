@@ -23,6 +23,7 @@ import {
   implementPrompt,
   RESCUES_PER_SPEC,
   rescuePrompt,
+  retroPrompt,
   nextTicket,
   type Phase,
   PIPELINE_TOOLS,
@@ -153,8 +154,12 @@ type Live = {
   lastSettleAborted: boolean;
   /** finish_diagnosis's report for the current rescue run, applied when the run settles. */
   diagnosis?: Diagnosis;
-  /** The worktree's HEAD and status when the rescue run started; it must leave them as found. */
-  rescueBase?: { runId: string; worktree: string };
+  /** The worktree's HEAD and status when a rescue or retro run started; it must leave them as found. */
+  runBase?: { runId: string; worktree: string };
+  /** finish_retro's report for the retro run, applied when the run settles. */
+  retroReport?: string;
+  /** The review's note, kept for the done message while the retro runs. */
+  reviewNote?: string | null;
   /** The stop rule watching the live implement-phase run, and its clock. */
   watch?: { rule: StopRule; timer: NodeJS.Timeout };
   /** The missing-TypeSafe-skill toast went out; the summary keeps showing the state after it. */
@@ -337,6 +342,7 @@ export class SessionManager extends EventEmitter {
           ...(t.fixRunId ? [{ id: t.fixRunId, label: `#${t.num} fix` }] : []),
         ]),
         ...(row.review_run ? [{ id: row.review_run, label: "Review" }] : []),
+        ...(row.retro_run ? [{ id: row.retro_run, label: "retro" }] : []),
       ],
     };
   }
@@ -516,7 +522,7 @@ export class SessionManager extends EventEmitter {
     }
     const ticket = this.tickets(id).find((t) => [t.runId, t.rescueRunId, t.fixRunId].includes(runId));
     const kind = ticket?.rescueRunId === runId ? " rescue" : ticket?.fixRunId === runId ? " fix" : "";
-    const label = ticket ? ` · #${ticket.num}${kind}` : runId === row.review_run ? " · review" : "";
+    const label = ticket ? ` · #${ticket.num}${kind}` : runId === row.review_run ? " · review" : runId === row.retro_run ? " · retro" : "";
     s.error = null;
     s.stderr = [];
     const proc = new RpcProcess(
@@ -650,6 +656,8 @@ export class SessionManager extends EventEmitter {
       s.finished = { status: args.status, note: String(args.note ?? "").trim() };
     } else if (name === "finish_diagnosis" && row.phase === "implement") {
       s.diagnosis = validateDiagnosis(args);
+    } else if (name === "finish_retro" && row.phase === "retro" && typeof args.report === "string" && args.report.trim()) {
+      s.retroReport = args.report.trim();
     } else if (name === "finish_review" && row.phase === "review") {
       s.finished = { status: "done", note: String(args.note ?? "").trim() };
     }
@@ -939,6 +947,8 @@ export class SessionManager extends EventEmitter {
       await this.afterTicketRun(id, s);
     } else if (row.phase === "review" && row.review_run === this.runOf(row)) {
       await this.afterReviewRun(id, s);
+    } else if (row.phase === "retro" && row.retro_run === this.runOf(row)) {
+      await this.afterRetroRun(id, s);
     }
     this.emitSummary(id, true);
   }
@@ -1011,7 +1021,7 @@ export class SessionManager extends EventEmitter {
     const runId = `${id}-t${ticket.num}-rescue-${Date.now().toString(36)}`;
     this.updateTicket(id, ticket.num, { rescue_run_id: runId, rescue_state: "diagnosing", note: `Stopped by ${why}; a rescue run diagnoses it.` });
     await this.switchRun(id, runId, true);
-    s.rescueBase = { runId, worktree: await worktreeState(row.worktree) };
+    s.runBase = { runId, worktree: await worktreeState(row.worktree) };
     this.watch(id);
     await this.send(id, prompt);
   }
@@ -1023,8 +1033,8 @@ export class SessionManager extends EventEmitter {
     s.diagnosis = undefined;
     const stopped = s.watch?.rule.reason;
     this.unwatch(s);
-    const base = s.rescueBase?.runId === ticket.rescueRunId ? s.rescueBase.worktree : undefined;
-    s.rescueBase = undefined;
+    const base = s.runBase?.runId === ticket.rescueRunId ? s.runBase.worktree : undefined;
+    s.runBase = undefined;
     if (stopped) return this.rescueFailed(id, ticket, `Ticket #${ticket.num}'s rescue run hit the stop rule: ${describeStopReason(stopped)}`);
     if (base !== undefined && (await worktreeState(row.worktree)) !== base) {
       return this.rescueFailed(id, ticket, `Ticket #${ticket.num}'s rescue run changed the worktree; it must leave it as found. Check the changes`);
@@ -1051,9 +1061,79 @@ export class SessionManager extends EventEmitter {
   private async afterReviewRun(id: string, s: Live) {
     const report = s.finished;
     s.finished = undefined;
-    if (report) await this.finishPipeline(id, report.note);
+    if (report && this.retroDue(id)) await this.startRetro(id, report.note);
+    else if (report) await this.finishPipeline(id, report.note);
     else if (s.lastSettleAborted) this.flag(id, "The review was stopped. Reply to continue it, retry it, or mark it done.");
     else this.flag(id, "The review stopped without finishing. Reply to the agent, retry it, or mark it done.");
+  }
+
+  /** A retro runs when a ticket had a rescue and the Reviewer (the retro's model) is still on. */
+  private retroDue(id: string) {
+    return !!this.rescueProxy && !!getAutoApproveSettings(this.db).reviewer.model && this.tickets(id).some((t) => t.rescueRunId);
+  }
+
+  /** The end-of-spec retro: a fresh run on the Reviewer's model over the rescued tickets; it only proposes. */
+  private async startRetro(id: string, reviewNote: string | null) {
+    const runId = `${id}-retro-${Date.now().toString(36)}`;
+    this.update(id, { retro_run: runId, attention: null });
+    // Switch runs before announcing the phase that implies the switch.
+    await this.switchRun(id, runId, true);
+    this.update(id, { phase: "retro" });
+    this.emitSummary(id, true);
+    const s = this.state(id);
+    s.reviewNote = reviewNote;
+    const row = this.row(id);
+    const file = (run: string | null) => (run ? findSessionFile(config.piSessionsDir, run) ?? null : null);
+    const rows = new Map((this.db.prepare("SELECT num, stop_reason, diagnosis FROM tickets WHERE session_id = ?").all(id) as TicketRow[]).map((r) => [r.num, r]));
+    const rescued = this.tickets(id)
+      .filter((t) => t.rescueRunId)
+      .map((t) => {
+        const r = rows.get(t.num)!;
+        const stop = r.stop_reason ? describeStopReason(JSON.parse(r.stop_reason)) : null;
+        return {
+          ticket: t,
+          stopReason: stop,
+          diagnosis: r.diagnosis,
+          fixResult: `${t.rescueState ?? "unknown"}${t.note ? `: ${t.note}` : ""}`,
+          sessionFiles: { stuck: file(t.runId), rescue: file(t.rescueRunId), fix: file(t.fixRunId) },
+        };
+      });
+    const m = getModelSettings(this.db);
+    const pointers = { pipeline: getPipelineSettings(this.db), model: { baseUrl: m.baseUrl, modelId: m.modelId, contextWindow: m.contextWindow, maxTokens: m.maxTokens } };
+    s.runBase = { runId, worktree: await worktreeState(row.worktree) };
+    this.watch(id);
+    await this.send(id, retroPrompt(rescued, pointers));
+  }
+
+  /**
+   * The retro run settled: notify its report, or why there is none, then finish the pipeline as
+   * usual. The retro never blocks the PR; a retro that changed the worktree flags after done.
+   */
+  private async afterRetroRun(id: string, s: Live) {
+    const row = this.row(id);
+    const report = s.retroReport;
+    s.retroReport = undefined;
+    const stopped = s.watch?.rule.reason;
+    this.unwatch(s);
+    const base = s.runBase?.runId === row.retro_run ? s.runBase.worktree : undefined;
+    s.runBase = undefined;
+    const reviewNote = s.reviewNote ?? null;
+    s.reviewNote = undefined;
+    let changed = false;
+    try {
+      changed = base !== undefined && (await worktreeState(row.worktree)) !== base;
+      if (stopped) this.notify(id, `The retro run hit the stop rule: ${describeStopReason(stopped)}. The pipeline finishes without its report.`, "warning");
+      else if (!report) this.notify(id, "The retro run stopped without finish_retro. The pipeline finishes without its report.", "warning");
+      else this.notify(id, `Retro report for ${row.title}: ${report}`, "info");
+    } catch (err) {
+      this.notify(id, `The retro run failed: ${(err as Error).message}. The pipeline finishes without its report.`, "warning");
+    }
+    await this.finishPipeline(id, reviewNote);
+    if (changed) this.flag(id, "The retro run changed the worktree; it must only propose. Check the changes before you create the PR.");
+  }
+
+  private notify(id: string, message: string, level: "info" | "warning") {
+    this.emit("event", id, { type: "wb_notify", message, level });
   }
 
   private async finishPipeline(id: string, reviewNote: string | null) {
@@ -1158,6 +1238,9 @@ export class SessionManager extends EventEmitter {
       this.update(id, { phase: "done", attention: null });
     } else if (row.phase === "review") {
       if (action === "retry") await this.startReview(id);
+      else await this.finishPipeline(id, null);
+    } else if (row.phase === "retro") {
+      if (action === "retry") await this.startRetro(id, null);
       else await this.finishPipeline(id, null);
     } else if (row.phase !== "implement") {
       throw Object.assign(new Error("Retry and skip only apply to tickets and the review"), { status: 409 });

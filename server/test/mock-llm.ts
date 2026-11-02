@@ -156,6 +156,7 @@ function pipelineScript(userText: string, step: number, lastResult: string): Rep
     return { text: "Review done." };
   }
   if (userText.includes('<skill name="diagnosing-bugs"')) return rescueScript(userText, step);
+  if (userText.includes('<skill name="retro"')) return retroScript(userText, step);
   if (userText.includes('<skill name="tdd"')) {
     const num = /Ticket #(\d+)/.exec(userText)?.[1] ?? "?";
     // A fix run carries the rescue's diagnosis: the stuck-ticket words no longer apply.
@@ -233,6 +234,21 @@ function rescueScript(userText: string, step: number): Reply {
     };
   }
   return { text: "Diagnosed." };
+}
+
+/**
+ * A retro run (/skill:retro, issue #41), by words in the rescued tickets' bodies:
+ * - RETRO_SILENT: a text reply, no finish_retro
+ * - RETRO_LOOP: the same read forever (the stop rule)
+ * - RETRO_DIRTY: writes notes.txt, then reports
+ * - otherwise: one read, then finish_retro with a proposal
+ */
+function retroScript(userText: string, step: number): Reply {
+  if (userText.includes("RETRO_SILENT")) return { text: "Nothing to add." };
+  if (userText.includes("RETRO_LOOP")) return { tool: { name: "bash", args: { command: "git log --oneline -3" } } };
+  if (step === 0) return { tool: { name: "bash", args: { command: userText.includes("RETRO_DIRTY") ? "echo retro >> notes.txt" : "git log --oneline -3" } } };
+  if (step === 1) return { tool: { name: "finish_retro", args: { report: "Raise the repeat limit to 4 in Settings → Pipeline: the test loop was a real loop." } } };
+  return { text: "Retro done." };
 }
 
 function script(messages: { role: string; content: unknown }[]): Reply {
