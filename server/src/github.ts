@@ -20,6 +20,7 @@ export type GhIssueSummary = {
 };
 export type GhIssueDetail = GhIssueSummary & { body: string | null; assignees: string[] };
 export type GhIssueComment = { id: number; author: string; body: string | null; createdAt: string };
+export type GhTicketSeed = { spec: { number: number; title: string; body: string | null; htmlUrl: string }; subIssues: { number: number; title: string; body: string | null; blockedBy: number[] }[] };
 
 export class GitHubError extends Error {
   status: number;
@@ -60,6 +61,19 @@ export class GitHub {
     return (res.status === 204 ? undefined : await res.json()) as T;
   }
 
+  /** One GraphQL call, on the same token and host as the REST client. */
+  private async gq<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+    const res = await fetch(`${config.githubApi}/graphql`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.token}`, "User-Agent": "pi-workbench", "Content-Type": "application/json" },
+      body: JSON.stringify({ query, variables }),
+    });
+    const j = (await res.json()) as { data?: T; errors?: { message?: string }[]; message?: string };
+    if (!res.ok || j.errors?.length)
+      throw new GitHubError(res.status || 400, j.errors?.[0]?.message ?? j.message ?? `GraphQL ${res.status} ${res.statusText}`);
+    return j.data as T;
+  }
+
   user() {
     return this.req<GhUser>("GET", "/user");
   }
@@ -85,6 +99,7 @@ export class GitHub {
       labels: { name: string }[];
       updated_at: string;
       html_url: string;
+      sub_issues_summary?: { total: number } | null;
       pull_request?: unknown;
     };
     const query = opts.q?.toLowerCase();
@@ -100,8 +115,54 @@ export class GitHub {
             String(i.number).includes(query),
         )
         .slice(0, 30)
-        .map((i) => ({ number: i.number, title: i.title, labels: i.labels.map((l) => l.name), updatedAt: i.updated_at, htmlUrl: i.html_url })),
+        .map((i) => ({ number: i.number, title: i.title, labels: i.labels.map((l) => l.name), updatedAt: i.updated_at, htmlUrl: i.html_url, subIssueTotal: i.sub_issues_summary?.total ?? 0 })),
     );
+  }
+
+  /**
+   * A spec issue and its open sub-issue tickets. The workbench's one GraphQL call: GitHub's REST
+   * API gives no sub-issue list and no dependency edges, only counts. Only open sub-issues come
+   * back (closed tickets are already solved), and a ticket's blockedBy keeps only blockers that
+   * are open sub-issues of this spec, so a stale edge cannot stall the frontier. Cap: 100.
+   */
+  listTicketSubIssues(owner: string, name: string, number: number) {
+    type GqIssue = {
+      number: number;
+      title: string;
+      body: string | null;
+      html_url: string;
+      subIssues: {
+        nodes: { number: number; title: string; body: string | null; state: string; blockedBy: { nodes: { number: number; state: string }[] } }[];
+      };
+    };
+    const q = `query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) { issue(number: $number) {
+        number title body html_url
+        subIssues(first: 100) { nodes { number title body state blockedBy(first: 100) { nodes { number state } } } }
+      } }
+    }`;
+    return this.gq<{ repository: { issue: GqIssue | null } }>(q, { owner, name, number }).then((d) => {
+      const issue = d.repository?.issue;
+      if (!issue) throw new GitHubError(404, `No issue ${owner}/${name}#${number} to solve tickets from`);
+      const open = issue.subIssues.nodes.filter((n) => n.state === "OPEN");
+      const openNumbers = new Set(open.map((n) => n.number));
+      return {
+        spec: { number: issue.number, title: issue.title, body: issue.body, htmlUrl: issue.html_url },
+        subIssues: open.map((n) => ({
+          number: n.number,
+          title: n.title,
+          body: n.body,
+          blockedBy: n.blockedBy.nodes.filter((b) => openNumbers.has(b.number)).map((b) => b.number),
+        })),
+      } as GhTicketSeed;
+    });
+  }
+
+  /** Parse `owner/name#123` and fetch its spec plus ticket sub-issues. */
+  async ticketsFromIssueRef(ref: string) {
+    const m = /^([^/]+)\/([^/]+)#(\d+)$/.exec(ref.trim());
+    if (!m) throw new GitHubError(400, `Bad issue reference ${ref}; expected owner/name#123`);
+    return this.listTicketSubIssues(m[1], m[2], Number(m[3]));
   }
 
   createRepo(input: { name: string; description?: string; private: boolean; org?: string }) {

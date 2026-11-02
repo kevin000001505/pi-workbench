@@ -12,6 +12,7 @@ export function startMockGitHub(root: string, login = "kevin") {
   const pulls: any[] = [];
   const issues: any[] = []; // repo-scoped: { owner, name, ...issue }; the issues feed carries pull-request entries too
   const comments: any[] = []; // { owner, name, issueNumber, ...comment }
+  const subIssueSeeds: Record<string, any> = {}; // `${owner}/${name}#${specNumber}` → { spec, subs } for the /graphql route
   const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
 
   const createBare = (owner: string, name: string) => {
@@ -73,6 +74,10 @@ export function startMockGitHub(root: string, login = "kevin") {
     return issues.filter((i) => i.owner === owner && i.name === name);
   };
 
+  const seedSubIssues = (owner: string, name: string, spec: any, subs: any[]) => {
+    subIssueSeeds[`${owner}/${name}#${spec.number}`] = { spec, subs };
+  };
+
   const server = http.createServer(async (req, res) => {
     let raw = "";
     for await (const c of req) raw += c;
@@ -121,6 +126,33 @@ export function startMockGitHub(root: string, login = "kevin") {
       if (!all) return send(404, { message: "Not Found" });
       return send(200, comments.filter((c) => c.owner === m[1] && c.name === m[2] && c.issueNumber === Number(m[3])));
     }
+    // The workbench's one GraphQL call: an issue's sub-issues and their blockedBy edges.
+    if (req.method === "POST" && p === "/graphql") {
+      const { variables } = body;
+      const seed = subIssueSeeds[`${variables.owner}/${variables.name}#${variables.number}`];
+      if (!seed) return send(200, { data: { repository: { issue: null } } });
+      return send(200, {
+        data: {
+          repository: {
+            issue: {
+              number: seed.spec.number,
+              title: seed.spec.title,
+              body: seed.spec.body,
+              html_url: seed.spec.html_url ?? `https://github.com/${variables.owner}/${variables.name}/issues/${seed.spec.number}`,
+              subIssues: {
+                nodes: seed.subs.map((s: any) => ({
+                  number: s.number,
+                  title: s.title,
+                  body: s.body,
+                  state: s.state ?? "OPEN",
+                  blockedBy: { nodes: (s.blockedBy ?? []).map((n: number) => ({ number: n, state: "OPEN" })) },
+                })),
+              },
+            },
+          },
+        },
+      });
+    }
     if ((m = /^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(p))) {
       const pr = pulls[Number(m[1]) - 1];
       return pr
@@ -133,7 +165,7 @@ export function startMockGitHub(root: string, login = "kevin") {
     send(404, { message: `mock has no ${req.method} ${p}` });
   });
 
-  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; createBare: typeof createBare; close: () => Promise<void> }>((resolve) => {
+  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; close: () => Promise<void> }>((resolve) => {
     server.listen(Number(process.env.MOCK_GH_PORT ?? 0), "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
       resolve({
@@ -142,6 +174,7 @@ export function startMockGitHub(root: string, login = "kevin") {
         issues,
         comments,
         createBare,
+        seedSubIssues,
         close: () => new Promise((r) => server.close(() => r())),
       });
     });

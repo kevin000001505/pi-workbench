@@ -216,6 +216,35 @@ test("pipeline: ticket validation, frontier order and prompts", async () => {
   assert.match(section, /- \[x\] #3 T3 \(`\.scratch\/x\/issues\/03\.md`\)/);
 });
 
+test("ticketsFromSubIssues maps open sub-issues to tickets with remapped edges", async () => {
+  const { ticketsFromSubIssues, validateTickets } = await import("../src/pipeline.ts");
+  const out = ticketsFromSubIssues([
+    { number: 40, title: "C", body: "c", blockedBy: [37, 38] },
+    { number: 37, title: "A", body: "a", blockedBy: [] },
+    { number: 38, title: "B", body: "b", blockedBy: [37] },
+    { number: 41, title: "D", body: "  ", blockedBy: [99] }, // 99 is not a sub-issue; the body is empty
+  ]);
+  assert.deepEqual(out, [
+    { number: 1, title: "A", body: "a", blockedBy: [], trackerRef: "37" },
+    { number: 2, title: "B", body: "b", blockedBy: [1], trackerRef: "38" },
+    { number: 3, title: "C", body: "c", blockedBy: [1, 2], trackerRef: "40" },
+    { number: 4, title: "D", body: "No description for #41", blockedBy: [], trackerRef: "41" },
+  ]);
+  // The mapping keeps the graph valid, so validation passes.
+  assert.deepEqual(validateTickets(out).map((t) => t.number), [1, 2, 3, 4]);
+  // Cycles among the sub-issues are caught by the same validation.
+  assert.throws(
+    () =>
+      validateTickets(
+        ticketsFromSubIssues([
+          { number: 1, title: "A", body: "a", blockedBy: [2] },
+          { number: 2, title: "B", body: "b", blockedBy: [1] },
+        ]),
+      ),
+    /cycle/,
+  );
+});
+
 test("the origin issue's Closes line is deduped against ticket lines by number", async () => {
   const { originCloses } = await import("../src/prs.ts");
   const section = (ref: string) => `\n## Tickets\n\n- [x] #1 Ship it (${ref})\n`;

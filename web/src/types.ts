@@ -115,11 +115,16 @@ export type GhRepo = {
   pushedAt: string | null;
 };
 
-export type GhIssueSummary = { number: number; title: string; labels: string[]; updatedAt: string; htmlUrl: string };
+export type GhIssueSummary = { number: number; title: string; labels: string[]; updatedAt: string; htmlUrl: string; subIssueTotal?: number };
 export type GhIssueDetail = GhIssueSummary & { body: string | null; assignees: string[] };
 export type GhIssueComment = { id: number; author: string; body: string | null; createdAt: string };
 /** The issue-detail route response: the detail plus up to 100 comments. */
 export type GhIssueWithComments = GhIssueDetail & { comments: GhIssueComment[] };
+/** A spec issue and its open ticket sub-issues, from the /tickets endpoint of the detail route. */
+export type GhTicketSeed = {
+  spec: { number: number; title: string; body: string | null; htmlUrl: string };
+  subIssues: { number: number; title: string; body: string | null; blockedBy: number[] }[];
+};
 
 export type Skill = { name: string; description: string; source: "global" | "repo"; manualOnly: boolean };
 
