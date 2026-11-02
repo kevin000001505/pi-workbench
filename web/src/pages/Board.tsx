@@ -73,11 +73,21 @@ function Icon({ name }: { name: keyof typeof ICONS }) {
   );
 }
 
-function BoardCard({ card, activity }: { card: Card; activity: string }) {
+function BoardCard({ card, activity, onDrag }: { card: Card; activity: string; onDrag: (card: Card | null) => void }) {
   const line = card.attention ?? activity;
   return (
     // The card detail panel is a later ticket; until then a card opens its session.
-    <a className="kz-card" href={`#/session/${card.id}`} draggable={false}>
+    <a
+      className="kz-card"
+      href={`#/session/${card.id}`}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", card.id);
+        onDrag(card);
+      }}
+      onDragEnd={() => onDrag(null)}
+    >
       <div className="head">
         <div className="title">{card.title}</div>
         {card.tickets.total > 0 && (
@@ -106,6 +116,9 @@ export function Board({ repoId }: { repoId?: string }) {
   const [repos, setRepos] = useState<Repo[] | null>(null);
   const [cards, setCards] = useState<Card[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [dragged, setDragged] = useState<Card | null>(null);
+  const [over, setOver] = useState<Column | null>(null);
+  const [refetch, setRefetch] = useState(0);
 
   useEffect(() => {
     api.get<Repo[]>("/api/repos").then(setRepos, (e) => setError(e.message));
@@ -132,7 +145,20 @@ export function Board({ repoId }: { repoId?: string }) {
     return () => {
       live = false;
     };
-  }, [repo?.id, key]);
+  }, [repo?.id, key, refetch]);
+
+  // A drop is a command to the server. The card changes column only when the server accepts it;
+  // a refused move leaves it where it was (it snaps back) and shows why.
+  const drop = (column: Column) => {
+    const card = dragged;
+    setDragged(null);
+    setOver(null);
+    if (!card || card.column === column) return;
+    api.post(`/api/sessions/${card.id}/move`, { column }).then(
+      () => (setError(null), setRefetch((n) => n + 1)),
+      (e) => setError(e.message),
+    );
+  };
 
   const byColumn = useMemo(() => {
     const m = new Map<Column, Card[]>(COLUMNS.map((c) => [c.id, []]));
@@ -179,7 +205,24 @@ export function Board({ repoId }: { repoId?: string }) {
         {COLUMNS.map((col) => {
           const list = byColumn.get(col.id) ?? [];
           return (
-            <section key={col.id} className="kz-column" data-column={col.id}>
+            <section
+              key={col.id}
+              className={`kz-column ${over === col.id && dragged?.column !== col.id ? "drop-target" : ""}`}
+              data-column={col.id}
+              onDragOver={(e) => {
+                if (!dragged) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                if (over !== col.id) setOver(col.id);
+              }}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOver(null);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                drop(col.id);
+              }}
+            >
               <h2>
                 <StatusIcon column={col.id} />
                 {col.label}
@@ -187,7 +230,7 @@ export function Board({ repoId }: { repoId?: string }) {
               </h2>
               <div className="kz-cards">
                 {list.map((c) => (
-                  <BoardCard key={c.id} card={c} activity={sessions[c.id]?.activity ?? ""} />
+                  <BoardCard key={c.id} card={c} activity={sessions[c.id]?.activity ?? ""} onDrag={setDragged} />
                 ))}
               </div>
             </section>

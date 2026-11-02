@@ -65,6 +65,7 @@
 .kz-column {
   background: var(--kz-col); border-radius: 18px; display: flex; flex-direction: column; min-height: 0;
 }
+.kz-column.drop-target { outline: 2px dashed var(--kz-faint); outline-offset: -2px; }
 .kz-column h2 {
   font-size: 13px; font-weight: 600; color: var(--kz-muted);
   margin: 0; padding: 14px 16px 10px; display: flex; align-items: center; gap: 8px;
