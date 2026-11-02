@@ -220,6 +220,12 @@ test("a reviewer escalate turns the card into a waiting card with the rating and
   assert.equal(req.review.by, "Claude");
   assert.match(req.review.note, /damage/);
   assert.equal(mgr.summary(sessionId).status, "waiting");
+  // A page reload: a fresh snapshot, its transcript rebuilt from pi, still shows the card's note.
+  mgr.live.get(sessionId).loaded = false;
+  const card = (await mgr.snapshot(sessionId)).summary.pending.find((r: any) => r.id === req.id);
+  assert.equal(card.review.state, "escalated");
+  assert.match(card.review.note, /damage/);
+  assert.equal(card.judge.rating, "risky");
   await deny(sessionId, req);
 });
 
@@ -261,6 +267,33 @@ test("the user's Deny during a review wins: one answer, no late deny reaches pi"
   proc.write = write;
   assert.deepEqual(writes.map((w) => w.value), ["Deny"]);
   assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"), "no automatic answer after the user's");
+});
+
+test("aborting the run during a slow review cancels it: the card waits, and no answer is written afterwards", { skip }, async () => {
+  useReviewer({ provider: "anthropic", baseUrl: claude.url, model: "claude-mock", key: CLAUDE_KEY });
+  jev.replies.push({ nouls: RISKY });
+  claude.replies.push({ decision: "allow", reason: "late", delayMs: 1200 });
+  const req = await cardFor(sessionId, "please push", (r) => r.review?.state === "reviewing");
+  const proc = mgr.live.get(sessionId).proc;
+  const writes: any[] = [];
+  const write = proc.write.bind(proc);
+  proc.write = (rec: any) => {
+    if (rec.id === req.id) writes.push(rec);
+    return write(rec);
+  };
+  const from = events.length;
+  const answeredBefore = claude.answered();
+  await mgr.abort(sessionId);
+  const card = mgr.summary(sessionId).pending.find((r: any) => r.id === req.id);
+  assert.equal(card.review, undefined, "the card is an ordinary waiting card");
+  assert.equal(card.judge.rating, "risky", "it keeps the judge's rating");
+  assert.equal(mgr.summary(sessionId).status, "waiting");
+  await waitFor(() => claude.answered() > answeredBefore);
+  await new Promise((r) => setTimeout(r, 200));
+  proc.write = write;
+  assert.deepEqual(writes, [], "no late extension_ui_response");
+  assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"));
+  await deny(sessionId, card);
 });
 
 /** With auto-approve off the card waits for the user; answer it with `value` and return the tool result. */

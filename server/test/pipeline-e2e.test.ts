@@ -26,6 +26,7 @@ process.env.PI_EXTENSION = path.resolve(path.dirname(fileURLToPath(import.meta.u
 let mock: Awaited<ReturnType<typeof startMockLlm>>;
 let mgr: any;
 let db: any;
+const events: { id: string; ev: any }[] = [];
 const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
 
 async function waitFor<T>(fn: () => T | undefined | false | Promise<T | undefined | false>, ms = 60_000): Promise<T> {
@@ -76,12 +77,18 @@ before(async () => {
   sh(tmp, "clone", "-q", path.join(tmp, "remote.git"), clone);
   db.prepare("INSERT INTO repos (id, owner, name, default_branch, private, added_at) VALUES ('me/demo','me','demo','main',1,0)").run();
 
-  mgr = new SessionManager(db, new SecretStore(db, process.env.WORKBENCH_MASTER_KEY!), async () => ({
+  const secrets = new SecretStore(db, process.env.WORKBENCH_MASTER_KEY!);
+  // Auto-approve on, judged by the local model on the agent's endpoint (the mock answers SAFE for
+  // `git push`): gated calls in ticket and review runs are answered without the user.
+  const { configureAutoApprove } = await import("../src/autoapprove.ts");
+  await configureAutoApprove(db, secrets, { enabled: true, judge: { kind: "local", model: "mock-judge" } as any });
+  mgr = new SessionManager(db, secrets, async () => ({
     GIT_AUTHOR_NAME: "t",
     GIT_AUTHOR_EMAIL: "t@t",
     GIT_COMMITTER_NAME: "t",
     GIT_COMMITTER_EMAIL: "t@t",
   }));
+  mgr.on("event", (id: string, ev: any) => events.push({ id, ev }));
 });
 
 after(async () => {
@@ -128,16 +135,32 @@ test("a pipeline session grills, writes a spec and tickets, implements them one 
   assert.equal(sum.activeRun, sum.tickets[2].runId);
 
   // The second ticket's fresh context carried the spec and ticket 1's note.
-  const t2 = mock.requests.find((r) => JSON.stringify(r.messages).includes("Ticket #2: Add a test"));
+  const t2 = mock.requests.find((r) => JSON.stringify(r.messages ?? []).includes("Ticket #2: Add a test"));
   const t2Text = JSON.stringify(t2.messages);
   assert.match(t2Text, /<skill name=\\"tdd\\"/);
   assert.match(t2Text, /hello.txt says Hello/);
   assert.match(t2Text, /#1 Write hello.txt: Ticket 1 appended to work.txt/);
   assert.ok(!t2Text.includes("shared understanding"), "ticket runs start without the grill conversation");
 
-  // The past run is still readable.
+  // Ticket 1's gated `git push` was answered by auto-approve inside the ticket run.
+  const autoAnswers = () => events.filter((e) => e.id === s.id && e.ev.type === "wb_auto_answer").map((e) => e.ev);
+  assert.deepEqual(
+    autoAnswers().map((a) => [a.subject, a.answer, a.by]),
+    [['echo "ticket 1" >> work.txt && git add -A && git commit -qm "Ticket 1" && git push -q origin HEAD && echo committed', "allow", "local judge"]],
+  );
+
+  // The past run is still readable, with its auto-approve line, which the run on screen does not show.
   const first = mgr.runTranscript(s.id, sum.tickets[0].runId);
   assert.ok(first.messages.some((m: any) => m.role === "toolResult" && m.toolName === "finish_ticket"));
+  const line = first.messages.findIndex((m: any) => m.role === "autoAnswer");
+  assert.ok(line > 0, "ticket 1's run keeps its automatic allow");
+  assert.equal(first.messages[line].answer, "allow");
+  const result = first.messages.findIndex((m: any) => m.role === "toolResult" && m.toolName === "bash");
+  assert.ok(line < result, "the line sits before the call's result, in time order");
+  for (const t of [sum.tickets[1].runId, sum.tickets[2].runId]) {
+    assert.ok(!mgr.runTranscript(s.id, t).messages.some((m: any) => m.role === "autoAnswer"), "other runs show none of it");
+  }
+  assert.ok(!(await mgr.snapshot(s.id)).transcript.messages.some((m: any) => m.role === "autoAnswer"));
 
   // Skip the blocked ticket: one fresh code-review run covers the whole branch, then the pipeline
   // finishes and returns to the plan conversation.
@@ -148,9 +171,13 @@ test("a pipeline session grills, writes a spec and tickets, implements them one 
   assert.equal(done.attention, null);
   assert.equal(done.activeRun, s.id);
   assert.equal(done.runs[done.runs.length - 1].label, "Review");
-  const review = mock.requests.find((r) => JSON.stringify(r.messages).includes('<skill name=\\"code-review\\"'));
+  const review = mock.requests.find((r) => JSON.stringify(r.messages ?? []).includes('<skill name=\\"code-review\\"'));
   assert.match(JSON.stringify(review.messages), /since origin\/main/);
   assert.ok(!JSON.stringify(review.messages).includes("Ticket #3: Add docs"), "the review run starts fresh");
+  // The review run's gated `git push` was auto-approved too.
+  assert.equal(autoAnswers().length, 2);
+  assert.match(autoAnswers()[1].subject, /Fix review findings" && git push/);
+  assert.equal(autoAnswers()[1].answer, "allow");
   const row = db.prepare("SELECT worktree FROM sessions WHERE id = ?").get(s.id);
   assert.deepEqual(sh(row.worktree, "log", "--format=%s", "-4").trim().split("\n"), ["Fix review findings", "Ticket 3", "Ticket 2", "Ticket 1"]);
 });

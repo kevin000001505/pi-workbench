@@ -8,8 +8,10 @@ import type { AddressInfo } from "node:net";
  * - "push" → bash `git push origin HEAD` (hits the approval gate)
  * - "nuke" → bash `rm -rf /mnt/data` (the reviewer's scripted deny)
  * - "rm" → bash `rm -rf build`
+ * - "twice" → two bash calls in one message, `git push origin HEAD` and `rm -rf build` (both gated)
  * - "ask" → ask_user with two options
  * - "list" → bash `ls`
+ * - "load skill" / "load typesafe" → the extension's Skill tool for `tdd` / `typesafe-ai`
  * - "setup-matt-pocock-skills" → writes docs/agents/issue-tracker.md, then commits
  * - anything else → "Hello from the mock model."
  *
@@ -66,12 +68,15 @@ export function startMockLlm(port = 0): Promise<{ url: string; requests: any[]; 
       choices: [{ index: 0, delta, finish_reason: finish }],
     });
     send(chunk({ role: "assistant", content: "" }));
-    if (reply.tool) {
-      const args = JSON.stringify(reply.tool.args);
-      send(chunk({ tool_calls: [{ index: 0, id: `call_${requests.length}`, type: "function", function: { name: reply.tool.name, arguments: "" } }] }));
-      for (let i = 0; i < args.length; i += 12) {
-        send(chunk({ tool_calls: [{ index: 0, function: { arguments: args.slice(i, i + 12) } }] }));
-      }
+    const tools = reply.tools ?? (reply.tool ? [reply.tool] : []);
+    if (tools.length) {
+      tools.forEach((tool, index) => {
+        const args = JSON.stringify(tool.args);
+        send(chunk({ tool_calls: [{ index, id: `call_${requests.length}_${index}`, type: "function", function: { name: tool.name, arguments: "" } }] }));
+        for (let i = 0; i < args.length; i += 12) {
+          send(chunk({ tool_calls: [{ index, function: { arguments: args.slice(i, i + 12) } }] }));
+        }
+      });
       send(chunk({}, "tool_calls"));
     } else {
       for (const word of reply.text!.split(/(?<= )/)) {
@@ -92,7 +97,8 @@ export function startMockLlm(port = 0): Promise<{ url: string; requests: any[]; 
   });
 }
 
-type Reply = { text?: string; tool?: { name: string; args: Record<string, unknown> } };
+type Tool = { name: string; args: Record<string, unknown> };
+type Reply = { text?: string; tool?: Tool; tools?: Tool[] };
 
 function textOf(content: unknown): string {
   if (typeof content === "string") return content;
@@ -105,8 +111,9 @@ function textOf(content: unknown): string {
  * - grill-with-docs: ask to confirm → save_grill_summary → done
  * - to-spec: ask about seams → write the spec file → save_spec → done
  * - to-tickets: ask to approve → write .scratch files → record_tickets (3 tickets) → done
- * - tdd (a ticket): commit a line for the ticket → finish_ticket (blocked if the ticket says BLOCKME) → done
- * - code-review: commit a fix → finish_review → done
+ * - tdd (a ticket): commit a line for the ticket (and `git push`, a gated call, if the ticket says
+ *   PUSHME) → finish_ticket (blocked if the ticket says BLOCKME) → done
+ * - code-review: commit a fix and `git push` it (a gated call) → finish_review → done
  */
 function pipelineScript(userText: string, step: number, lastResult: string): Reply | undefined {
   if (userText.includes('<skill name="grill-with-docs"')) {
@@ -130,7 +137,7 @@ function pipelineScript(userText: string, step: number, lastResult: string): Rep
           name: "record_tickets",
           args: {
             tickets: [
-              { number: 1, title: "Write hello.txt", body: "Create hello.txt containing Hello.", trackerRef: ".scratch/greeting/issues/01.md" },
+              { number: 1, title: "Write hello.txt", body: "Create hello.txt containing Hello. Push it. PUSHME", trackerRef: ".scratch/greeting/issues/01.md" },
               { number: 2, title: "Add a test", body: "Test that hello.txt says Hello.", blockedBy: [1], trackerRef: ".scratch/greeting/issues/02.md" },
               { number: 3, title: "Add docs", body: "Document it. BLOCKME", blockedBy: [1], trackerRef: ".scratch/greeting/issues/03.md" },
             ],
@@ -141,13 +148,14 @@ function pipelineScript(userText: string, step: number, lastResult: string): Rep
     return { text: "Published 3 tickets." };
   }
   if (userText.includes('<skill name="code-review"')) {
-    if (step === 0) return { tool: { name: "bash", args: { command: 'echo reviewed >> work.txt && git add -A && git commit -qm "Fix review findings" && echo fixed' } } };
+    if (step === 0) return { tool: { name: "bash", args: { command: 'echo reviewed >> work.txt && git add -A && git commit -qm "Fix review findings" && git push -q origin HEAD && echo fixed' } } };
     if (step === 1) return { tool: { name: "finish_review", args: { note: "Fixed one naming issue" } } };
     return { text: "Review done." };
   }
   if (userText.includes('<skill name="tdd"')) {
     const num = /Ticket #(\d+)/.exec(userText)?.[1] ?? "?";
-    if (step === 0) return { tool: { name: "bash", args: { command: `echo "ticket ${num}" >> work.txt && git add -A && git commit -qm "Ticket ${num}" && echo committed` } } };
+    const push = userText.includes("PUSHME") ? " && git push -q origin HEAD" : "";
+    if (step === 0) return { tool: { name: "bash", args: { command: `echo "ticket ${num}" >> work.txt && git add -A && git commit -qm "Ticket ${num}"${push} && echo committed` } } };
     if (step === 1) {
       const blocked = userText.includes("BLOCKME");
       return { tool: { name: "finish_ticket", args: { status: blocked ? "blocked" : "done", note: blocked ? "Needs a docs folder decision" : `Ticket ${num} appended to work.txt` } } };
@@ -181,12 +189,16 @@ function script(messages: { role: string; content: unknown }[]): Reply {
     };
   }
   if (/\bssh\b/i.test(userText)) return { tool: { name: "bash", args: { command: "ssh Media true" } } };
+  if (/\btwice\b/i.test(userText)) {
+    return { tools: [{ name: "bash", args: { command: "git push origin HEAD" } }, { name: "bash", args: { command: "rm -rf build" } }] };
+  }
   if (/\bpush\b/i.test(userText)) return { tool: { name: "bash", args: { command: "git push origin HEAD" } } };
   if (/\bnuke\b/i.test(userText)) return { tool: { name: "bash", args: { command: "rm -rf /mnt/data" } } };
   if (/\brm\b/i.test(userText)) return { tool: { name: "bash", args: { command: "rm -rf build" } } };
   if (/\bask\b/i.test(userText)) {
     return { tool: { name: "ask_user", args: { question: "Which database should I use?", options: ["SQLite (Recommended)", "Postgres"] } } };
   }
+  if (/\bload typesafe\b/i.test(userText)) return { tool: { name: "Skill", args: { skill: "typesafe-ai" } } };
   if (/\bload skill\b/i.test(userText)) return { tool: { name: "Skill", args: { skill: "tdd" } } };
   if (/\blist\b/i.test(userText)) return { tool: { name: "bash", args: { command: "ls" } } };
   return { text: "Hello from the mock model. Everything looks fine." };

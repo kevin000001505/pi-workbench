@@ -76,10 +76,18 @@ export type SessionSummary = {
   spec: string | null;
   specRef: string | null;
   issueRef: string | null;
+  /** The session's own auto-approve setting, and whether auto-approve is in effect for it now. */
+  autoApprove: AutoApproveMode;
+  autoApproveActive: boolean;
+  /** Whether the session loads the TypeSafe skill. */
+  typesafeSkill: boolean;
   tickets: Ticket[];
   activeRun: string;
   runs: { id: string; label: string }[];
 };
+
+/** A session's auto-approve: follow the global switch in Settings, or override it. */
+export type AutoApproveMode = "inherit" | "on" | "off";
 
 export type Phase = "setup" | "grill" | "spec" | "tickets" | "implement" | "review" | "done" | "direct";
 

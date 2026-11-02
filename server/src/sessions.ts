@@ -7,10 +7,12 @@ import {
   type AgentMessage,
   applyEvent,
   emptyTranscript,
+  type RpcEvent,
   type Transcript,
+  withAutoAnswers,
   withMessages,
 } from "../../shared/transcript.ts";
-import { config, PROVIDER_ID, SETUP_SKILL } from "./config.ts";
+import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
 import type { Db, RepoRow, SessionRow, TicketRow } from "./db.ts";
 import type { GitEnv } from "./git.ts";
 import {
@@ -69,6 +71,15 @@ export type UiRequest = {
   createdAt: number;
 };
 
+/** A session's auto-approve setting: follow the global switch, or override it. */
+export type AutoApproveMode = "inherit" | "on" | "off";
+
+const autoApproveMode = (v: unknown): AutoApproveMode => {
+  if (v === undefined || v === null || v === "inherit") return "inherit";
+  if (v === "on" || v === "off") return v;
+  throw Object.assign(new Error(`Auto-approve must be inherit, on or off (got ${String(v)})`), { status: 400 });
+};
+
 export type UiResponse = { value?: string; confirmed?: boolean; cancelled?: boolean };
 
 export type Run = { id: string; label: string };
@@ -100,6 +111,11 @@ export type SessionSummary = {
   specRef: string | null;
   /** The GitHub issue this session solves, e.g. `owner/name#123`; null for plain sessions. */
   issueRef: string | null;
+  /** The session's own auto-approve setting, and whether auto-approve is in effect for it now. */
+  autoApprove: AutoApproveMode;
+  autoApproveActive: boolean;
+  /** Whether the session loads the TypeSafe skill. */
+  typesafeSkill: boolean;
   tickets: Ticket[];
   /** The conversation on screen; ticket runs each have their own. */
   activeRun: string;
@@ -113,6 +129,8 @@ type Live = {
   /** False until messages were loaded from pi or its session file. */
   loaded: boolean;
   pending: Map<string, UiRequest>;
+  /** Auto-approve judgements and reviews in flight, by request id; aborting one drops its verdict. */
+  reviews: Map<string, AbortController>;
   error: string | null;
   stderr: string[];
   setupRunning: boolean;
@@ -221,6 +239,7 @@ export class SessionManager extends EventEmitter {
         transcript: emptyTranscript(),
         loaded: false,
         pending: new Map(),
+        reviews: new Map(),
         error: null,
         stderr: [],
         setupRunning: false,
@@ -270,6 +289,9 @@ export class SessionManager extends EventEmitter {
       spec: row.spec,
       specRef: row.spec_ref,
       issueRef: row.issue_ref,
+      autoApprove: autoApproveMode(row.auto_approve),
+      autoApproveActive: this.autoApproveActive(row),
+      typesafeSkill: row.typesafe_skill === 1,
       tickets,
       activeRun: this.runOf(row),
       runs: [
@@ -297,10 +319,26 @@ export class SessionManager extends EventEmitter {
     const sum = this.summary(id);
     if (!sum.runs.some((r) => r.id === runId)) throw Object.assign(new Error(`Unknown run ${runId}`), { status: 404 });
     if (runId === sum.activeRun && this.state(id).loaded) return this.state(id).transcript;
-    return withMessages(readSessionFile(runId));
+    return withAutoAnswers(withMessages(readSessionFile(runId)), this.autoAnswers(id, runId));
+  }
+
+  /** The automatic answers stored for one run, oldest first. */
+  private autoAnswers(id: string, runId: string): RpcEvent[] {
+    const rows = this.db.prepare("SELECT event FROM auto_decisions WHERE session_id = ? AND run_id = ? ORDER BY created_at").all(id, runId) as { event: string }[];
+    return rows.map((r) => JSON.parse(r.event));
+  }
+
+  /** Show an automatic answer live and store it for the run, so reloads, restarts and past runs keep it. */
+  private autoAnswered(id: string, s: Live, ev: RpcEvent) {
+    this.db
+      .prepare("INSERT OR REPLACE INTO auto_decisions (session_id, run_id, request_id, event, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(id, this.runOf(this.row(id)), String(ev.requestId), JSON.stringify(ev), ev.timestamp);
+    applyEvent(s.transcript, ev);
+    this.emit("event", id, ev);
   }
 
   private async load(id: string, s: Live) {
+    const runId = this.runOf(this.row(id));
     if (s.proc && !s.proc.exited) {
       const data = await s.proc.call<{ messages: AgentMessage[] }>({ type: "get_messages" });
       const busy = s.transcript.busy;
@@ -309,14 +347,20 @@ export class SessionManager extends EventEmitter {
       s.transcript = withMessages(data.messages);
       Object.assign(s.transcript, { busy, tools, streaming });
     } else {
-      s.transcript = withMessages(readSessionFile(this.runOf(this.row(id))));
+      s.transcript = withMessages(readSessionFile(runId));
     }
+    withAutoAnswers(s.transcript, this.autoAnswers(id, runId));
     s.loaded = true;
   }
 
-  async create(input: { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string }) {
+  async create(input: { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: boolean }) {
     const repo = getRepo(this.db, input.repoId);
     if (!repo) throw Object.assign(new Error(`Unknown repo ${input.repoId}`), { status: 404 });
+    const autoApprove = autoApproveMode(input.autoApprove);
+    const typesafe = input.typesafeSkill === true;
+    if (typesafe && !fs.existsSync(path.join(typesafeSkillDir(), "SKILL.md"))) {
+      throw Object.assign(new Error(`The TypeSafe skill is not installed (expected at ${typesafeSkillDir()})`), { status: 400 });
+    }
     const mode = input.mode === "direct" ? "direct" : "pipeline";
     const task = input.prompt.trim();
     if (mode === "pipeline" && !task) throw Object.assign(new Error("Describe what you want built; grill-me starts from it"), { status: 400 });
@@ -331,10 +375,10 @@ export class SessionManager extends EventEmitter {
     const phase: Phase = needsSetup ? "setup" : mode === "pipeline" ? "grill" : "direct";
     this.db
       .prepare(
-        `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt, mode, phase, active_run, issue_ref)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt, mode, phase, active_run, issue_ref, auto_approve, typesafe_skill)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup && task ? input.prompt : null, mode, phase, id, issueRef);
+      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup && task ? input.prompt : null, mode, phase, id, issueRef, autoApprove === "inherit" ? null : autoApprove, typesafe ? 1 : 0);
     const s = this.state(id);
     s.loaded = true;
     await this.start(id);
@@ -374,7 +418,10 @@ export class SessionManager extends EventEmitter {
     }
     const m = getModelSettings(this.db);
     fs.mkdirSync(config.piSessionsDir, { recursive: true });
+    const extraSkills = this.extraSkillDirs(id);
     const env = await this.processEnv(row.repo_id);
+    // The extension's Skill tool looks there too, so only these sessions can load them.
+    if (extraSkills.length) env.PI_WORKBENCH_EXTRA_SKILLS = extraSkills.join(path.delimiter);
     const runId = this.runOf(row);
     const ticket = this.tickets(id).find((t) => t.runId === runId);
     const label = ticket ? ` · #${ticket.num}` : runId === row.review_run ? " · review" : "";
@@ -389,6 +436,7 @@ export class SessionManager extends EventEmitter {
         "--approve", "--offline",
         "--provider", PROVIDER_ID, "--model", m.modelId,
         "--append-system-prompt", EXPLAIN_PROMPT,
+        ...extraSkills.flatMap((dir) => ["--skill", dir]),
       ],
       { cwd: row.worktree, env },
     );
@@ -402,6 +450,7 @@ export class SessionManager extends EventEmitter {
     });
     proc.on("exit", (code: number | null, signal: string | null) => {
       if (s.proc !== proc) return;
+      this.dropReviews(s);
       s.pending.clear();
       s.transcript.busy = false;
       s.transcript.streaming = null;
@@ -420,6 +469,11 @@ export class SessionManager extends EventEmitter {
       throw new Error(s.error);
     });
     if (!s.loaded) await this.load(id, s);
+  }
+
+  /** Skill dirs only this session loads, next to the global ones: the TypeSafe skill, when picked. */
+  extraSkillDirs(id: string): string[] {
+    return this.row(id).typesafe_skill === 1 ? [typesafeSkillDir()] : [];
   }
 
   private async processEnv(repoId: string): Promise<NodeJS.ProcessEnv> {
@@ -524,12 +578,13 @@ export class SessionManager extends EventEmitter {
     } else if (envelope?.wb === "decision") {
       Object.assign(req, { kind: "decision", title: String(envelope.question ?? "") });
     }
-    if (req.kind === "permission") {
-      const aa = getAutoApproveSettings(this.db);
-      if (aa.enabled) {
-        req.judge = { state: "judging", by: judgeName(aa.judge) };
-        void this.autoJudge(id, s, req);
-      }
+    if (req.kind === "permission" && this.autoApproveActive(this.row(id))) {
+      req.judge = { state: "judging", by: judgeName(getAutoApproveSettings(this.db).judge) };
+      const review = new AbortController();
+      s.reviews.set(req.id, review);
+      void this.autoJudge(id, s, req, review.signal).finally(() => {
+        if (s.reviews.get(req.id) === review) s.reviews.delete(req.id);
+      });
     }
     s.pending.set(req.id, req);
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
@@ -537,7 +592,7 @@ export class SessionManager extends EventEmitter {
   }
 
   /** Put a permission to the risk judge; answer it when it is safe, otherwise send it to the reviewer or leave it for the user. */
-  private async autoJudge(id: string, s: Live, req: UiRequest) {
+  private async autoJudge(id: string, s: Live, req: UiRequest, cancelled: AbortSignal) {
     const row = this.row(id);
     const settings = getAutoApproveSettings(this.db);
     const ticket = this.tickets(id).find((t) => t.status === "running");
@@ -550,12 +605,10 @@ export class SessionManager extends EventEmitter {
     };
     const permission = { tool: req.tool ?? "", subject: req.subject ?? "", reasons: req.reasons ?? [], session };
     const verdict = await judgePermission(permission, settings, savedJudgeToken(this.secrets), localJudge(this.db, this.secrets));
-    // Answered by the user, or dropped with its process or run: the verdict is stale.
-    if (!s.pending.has(req.id)) return;
+    // Answered by the user, dropped with its process or run, or cancelled: the verdict is stale.
+    if (cancelled.aborted || !s.pending.has(req.id)) return;
     if (verdict.outcome === "allow") {
-      const ev = { type: "wb_auto_answer", requestId: req.id, tool: req.tool, subject: req.subject, answer: "allow", by: verdict.by, detail: verdict.detail, timestamp: Date.now() };
-      applyEvent(s.transcript, ev);
-      this.emit("event", id, ev);
+      this.autoAnswered(id, s, { type: "wb_auto_answer", requestId: req.id, tool: req.tool, subject: req.subject, answer: "allow", by: verdict.by, detail: verdict.detail, timestamp: Date.now() });
       this.answer(id, s, req, { type: "extension_ui_response", id: req.id, value: "Allow" });
       return;
     }
@@ -579,12 +632,10 @@ export class SessionManager extends EventEmitter {
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
     this.emitSummary(id, true);
     const rv = await reviewPermission(permission, this.reviewContext(id, s, row, verdict), settings, reviewerKey);
-    // Answered by the user, or dropped with its process or run: the verdict is stale.
-    if (!s.pending.has(req.id)) return;
+    // Answered by the user, dropped with its process or run, or cancelled: the verdict is stale.
+    if (cancelled.aborted || !s.pending.has(req.id)) return;
     if (rv.outcome === "allow" || rv.outcome === "deny") {
-      const ev = { type: "wb_auto_answer", requestId: req.id, tool: req.tool, subject: req.subject, answer: rv.outcome, by: rv.by, detail: rv.reason, timestamp: Date.now() };
-      applyEvent(s.transcript, ev);
-      this.emit("event", id, ev);
+      this.autoAnswered(id, s, { type: "wb_auto_answer", requestId: req.id, tool: req.tool, subject: req.subject, answer: rv.outcome, by: rv.by, detail: rv.reason, timestamp: Date.now() });
       // A deny answers with the envelope the extension turns into a reviewer-deny block.
       this.answer(id, s, req, { type: "extension_ui_response", id: req.id, value: rv.outcome === "allow" ? "Allow" : JSON.stringify({ wb: "deny", by: rv.by, reason: rv.reason }) });
       return;
@@ -614,10 +665,68 @@ export class SessionManager extends EventEmitter {
     };
   }
 
+  /** Whether auto-approve answers this session's permissions now: its own setting, else the global switch. */
+  private autoApproveActive(row: SessionRow): boolean {
+    const mode = autoApproveMode(row.auto_approve);
+    return mode === "inherit" ? getAutoApproveSettings(this.db).enabled : mode === "on";
+  }
+
+  /**
+   * Stop the judgements and reviews in flight (all, or `only` these requests): their verdicts are
+   * dropped, and a card still pending becomes an ordinary card waiting for the user.
+   */
+  private cancelReviews(id: string, s: Live, only?: string[]) {
+    let changed = false;
+    for (const [reqId, review] of [...s.reviews]) {
+      if (only && !only.includes(reqId)) continue;
+      review.abort();
+      s.reviews.delete(reqId);
+      const req = s.pending.get(reqId);
+      if (!req) continue;
+      if (req.judge?.state === "judging") delete req.judge;
+      if (req.review?.state === "reviewing" || req.reviewer?.state === "reviewing") {
+        delete req.review;
+        delete req.reviewer;
+      }
+      changed = true;
+    }
+    if (changed) {
+      this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
+      this.emitSummary(id, true);
+    }
+  }
+
+  /** The process or run is gone with its requests: abort every review in flight, so none answers. */
+  private dropReviews(s: Live) {
+    for (const review of s.reviews.values()) review.abort();
+    s.reviews.clear();
+  }
+
+  /** Set the session's auto-approve; turning it off cancels the reviews in flight. Applies to the next permission. */
+  setAutoApprove(id: string, value: unknown) {
+    const mode = autoApproveMode(value);
+    this.update(id, { auto_approve: mode === "inherit" ? null : mode });
+    const s = this.live.get(id);
+    if (s && !this.autoApproveActive(this.row(id))) this.cancelReviews(id, s);
+    this.emitSummary(id, true);
+  }
+
+  /** The global switch changed: sessions that inherit it and are now off cancel their reviews in flight. */
+  autoApproveChanged() {
+    for (const [id, s] of this.live) {
+      try {
+        if (!this.autoApproveActive(this.row(id))) this.cancelReviews(id, s);
+        this.emitSummary(id, true);
+      } catch {}
+    }
+  }
+
   /** Write the answer to pi and drop the request; a judgement still running for it finds it gone. */
   private answer(id: string, s: Live, req: UiRequest, record: RpcRecord) {
     s.proc!.write(record);
     s.pending.delete(req.id);
+    s.reviews.get(req.id)?.abort();
+    s.reviews.delete(req.id);
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
     this.emitSummary(id, true);
   }
@@ -647,9 +756,18 @@ export class SessionManager extends EventEmitter {
     return s.proc!.call<{ disposition: string }>(cmd);
   }
 
+  /**
+   * Abort the run. pi keeps its open dialogs through an abort and finishes aborting only once they
+   * are answered, so the reviews in flight are cancelled here (their cards wait for the user, and
+   * nothing answers for them) and, with a card open, the abort is not awaited.
+   */
   async abort(id: string) {
     const s = this.state(id);
-    if (s.proc && !s.proc.exited) await s.proc.call({ type: "abort" }, 30_000);
+    this.cancelReviews(id, s);
+    if (!s.proc || s.proc.exited) return;
+    const aborted = s.proc.call({ type: "abort" }, 30_000);
+    if (s.pending.size > 0) aborted.catch(() => {});
+    else await aborted;
   }
 
   async stop(id: string) {
@@ -772,6 +890,7 @@ export class SessionManager extends EventEmitter {
     const s = this.state(id);
     await this.stop(id);
     s.proc = undefined;
+    this.dropReviews(s);
     s.pending.clear();
     s.toolArgs.clear();
     s.finished = undefined;
@@ -863,6 +982,8 @@ export class SessionManager extends EventEmitter {
     }
   }
 }
+
+const typesafeSkillDir = () => path.join(config.optionalSkillsDir, TYPESAFE_SKILL);
 
 function parseEnvelope(title: string): Record<string, any> | null {
   if (!title.startsWith("{")) return null;

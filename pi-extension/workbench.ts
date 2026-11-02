@@ -289,7 +289,9 @@ export default function workbench(pi: ExtensionAPI) {
 }
 
 function findSkill(name: string, cwd: string): string | undefined {
-  const roots = [path.join(cwd, ".agents", "skills"), path.join(cwd, ".pi", "skills"), process.env.PI_WORKBENCH_SKILLS ?? ""].filter(Boolean);
+  // PI_WORKBENCH_EXTRA_SKILLS: skill dirs only this session loads (the TypeSafe skill), set by the server.
+  const extra = (process.env.PI_WORKBENCH_EXTRA_SKILLS ?? "").split(path.delimiter);
+  const roots = [path.join(cwd, ".agents", "skills"), path.join(cwd, ".pi", "skills"), process.env.PI_WORKBENCH_SKILLS ?? "", ...extra].filter(Boolean);
   for (const root of roots) {
     const found = walk(root, name, 0);
     if (found) return found;

@@ -8,6 +8,7 @@ Self-hosted web UI that drives the pi coding agent (`@earendil-works/pi-coding-a
 - `shared/transcript.ts`: the RPC-event → conversation reducer. **Both sides use it.** Change it in one place, never fork it.
 - `pi-extension/workbench.ts`: loaded into every pi process via the generated `settings.json`. Imports of pi packages and `typebox` resolve to pi's own copies.
 - `skills/`: workbench-bundled skills (asd-ste100). The Dockerfile copies them into the image skills dir next to mattpocock's skills.
+- The TypeSafe skill (`typesafe-ai/skills`, pinned in the Dockerfile) goes to `OPTIONAL_SKILLS_DIR`, which pi never scans. A session created with the TypeSafe box passes it with `--skill` and `PI_WORKBENCH_EXTRA_SKILLS`.
 
 ## Pipeline
 - Every pi process is spawned with `--append-system-prompt`: user-facing explanations follow the asd-ste100 skill (Simplified Technical English). See `EXPLAIN_PROMPT` in `sessions.ts`.

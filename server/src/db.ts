@@ -42,6 +42,10 @@ export type SessionRow = {
   attention: string | null;
   /** The GitHub issue this session solves, e.g. `owner/name#123`; null for plain sessions. */
   issue_ref: string | null;
+  /** Auto-approve for this session: null inherits the global switch, or "on" / "off". */
+  auto_approve: string | null;
+  /** 1 when the session loads the TypeSafe skill (picked on the New session form). */
+  typesafe_skill: number;
 };
 
 export type TicketRow = {
@@ -86,6 +90,12 @@ CREATE TABLE IF NOT EXISTS tickets (
   blocked_by TEXT NOT NULL DEFAULT '[]', tracker_ref TEXT, status TEXT NOT NULL DEFAULT 'ready',
   note TEXT, run_id TEXT, started_at INTEGER, finished_at INTEGER, PRIMARY KEY (session_id, num)
 );
+-- Auto-approve's audit trail: pi's messages hold no automatic answers, so each is kept here and
+-- merged into its run's transcript by time. \`event\` is the wb_auto_answer record as JSON.
+CREATE TABLE IF NOT EXISTS auto_decisions (
+  session_id TEXT NOT NULL, run_id TEXT NOT NULL, request_id TEXT NOT NULL, event TEXT NOT NULL,
+  created_at INTEGER NOT NULL, PRIMARY KEY (session_id, request_id)
+);
 CREATE TABLE IF NOT EXISTS secrets (
   scope TEXT NOT NULL, name TEXT NOT NULL, iv TEXT NOT NULL, tag TEXT NOT NULL,
   data TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (scope, name)
@@ -114,6 +124,8 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ["sessions", "spec_ref", "TEXT"],
   ["sessions", "review_run", "TEXT"],
   ["sessions", "issue_ref", "TEXT"],
+  ["sessions", "auto_approve", "TEXT"],
+  ["sessions", "typesafe_skill", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 function migrate(db: DatabaseSync) {

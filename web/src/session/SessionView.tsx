@@ -3,7 +3,7 @@ import { go } from "../App.tsx";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import type { Transcript as TranscriptT } from "../../../shared/transcript.ts";
-import type { PrStatus } from "../types.ts";
+import type { AutoApproveMode, PrStatus, SessionSummary } from "../types.ts";
 import { Empty, kTokens, Spinner, StatusPill, issueUrl, parseIssueRef } from "../ui.tsx";
 import { ChangesModal } from "./ChangesModal.tsx";
 import { Composer } from "./Composer.tsx";
@@ -36,6 +36,26 @@ function PrBadge({ sessionId, number, url }: { sessionId: string; number: number
       {st && <span className="muted"> · {st.state}</span>}
       {ci && <span className={`ci ci-${checks!.failed ? "fail" : checks!.pending ? "pending" : "pass"}`}>{ci}</span>}
     </a>
+  );
+}
+
+/** Whether auto-approve is in effect for the session, and its setting; a change applies to the next permission. */
+function AutoApproveControl({ s }: { s: SessionSummary }) {
+  const { toast, upsert } = useStore();
+  const set = (autoApprove: AutoApproveMode) =>
+    api
+      .patch<SessionSummary>(`/api/sessions/${s.id}`, { autoApprove })
+      .then(upsert)
+      .catch((e) => toast(e.message, "error"));
+  return (
+    <span className={`aa-control ${s.autoApproveActive ? "on" : ""}`} title="Auto-approve: the risk judge and the reviewer answer this session's permissions">
+      <span className="aa-state">Auto-approve {s.autoApproveActive ? "on" : "off"}</span>
+      <select className="input aa-select" aria-label="Auto-approve for this session" value={s.autoApprove} onChange={(e) => set(e.target.value as AutoApproveMode)}>
+        <option value="inherit">follow Settings</option>
+        <option value="on">on for this session</option>
+        <option value="off">off for this session</option>
+      </select>
+    </span>
   );
 }
 
@@ -128,6 +148,12 @@ export function SessionView({ id }: { id: string }) {
               <a className="mono small muted" href={issueUrl(s.issueRef)} title={`Solving ${s.issueRef}`}>
                 Issue #{issue.number}
               </a>
+            )}
+            <AutoApproveControl s={s} />
+            {s.typesafeSkill && (
+              <span className="small muted" title="This session loads the TypeSafe skill (typesafe-ai)">
+                TypeSafe skill
+              </span>
             )}
             {s.contextTokens > 0 && (
               <span className="ctx" title={`${s.contextTokens.toLocaleString()} of ${s.contextWindow.toLocaleString()} tokens`}>

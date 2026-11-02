@@ -151,11 +151,14 @@ const router = new Router()
       prompt: String(body.prompt ?? ""),
       mode: body.mode === "direct" ? "direct" : "pipeline",
       issueRef: body.issueRef ? String(body.issueRef) : undefined,
+      autoApprove: body.autoApprove,
+      typesafeSkill: body.typesafeSkill === true,
     }),
   )
   .on("GET", "/api/sessions/:id", ({ params }) => sessions.snapshot(params.id))
   .on("PATCH", "/api/sessions/:id", ({ params, body }) => {
     if (typeof body.title === "string") sessions.rename(params.id, body.title);
+    if (body.autoApprove !== undefined) sessions.setAutoApprove(params.id, body.autoApprove);
     return sessions.summary(params.id);
   })
   .on("DELETE", "/api/sessions/:id", async ({ params }) => {
@@ -224,13 +227,14 @@ const router = new Router()
   .on("GET", "/api/skills", ({ query }) => {
     const id = query.get("sessionId");
     const cwd = id ? sessions.repoOf(id).row.worktree : undefined;
-    return listSkills(config.skillsDir, cwd).map(({ path: _p, ...s }) => s);
+    return listSkills(config.skillsDir, cwd, id ? sessions.extraSkillDirs(id) : []).map(({ path: _p, ...s }) => s);
   })
 
   // --- settings & secrets ---------------------------------------------------------------
   .on("GET", "/api/settings", () => ({ model: getModelSettings(db), approval: getApprovalSettings(db), autoApprove: autoApproveView(db, secrets) }))
   .on("PUT", "/api/settings/auto-approve", async ({ body }) => {
     await configureAutoApprove(db, secrets, body);
+    sessions.autoApproveChanged();
     return autoApproveView(db, secrets);
   })
   .on("PUT", "/api/settings/auto-approve/keys", ({ body }) => {
