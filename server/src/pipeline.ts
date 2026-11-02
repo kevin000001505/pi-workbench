@@ -25,6 +25,30 @@ export type Ticket = {
 
 export type TicketInput = { number: number; title: string; body: string; blockedBy?: number[]; trackerRef?: string };
 
+/** An open sub-issue of a spec, as GitHub returns it: its own blockers' issue numbers. */
+export type SubIssueSeed = { number: number; title: string; body: string | null; blockedBy: number[] };
+
+/** A spec issue and the tickets it owns, ready to feed into a session. */
+export type TicketSeed = { spec: { number: number; title: string; body: string | null; htmlUrl: string }; subIssues: SubIssueSeed[] };
+
+/**
+ * A spec's open sub-issues become pipeline tickets: local numbers run 1..N in sub-issue number
+ * order, each ticket's trackerRef is its issue number, and blockedBy edges are remapped to
+ * local numbers. An edge to an issue outside the set (closed or unrelated) is dropped, so it
+ * cannot leave a ticket blocked forever.
+ */
+export function ticketsFromSubIssues(subs: SubIssueSeed[]): TicketInput[] {
+  const sorted = subs.slice().sort((a, b) => a.number - b.number);
+  const local = new Map(sorted.map((s, i) => [s.number, i + 1]));
+  return sorted.map((s, i) => ({
+    number: i + 1,
+    title: s.title.trim(),
+    body: (s.body ?? "").trim() || `No description for #${s.number}`,
+    blockedBy: (s.blockedBy ?? []).filter((b) => local.has(b)).map((b) => local.get(b)!),
+    trackerRef: String(s.number),
+  }));
+}
+
 export const PIPELINE_TOOLS = ["save_grill_summary", "save_spec", "record_tickets", "finish_ticket", "finish_review"] as const;
 
 /** Specs longer than this go to ticket runs as a pointer only (implement-spec: "communicate through context pointers"). */

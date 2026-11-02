@@ -242,6 +242,44 @@ test("a session that solves an issue opens a PR whose body closes it; ticket clo
   assert.doesNotMatch(plain.body, /Closes/);
 });
 
+test("listTicketSubIssues returns the spec and its open ticket sub-issues, with their edges", async () => {
+  const { GitHub, GitHubError } = await import("../src/github.ts");
+  const client = new GitHub("ghp_test");
+  gh.createBare("kevin", "ticketed");
+  gh.seedSubIssues(
+    "kevin",
+    "ticketed",
+    { number: 7, title: "The spec", body: "Do things in order.", html_url: "https://github.com/kevin/ticketed/issues/7" },
+    [
+      { number: 8, title: "A", body: "a" },
+      { number: 9, title: "B", body: "b", blockedBy: [8] },
+      { number: 10, title: "C", body: "c", blockedBy: [9, 11] }, // 11 is not a sub-issue of this spec
+      { number: 12, title: "D", body: "d", state: "CLOSED" }, // already solved
+    ],
+  );
+  const seed = await client.listTicketSubIssues("kevin", "ticketed", 7);
+  assert.deepEqual(seed.spec, { number: 7, title: "The spec", body: "Do things in order.", htmlUrl: "https://github.com/kevin/ticketed/issues/7" });
+  assert.deepEqual(
+    seed.subIssues.map((s) => [s.number, s.title, s.blockedBy]),
+    [
+      [8, "A", []],
+      [9, "B", [8]],
+      [10, "C", [9]], // the edge to 11 is dropped, so the ticket can still start
+    ],
+  );
+  // A spec with no sub-issues, or no seed at all, is a 404.
+  gh.seedSubIssues("kevin", "empty", { number: 3, title: "No tickets", body: "", html_url: "https://github.com/kevin/empty/issues/3" }, []);
+  gh.createBare("kevin", "empty");
+  assert.equal((await client.listTicketSubIssues("kevin", "empty", 3)).subIssues.length, 0);
+  await assert.rejects(client.listTicketSubIssues("kevin", "ticketed", 99), (e) => e instanceof GitHubError && e.status === 404);
+  // ticketsFromIssueRef parses the owner/name#123 form and rejects the rest.
+  assert.equal((await client.ticketsFromIssueRef("kevin/ticketed#7")).spec.number, 7);
+  await assert.rejects(client.ticketsFromIssueRef("ticketed#7"), (e) => e instanceof GitHubError && e.status === 400);
+  await assert.rejects(client.ticketsFromIssueRef("#7"), (e) => e instanceof GitHubError && e.status === 400);
+  // A bad token keeps the REST client's error shape on GraphQL calls too.
+  await assert.rejects(new GitHub("nope").listTicketSubIssues("kevin", "ticketed", 7), (e) => e instanceof GitHubError && e.status === 401 && /Bad credentials/.test(e.message));
+});
+
 test("a bad token surfaces GitHub's message", async () => {
   const { GitHub, GitHubError } = await import("../src/github.ts");
   await assert.rejects(new GitHub("nope").user(), (e: any) => e instanceof GitHubError && e.status === 401 && /Bad credentials/.test(e.message));

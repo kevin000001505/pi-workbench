@@ -61,7 +61,7 @@ async function gitEnv(): Promise<GitEnv> {
   return { ...identity.env, ...env };
 }
 
-const sessions = new SessionManager(db, secrets, gitEnv, () => applySsh(db, secrets, config.agentHome, config.piAgentDir));
+const sessions = new SessionManager(db, secrets, gitEnv, () => applySsh(db, secrets, config.agentHome, config.piAgentDir), (ref) => github().ticketsFromIssueRef(ref));
 
 const llmKey = () => secrets.get(GLOBAL_SCOPE, LLM_KEY_ENV);
 
@@ -113,6 +113,11 @@ const router = new Router()
     ]);
     return { ...issue, comments };
   })
+  .on("GET", "/api/github/issues/:owner/:name/:number/tickets", async ({ params }) => {
+    const repo = requireTrackedRepo(db, `${params.owner}/${params.name}`);
+    // The spec issue and its open ticket sub-issues; the UI shows the "Solve all tickets" button from this.
+    return github().listTicketSubIssues(repo.owner, repo.name, Number(params.number));
+  })
   .on("POST", "/api/repos", async ({ body }) => {
     const [owner, name] = String(body.id ?? "").split("/");
     assertRepoName(owner ?? "", name ?? "");
@@ -154,6 +159,7 @@ const router = new Router()
       issueRef: body.issueRef ? String(body.issueRef) : undefined,
       autoApprove: body.autoApprove,
       typesafeSkill: body.typesafeSkill,
+      startFrom: body.startFrom === "tickets" ? "tickets" : undefined,
     }),
   )
   .on("GET", "/api/sessions/:id", ({ params }) => sessions.snapshot(params.id))

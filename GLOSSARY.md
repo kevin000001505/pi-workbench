@@ -16,6 +16,10 @@ _Avoid_: source issue, parent issue
 An issue the pipeline's ticket phase publishes, referenced from a ticket's tracker ref; it too becomes a `Closes` line in the PR body, distinct from the origin issue.
 _Avoid_: sub-issue
 
+**Solve all tickets**:
+The Issues page button on an issue that owns ticket sub-issues: one pipeline session reads every open ticket sub-issue with its blocking edges from GitHub, skips grill/spec/tickets, implements the tickets one fresh run at a time in dependency order, and opens a PR whose merge closes the spec issue and every ticket issue.
+_Avoid_: solve all issues (that is the Start session flow, one session per issue)
+
 **Solve**:
 To work an issue through a session (grill → spec → tickets → implement → review) and open a PR whose merge closes the issue.
 _Avoid_: fix (a fix is one possible outcome; solving covers the whole flow)

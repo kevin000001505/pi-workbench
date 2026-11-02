@@ -11,6 +11,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import { startMockLlm } from "./mock-llm.ts";
+import { startMockGitHub } from "./mock-github.ts";
 
 const piBin = process.env.PI_BIN ?? "pi";
 const hasPi = spawnSync(piBin, ["--version"]).status === 0;
@@ -24,6 +25,7 @@ process.env.SKILLS_DIR = path.join(tmp, "skills");
 process.env.PI_EXTENSION = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "pi-extension", "workbench.ts");
 
 let mock: Awaited<ReturnType<typeof startMockLlm>>;
+let ghMock: Awaited<ReturnType<typeof startMockGitHub>>;
 let mgr: any;
 let db: any;
 const events: { id: string; ev: any }[] = [];
@@ -82,12 +84,15 @@ before(async () => {
   // `git push`): gated calls in ticket and review runs are answered without the user.
   const { configureAutoApprove } = await import("../src/autoapprove.ts");
   await configureAutoApprove(db, secrets, { enabled: true, judge: { kind: "local", model: "mock-judge" } as any });
+  ghMock = await startMockGitHub(path.join(tmp, "gh"));
+  config.githubApi = ghMock.url;
+  const { GitHub } = await import("../src/github.ts");
   mgr = new SessionManager(db, secrets, async () => ({
     GIT_AUTHOR_NAME: "t",
     GIT_AUTHOR_EMAIL: "t@t",
     GIT_COMMITTER_NAME: "t",
     GIT_COMMITTER_EMAIL: "t@t",
-  }));
+  }), undefined, (ref) => new GitHub("ghp_test").ticketsFromIssueRef(ref));
   mgr.on("event", (id: string, ev: any) => events.push({ id, ev }));
 });
 
@@ -95,6 +100,7 @@ after(async () => {
   if (!hasPi) return;
   await mgr.shutdown();
   await mock.close();
+  await ghMock.close();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -178,6 +184,42 @@ test("a pipeline session grills, writes a spec and tickets, implements them one 
   assert.equal(autoAnswers().length, 2);
   assert.match(autoAnswers()[1].subject, /Fix review findings" && git push/);
   assert.equal(autoAnswers()[1].answer, "allow");
+  const row = db.prepare("SELECT worktree FROM sessions WHERE id = ?").get(s.id);
+  assert.deepEqual(sh(row.worktree, "log", "--format=%s", "-4").trim().split("\n"), ["Fix review findings", "Ticket 3", "Ticket 2", "Ticket 1"]);
+});
+
+test("a session started from a spec's ticket issues implements every ticket, then reviews", { skip: !hasPi && "pi CLI not found" }, async () => {
+  ghMock.seedSubIssues(
+    "me",
+    "demo",
+    { number: 7, title: "Greeting suite", body: "## Solution\nhello.txt says Hello, and it is tested." },
+    [
+      { number: 8, title: "Write hello.txt", body: "Create hello.txt containing Hello. PUSHME" },
+      { number: 9, title: "Add a test", body: "Test that hello.txt says Hello.", blockedBy: [8] },
+      { number: 10, title: "Add docs", body: "Document it.", blockedBy: [8, 9] },
+    ],
+  );
+  const s = await mgr.create({ repoId: "me/demo", title: "Greeting suite", issueRef: "me/demo#7", mode: "pipeline", startFrom: "tickets" });
+  assert.equal(s.mode, "pipeline");
+  // The first session never pushed its setup marker, so this one may start in setup; either way it lands on implement.
+  await waitFor(() => mgr.summary(s.id).phase === "implement");
+  const sum0 = mgr.summary(s.id);
+  assert.equal(sum0.issueRef, "me/demo#7");
+  assert.match(sum0.spec, /hello.txt says Hello/);
+  assert.match(sum0.specRef, /issues\/7$/);
+  assert.deepEqual(
+    sum0.tickets.map((t: any) => `${t.num}:${t.blockedBy.join(",")}:${t.trackerRef}`),
+    ["1::8", "2:1:9", "3:1,2:10"],
+  );
+  const done = await waitFor(() => {
+    const x = mgr.summary(s.id);
+    return x.phase === "done" ? x : undefined;
+  });
+  assert.deepEqual(done.tickets.map((t: any) => t.status), ["done", "done", "done"]);
+  // Ticket 2's fresh run carried the spec text read from the spec issue.
+  const t2 = mock.requests.find((r) => JSON.stringify(r.messages ?? []).includes("Ticket #2: Add a test"));
+  assert.match(JSON.stringify(t2.messages), /hello.txt says Hello/);
+  assert.ok(!JSON.stringify(t2.messages).includes("runs automatically on this repository's first"), "ticket runs start fresh, without the setup conversation");
   const row = db.prepare("SELECT worktree FROM sessions WHERE id = ?").get(s.id);
   assert.deepEqual(sh(row.worktree, "log", "--format=%s", "-4").trim().split("\n"), ["Fix review findings", "Ticket 3", "Ticket 2", "Ticket 1"]);
 });

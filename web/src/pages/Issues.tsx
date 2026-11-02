@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { go } from "../App.tsx";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
-import type { GhIssueSummary, GhIssueWithComments, Repo } from "../types.ts";
+import type { GhIssueSummary, GhIssueWithComments, GhTicketSeed, Repo, SessionSummary } from "../types.ts";
 import { ago, Empty, Markdown, PageHeader, Spinner } from "../ui.tsx";
 
 function Labels({ names }: { names: string[] }) {
@@ -83,6 +83,11 @@ function IssueList({ repoId, refresh }: { repoId: string; refresh: number }) {
             <span className="mono muted issue-num">#{i.number}</span>
             <span className="issue-title ellipsis">{i.title}</span>
             <Labels names={i.labels} />
+            {(i.subIssueTotal ?? 0) > 0 && (
+              <span className="tag mono" title={`${i.subIssueTotal} ticket sub-issues — open it to solve them all in one session`}>
+                ⧉ {i.subIssueTotal}
+              </span>
+            )}
             <span className="muted small issue-updated" title={i.updatedAt}>
               {ago(Date.parse(i.updatedAt))}
             </span>
@@ -102,7 +107,7 @@ function PermissionHint() {
   );
 }
 
-/** The full issue: markdown body, labels, assignees, up to 100 markdown comments, and a GitHub link. */
+/** The full issue: markdown body, labels, assignees, up to 100 markdown comments, a GitHub link, and a Solve all tickets button when it has ticket sub-issues. */
 function IssueDetail({
   repoId,
   number,
@@ -114,8 +119,11 @@ function IssueDetail({
   defaultBranch: string;
   refresh: number;
 }) {
+  const { toast } = useStore();
   const [data, setData] = useState<GhIssueWithComments | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [tickets, setTickets] = useState<GhTicketSeed | null>(null);
+  const [solving, setSolving] = useState(false);
 
   /** Pre-fill New Session for this issue: repo locked, title, prompt, default base branch. */
   const startSession = () => {
@@ -127,16 +135,42 @@ function IssueDetail({
     go(`#/new?${params.toString()}`);
   };
 
+  /** One session solves every open ticket sub-issue, in dependency order; its PR closes the spec issue and all tickets. */
+  const solveAllTickets = async () => {
+    if (!data) return;
+    setSolving(true);
+    try {
+      const s = await api.post<SessionSummary>("/api/sessions", {
+        repoId,
+        issueRef: `${repoId}#${number}`,
+        mode: "pipeline",
+        startFrom: "tickets",
+        title: data.title,
+        baseBranch: defaultBranch || undefined,
+      });
+      go(`#/session/${s.id}`);
+    } catch (e) {
+      toast((e as Error).message, "error");
+      setSolving(false);
+    }
+  };
+
   const load = useCallback(() => {
     const [owner, name] = repoId.split("/");
     setData(null);
     setError(null);
+    setTickets(null);
     api
       .get<GhIssueWithComments>(
         `/api/github/issues/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/${number}`,
       )
       .then(setData)
       .catch((e) => setError(e.message));
+    // No ticket sub-issues is a 404, not an error: the button simply stays hidden.
+    api
+      .get<GhTicketSeed>(`/api/github/issues/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/${number}/tickets`)
+      .then(setTickets)
+      .catch(() => setTickets(null));
   }, [repoId, number, refresh]);
 
   useEffect(load, [load]);
@@ -171,9 +205,22 @@ function IssueDetail({
           Updated {ago(Date.parse(data.updatedAt))}
         </p>
         <div className="row gap">
-          <button className="btn btn-primary" onClick={startSession}>
+          <button
+            className={`btn ${tickets && tickets.subIssues.length > 0 ? "btn-ghost" : "btn-primary"}`}
+            onClick={startSession}
+          >
             Start session
           </button>
+          {tickets && tickets.subIssues.length > 0 && (
+            <button
+              className="btn btn-primary"
+              disabled={solving}
+              title={`Implement all ${tickets.subIssues.length} open ticket sub-issues in one session, in dependency order. Its PR closes this issue and every ticket issue.`}
+              onClick={() => void solveAllTickets()}
+            >
+              {solving ? <Spinner small /> : `Solve all ${tickets.subIssues.length} tickets`}
+            </button>
+          )}
           <a className="btn btn-ghost" href={data.htmlUrl} target="_blank" rel="noopener">
             GitHub ↗
           </a>
@@ -224,7 +271,10 @@ export function Issues({ repoId, number }: { repoId?: string; number?: number })
 
   return (
     <div className="page">
-      <PageHeader title="Issues" sub="Open issues of your tracked repos. Pick a repo, filter, and click one to read it.">
+      <PageHeader
+        title="Issues"
+        sub="Open issues of your tracked repos. Pick a repo, filter, and click one to read it. An issue with ticket sub-issues gets a Solve all tickets button."
+      >
         <select
           className="input issue-repo"
           value={repo}
