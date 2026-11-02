@@ -363,7 +363,8 @@ export class SessionManager extends EventEmitter {
     const repo = getRepo(this.db, input.repoId);
     if (!repo) throw Object.assign(new Error(`Unknown repo ${input.repoId}`), { status: 404 });
     const autoApprove = autoApproveMode(input.autoApprove);
-    if (input.typesafeSkill !== undefined && typeof input.typesafeSkill !== "boolean") {
+    // Absent or null means no, as null means inherit for autoApprove.
+    if (input.typesafeSkill != null && typeof input.typesafeSkill !== "boolean") {
       throw Object.assign(new Error("The TypeSafe skill choice must be true or false"), { status: 400 });
     }
     const typesafe = input.typesafeSkill === true;

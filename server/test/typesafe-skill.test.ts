@@ -186,6 +186,8 @@ test("the TypeSafe box is refused when the skill is not installed", { skip }, as
     await assert.rejects(mgr.create({ repoId: "me/demo", title: "Missing", prompt: "", mode: "direct", typesafeSkill: true }), /TypeSafe skill is not installed/);
     // Not a boolean: refused, never read as "no".
     await assert.rejects(mgr.create({ repoId: "me/demo", title: "Bad", prompt: "", mode: "direct", typesafeSkill: "true" }), /true or false/);
+    // null is "no", like an absent value.
+    assert.equal((await mgr.create({ repoId: "me/demo", title: "Null", prompt: "", mode: "direct", typesafeSkill: null })).typesafeSkill, false);
   } finally {
     fs.renameSync(`${dir}.off`, dir);
   }
