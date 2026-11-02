@@ -418,7 +418,16 @@ test("a user abort of a ticket run keeps today's behavior: no stop-rule flag", {
   rescueOff();
   savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 });
   const s = await solveOne("Take your time. SLOWME");
-  await waitFor(() => Object.keys(mgr.live.get(s.id).transcript.tools).length > 0);
+  // Abort once the `sleep` process runs: an abort that lands before pi spawns it is not cancelled.
+  const sleeping = () =>
+    fs.readdirSync("/proc").some((pid) => {
+      try {
+        return /^\d+$/.test(pid) && fs.readFileSync(`/proc/${pid}/cmdline`, "utf8") === "sleep\u000030\u0000";
+      } catch {
+        return false;
+      }
+    });
+  await waitFor(sleeping);
   await mgr.abort(s.id);
   const attention = await flagged(s.id);
   assert.match(attention, /Ticket #1 was stopped/);
