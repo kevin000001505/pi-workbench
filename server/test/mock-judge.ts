@@ -33,8 +33,14 @@ export function startMockJudge(opts: { protocol: "systemone" | "openai"; model: 
   replies: JudgeReply[];
   /** Judge calls answered so far (one per finished POST), for tests that wait on a late verdict. */
   answered: () => number;
+  /** Calls the client hung up on before their answer was sent (a cancelled judgement). */
+  dropped: () => number;
+  /** Delay every scripted (not queued) answer, so calls arriving together are judged together. */
+  setDelay: (ms: number) => void;
   close: () => Promise<void>;
 }> {
+  let scriptDelayMs = 0;
+  let dropped = 0;
   const requests: { path: string; auth?: string; body: any }[] = [];
   const replies: JudgeReply[] = [];
   let answered = 0;
@@ -66,10 +72,16 @@ export function startMockJudge(opts: { protocol: "systemone" | "openai"; model: 
     const state = JSON.stringify(opts.protocol === "systemone" ? body.state : body.messages);
     const risky = state.includes("rm ");
     const push = state.includes("git push");
-    const reply = replies.shift() ?? (opts.protocol === "systemone" ? { nouls: risky ? RISKY : push ? PUSH : SAFE } : { text: risky ? "RISKY" : "SAFE" });
+    const reply: JudgeReply = replies.shift() ?? {
+      ...(opts.protocol === "systemone" ? { nouls: risky ? RISKY : push ? PUSH : SAFE } : { text: risky ? "RISKY" : "SAFE" }),
+      delayMs: scriptDelayMs,
+    };
     if (reply.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs));
     answered++;
-    if (res.destroyed) return;
+    if (res.destroyed) {
+      dropped++;
+      return;
+    }
     if (reply.status && reply.status !== 200) return send(res, reply.status, reply.body ?? { error: "mock failure" });
     if (reply.body !== undefined) return send(res, 200, reply.body);
     if (opts.protocol === "systemone") {
@@ -86,6 +98,10 @@ export function startMockJudge(opts: { protocol: "systemone" | "openai"; model: 
         requests,
         replies,
         answered: () => answered,
+        dropped: () => dropped,
+        setDelay: (ms: number) => {
+          scriptDelayMs = ms;
+        },
         close: () =>
           new Promise<void>((r) => {
             server.closeAllConnections();

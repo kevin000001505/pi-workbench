@@ -150,16 +150,37 @@ export function applyEvent(t: Transcript, ev: RpcEvent): Transcript {
     case "tool_execution_end":
       delete t.tools[ev.toolCallId];
       break;
-    case "wb_auto_answer": {
+    case "wb_auto_answer":
       // A permission auto-approve answered without the user: kept inline as an audit line.
-      const { type: _type, ...fields } = ev;
-      t.messages.push({ role: "autoAnswer", content: "", ...fields });
+      t.messages.push(autoAnswerMessage(ev));
       break;
-    }
     case "compaction_end":
       if (ev.result?.estimatedTokensAfter) t.contextTokens = ev.result.estimatedTokensAfter;
       break;
   }
+  return t;
+}
+
+/** The transcript item for a `wb_auto_answer` record. */
+export function autoAnswerMessage(ev: RpcEvent): AgentMessage {
+  const { type: _type, ...fields } = ev;
+  return { role: "autoAnswer", content: "", ...fields };
+}
+
+/**
+ * Put stored `wb_auto_answer` records back into a run's messages, which pi rebuilds without them:
+ * each goes before the first message that is newer than it, so it sits by the call it answered.
+ */
+export function withAutoAnswers(t: Transcript, records: RpcEvent[]): Transcript {
+  if (records.length === 0) return t;
+  const queue = [...records].sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+  const merged: AgentMessage[] = [];
+  for (const m of t.messages) {
+    while (queue.length && typeof m.timestamp === "number" && (queue[0].timestamp ?? 0) < m.timestamp) merged.push(autoAnswerMessage(queue.shift()!));
+    merged.push(m);
+  }
+  for (const r of queue) merged.push(autoAnswerMessage(r));
+  t.messages = merged;
   return t;
 }
 

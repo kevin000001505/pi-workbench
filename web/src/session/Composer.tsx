@@ -2,14 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.ts";
 import type { Skill } from "../types.ts";
 
-export function useSkills(sessionId?: string) {
+/** The skills a session can use; before it exists, `typesafe` adds the TypeSafe skill the form picked. */
+export function useSkills(sessionId?: string, typesafe = false) {
   const [skills, setSkills] = useState<Skill[]>([]);
   useEffect(() => {
     api
-      .get<Skill[]>(`/api/skills${sessionId ? `?sessionId=${sessionId}` : ""}`)
+      .get<Skill[]>(`/api/skills${sessionId ? `?sessionId=${sessionId}` : typesafe ? "?typesafe=1" : ""}`)
       .then(setSkills)
       .catch(() => setSkills([]));
-  }, [sessionId]);
+  }, [sessionId, typesafe]);
   return skills;
 }
 

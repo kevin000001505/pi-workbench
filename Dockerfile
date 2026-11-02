@@ -18,6 +18,16 @@ RUN git init -q /src && cd /src \
  && git fetch -q --depth 1 origin "$MATT_SKILLS_REF" && git checkout -q FETCH_HEAD \
  && mkdir -p /skills && cp -r skills/engineering skills/productivity /skills/
 
+# --- TypeSafe's skill (typesafe-ai/skills, MIT) at a pinned commit (tag v0.6.2) ------------------
+# Kept out of the skills dir pi scans: only sessions created with the TypeSafe box load it.
+FROM node:24-bookworm-slim AS typesafe-skill
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+ARG TYPESAFE_SKILLS_REF=302eea662c54bca6730873fe245bec1d69ebc23d
+RUN git init -q /src && cd /src \
+ && git remote add origin https://github.com/typesafe-ai/skills.git \
+ && git fetch -q --depth 1 origin "$TYPESAFE_SKILLS_REF" && git checkout -q FETCH_HEAD \
+ && mkdir -p /optional-skills && cp -r skills/typesafe-ai /optional-skills/
+
 # --- runtime --------------------------------------------------------------------------------
 FROM node:24-bookworm-slim
 ARG PI_VERSION=1.4.0
@@ -52,6 +62,7 @@ COPY --from=web /app/web/dist ./web/dist
 COPY --from=skills /skills /opt/workbench/skills
 # Workbench-bundled skills (asd-ste100), merged into the same dir pi scans.
 COPY skills/ /opt/workbench/skills/
+COPY --from=typesafe-skill /optional-skills /opt/workbench/optional-skills
 
 RUN mkdir -p /data && chown node:node /data
 USER node
@@ -59,6 +70,7 @@ ENV NODE_ENV=production \
     DATA_DIR=/data \
     PORT=8787 \
     SKILLS_DIR=/opt/workbench/skills \
+    OPTIONAL_SKILLS_DIR=/opt/workbench/optional-skills \
     PI_EXTENSION=/app/pi-extension/workbench.ts \
     WEB_DIR=/app/web/dist
 VOLUME ["/data"]

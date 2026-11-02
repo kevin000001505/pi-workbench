@@ -23,6 +23,8 @@ export const config = {
   piBin: process.env.PI_BIN ?? "pi",
   /** Global skills baked into the image (mattpocock/skills at a pinned commit). */
   skillsDir: path.resolve(process.env.SKILLS_DIR ?? path.join(appRoot, ".skills")),
+  /** Skills baked into the image that only some sessions load (the TypeSafe skill); pi never scans it. */
+  optionalSkillsDir: path.resolve(process.env.OPTIONAL_SKILLS_DIR ?? path.join(appRoot, ".optional-skills")),
   extensionPath: path.resolve(process.env.PI_EXTENSION ?? path.join(appRoot, "pi-extension", "workbench.ts")),
   webDir: path.resolve(process.env.WEB_DIR ?? path.join(appRoot, "web", "dist")),
   masterKey: process.env.WORKBENCH_MASTER_KEY ?? "",
@@ -41,6 +43,8 @@ export const config = {
   },
 };
 
+/** The TypeSafe skill (typesafe-ai/skills): a dir in the optional skills dir, loaded per session. */
+export const TYPESAFE_SKILL = "typesafe-ai";
 /** The marker file setup-matt-pocock-skills writes; its absence means the repo still needs setup. */
 export const SETUP_MARKER = "docs/agents/issue-tracker.md";
 export const SETUP_SKILL = "setup-matt-pocock-skills";

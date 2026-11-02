@@ -14,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 import { RISKY, SAFE, startMockJudge } from "./mock-judge.ts";
+import { captureWrites } from "./capture.ts";
 import { startMockLlm } from "./mock-llm.ts";
 
 const piBin = process.env.PI_BIN ?? "pi";
@@ -361,21 +362,15 @@ test("the user's answer during judging wins: pi gets exactly one answer and no l
   const req = await cardFor(sessionId, "please push");
   assert.equal(req.judge.state, "judging");
   // Watch what reaches pi for this request.
-  const proc = mgr.live.get(sessionId).proc;
-  const writes: any[] = [];
-  const write = proc.write.bind(proc);
-  proc.write = (rec: any) => {
-    if (rec.id === req.id) writes.push(rec);
-    return write(rec);
-  };
+  const capture = captureWrites(mgr.live.get(sessionId).proc, req.id);
   const from = events.length;
   const answeredBefore = jev.answered();
   await deny(sessionId, req);
   // Wait for the judge to deliver its late verdict, then let the server handle it.
   await waitFor(() => jev.answered() > answeredBefore);
   await new Promise((r) => setTimeout(r, 200));
-  proc.write = write;
-  assert.deepEqual(writes.map((w) => w.value), ["Deny"]);
+  capture.stop();
+  assert.deepEqual(capture.writes.map((w) => w.value), ["Deny"]);
   assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"), "no automatic answer after the user's");
 });
 
@@ -569,4 +564,267 @@ test("the judge token never reaches pi: not its environment, not the model's req
   assert.ok(environ.length > 0);
   assert.ok(!environ.includes(TOKEN));
   assert.ok(!JSON.stringify(mock.requests).includes(TOKEN));
+});
+
+// --- per-session override (issue #21) ------------------------------------------------------------
+
+test("a session set to off waits for the user with no judge call, while auto-approve is on globally", { skip }, async () => {
+  await enable();
+  mgr.setAutoApprove(sessionId, "off");
+  try {
+    assert.equal(mgr.summary(sessionId).autoApprove, "off");
+    assert.equal(mgr.summary(sessionId).autoApproveActive, false);
+    const before = jev.requests.length;
+    const req = await cardFor(sessionId, "please push");
+    assert.equal(req.judge, undefined);
+    assert.equal(mgr.summary(sessionId).status, "waiting");
+    await deny(sessionId, req);
+    assert.equal(jev.requests.length, before, "the judge was not asked");
+  } finally {
+    mgr.setAutoApprove(sessionId, "inherit");
+  }
+});
+
+test("a session set to on is auto-reviewed, while auto-approve is off globally", { skip }, async () => {
+  await enable();
+  auto.saveAutoApproveSettings(db, { enabled: false });
+  mgr.setAutoApprove(sessionId, "on");
+  try {
+    assert.equal(mgr.summary(sessionId).autoApproveActive, true);
+    const added = await run(sessionId, "please push");
+    assert.equal(added.find((m: any) => m.role === "autoAnswer")?.answer, "allow");
+  } finally {
+    mgr.setAutoApprove(sessionId, "inherit");
+  }
+});
+
+test("inherit follows the global switch, also when it changes while the session runs", { skip }, async () => {
+  auto.saveAutoApproveSettings(db, { enabled: false });
+  assert.equal(mgr.summary(sessionId).autoApprove, "inherit");
+  assert.equal(mgr.summary(sessionId).autoApproveActive, false);
+  const req = await cardFor(sessionId, "please push");
+  assert.equal(req.judge, undefined);
+  await deny(sessionId, req);
+  // Switched on with no restart: the next permission goes to the judge.
+  await enable();
+  mgr.autoApproveChanged();
+  assert.equal(mgr.summary(sessionId).autoApproveActive, true);
+  const added = await run(sessionId, "please push");
+  assert.equal(added.find((m: any) => m.role === "autoAnswer")?.answer, "allow");
+});
+
+/** Wait until the slow judge call is over (answered, or hung up on), then let the server handle it. */
+async function judgeCallOver(answeredBefore: number) {
+  await waitFor(() => jev.answered() > answeredBefore);
+  await new Promise((r) => setTimeout(r, 200));
+}
+
+/** Start a slow judgement, call `off` while it runs, and check the card waits and no late answer reaches pi. */
+async function offDuringReview(off: () => unknown) {
+  jev.replies.push({ nouls: SAFE, delayMs: 800 });
+  const req = await cardFor(sessionId, "please push");
+  assert.equal(req.judge.state, "judging");
+  const capture = captureWrites(mgr.live.get(sessionId).proc, req.id);
+  const from = events.length;
+  const answeredBefore = jev.answered();
+  const droppedBefore = jev.dropped();
+  await off();
+  const card = mgr.summary(sessionId).pending.find((r: any) => r.id === req.id);
+  assert.equal(card.judge, undefined, "the card is an ordinary waiting card");
+  assert.equal(mgr.summary(sessionId).status, "waiting");
+  await judgeCallOver(answeredBefore);
+  capture.stop();
+  assert.deepEqual(capture.writes, [], "no late extension_ui_response");
+  assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"));
+  assert.equal(jev.dropped(), droppedBefore + 1, "the cancelled judge call was hung up on");
+  assert.ok(mgr.summary(sessionId).pending.some((r: any) => r.id === req.id), "the card still waits for the user");
+  await deny(sessionId, req);
+}
+
+test("turning the session off during a review cancels it: the card waits, and no late answer is written", { skip }, async () => {
+  await enable();
+  try {
+    await offDuringReview(() => mgr.setAutoApprove(sessionId, "off"));
+  } finally {
+    mgr.setAutoApprove(sessionId, "inherit");
+  }
+});
+
+test("turning auto-approve off globally during a review cancels it for a session that inherits", { skip }, async () => {
+  await enable();
+  // What Settings → Save does (PUT /api/settings/auto-approve).
+  await offDuringReview(() => mgr.applyAutoApproveSettings({ enabled: false, judge: auto.getAutoApproveSettings(db).judge }));
+  assert.equal(auto.getAutoApproveSettings(db).enabled, false);
+});
+
+test("an unknown session auto-approve value is refused, on create and on update, before anything is saved", { skip }, async () => {
+  assert.throws(() => mgr.setAutoApprove(sessionId, "maybe"), /inherit, on or off/);
+  await assert.rejects(mgr.create({ repoId: "me/demo", title: "Bad", prompt: "hi", mode: "direct", autoApprove: "maybe" }), /inherit, on or off/);
+  // What PATCH /api/sessions/:id does: the bad value refuses the whole update, title included.
+  assert.throws(() => mgr.patch(sessionId, { title: "Renamed", autoApprove: "maybe" }), /inherit, on or off/);
+  assert.equal(mgr.summary(sessionId).title, "Auto");
+  const after = mgr.patch(sessionId, { autoApprove: "off" });
+  assert.equal(after.autoApprove, "off");
+  assert.equal(mgr.patch(sessionId, { autoApprove: "inherit" }).autoApprove, "inherit");
+});
+
+// --- cancelling reviews, and concurrent permissions (issue #23) ----------------------------------
+
+/** Start a slow judgement, run `cut` while it runs, and check no answer for that request reaches pi afterwards. */
+async function cutDuringJudging(cut: () => Promise<unknown>) {
+  jev.replies.push({ nouls: SAFE, delayMs: 800 });
+  const req = await cardFor(sessionId, "please push");
+  assert.equal(req.judge.state, "judging");
+  const capture = captureWrites(mgr.live.get(sessionId).proc, req.id);
+  const from = events.length;
+  const answeredBefore = jev.answered();
+  const droppedBefore = jev.dropped();
+  await cut();
+  await judgeCallOver(answeredBefore);
+  capture.stop();
+  assert.deepEqual(capture.writes, [], "no extension_ui_response for the request after the cut");
+  assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"), "no automatic answer after the cut");
+  assert.equal(jev.dropped(), droppedBefore + 1, "the cancelled judge call was hung up on");
+  return req;
+}
+
+/** Leave the session idle and running for the next test, whatever the cut left behind. */
+async function recover() {
+  for (const r of mgr.summary(sessionId).pending) {
+    try {
+      mgr.respond(sessionId, r.id, { value: "Deny" });
+    } catch {}
+  }
+  await mgr.start(sessionId);
+  await settle(sessionId);
+}
+
+test("aborting the run during a slow judgement cancels it: no answer is written afterwards", { skip }, async () => {
+  await enable();
+  const req = await cutDuringJudging(() => mgr.abort(sessionId));
+  // pi keeps the dialog through the abort: the card stays, as an ordinary card waiting for the user.
+  const card = mgr.summary(sessionId).pending.find((r: any) => r.id === req.id);
+  assert.equal(card.judge, undefined);
+  assert.equal(mgr.summary(sessionId).status, "waiting");
+  await recover();
+});
+
+test("stopping the session during a slow judgement cancels it: no answer is written afterwards", { skip }, async () => {
+  await enable();
+  await cutDuringJudging(() => mgr.stop(sessionId));
+  assert.equal(mgr.summary(sessionId).pending.length, 0);
+  await recover();
+});
+
+test("a run switch during a slow judgement cancels it: no answer is written afterwards", { skip }, async () => {
+  await enable();
+  // The same conversation, reopened: what a switch to another run does to the old one.
+  await cutDuringJudging(() => mgr.switchRun(sessionId, sessionId, false));
+  assert.equal(mgr.summary(sessionId).pending.length, 0);
+  await recover();
+});
+
+test("cancelling an OpenAI-compatible judgement hangs up its call too", { skip }, async () => {
+  await enable({ baseUrl: chat.url, model: "mock-judge" });
+  chat.replies.push({ text: "SAFE", delayMs: 800 });
+  const req = await cardFor(sessionId, "please push");
+  assert.equal(req.judge.state, "judging");
+  const capture = captureWrites(mgr.live.get(sessionId).proc, req.id);
+  const answeredBefore = chat.answered();
+  const droppedBefore = chat.dropped();
+  mgr.setAutoApprove(sessionId, "off");
+  try {
+    await waitFor(() => chat.answered() > answeredBefore);
+    await new Promise((r) => setTimeout(r, 200));
+    capture.stop();
+    assert.deepEqual(capture.writes, []);
+    assert.equal(chat.dropped(), droppedBefore + 1, "the cancelled chat call was hung up on");
+  } finally {
+    mgr.setAutoApprove(sessionId, "inherit");
+  }
+  await deny(sessionId, req);
+});
+
+test("a verdict landing while the session stops is dropped: no answer, no audit line", { skip }, async () => {
+  await enable();
+  jev.replies.push({ nouls: SAFE, delayMs: 300 });
+  const req = await cardFor(sessionId, "please push");
+  assert.equal(req.judge.state, "judging");
+  // A process slow to exit: the verdict lands while it is still stopping.
+  const proc = mgr.live.get(sessionId).proc;
+  const capture = captureWrites(proc, req.id);
+  const stopProc = proc.stop.bind(proc);
+  proc.stop = async (...args: any[]) => {
+    await new Promise((r) => setTimeout(r, 1000));
+    return stopProc(...args);
+  };
+  const from = events.length;
+  await mgr.stop(sessionId);
+  capture.stop();
+  assert.deepEqual(capture.writes, []);
+  assert.ok(!events.slice(from).some((e) => e.type === "wb_auto_answer"), "no automatic answer recorded");
+  const stored = db.prepare("SELECT COUNT(*) AS n FROM auto_decisions WHERE request_id = ?").get(req.id) as any;
+  assert.equal(stored.n, 0);
+  await recover();
+});
+
+test("two permissions in one session, the second arriving while the first is judged, each get their own verdict", { skip }, async () => {
+  await enable();
+  jev.setDelay(600);
+  try {
+    const from = (await mgr.snapshot(sessionId)).transcript.messages.length;
+    await mgr.send(sessionId, "do it twice");
+    await waitFor(() => mgr.summary(sessionId).pending.find((r: any) => r.subject === "git push origin HEAD" && r.judge?.state === "judging"));
+    // pi 1.4.0 raises a message's permissions one at a time, so the second one arrives here as a
+    // record of its own while the first is still judged.
+    const proc = mgr.live.get(sessionId).proc;
+    const title = JSON.stringify({ wb: "permission", tool: "bash", subject: "rm -rf /tmp/other", reasons: ["rm -r / -f"] });
+    proc.emit("record", { type: "extension_ui_request", id: "second-permission", method: "select", title, options: ["Allow", "Allow for this session", "Deny"] });
+    const both = mgr.summary(sessionId).pending.filter((r: any) => r.kind === "permission");
+    assert.deepEqual(both.map((r: any) => r.judge?.state), ["judging", "judging"]);
+    // The second (rm) is rated risky and waits for the user; the first (git push) is allowed on its own verdict.
+    const second = await waitFor(() => mgr.summary(sessionId).pending.find((r: any) => r.id === "second-permission" && r.judge?.state === "waiting"));
+    assert.equal(second.judge.rating, "risky");
+    mgr.respond(sessionId, second.id, { value: "Deny" });
+    // The message's own second call, `rm -rf build`, follows and gets its own verdict too.
+    const rm = await waitFor(() => mgr.summary(sessionId).pending.find((r: any) => r.subject === "rm -rf build" && r.judge?.state === "waiting"));
+    assert.equal(rm.judge.rating, "risky");
+    mgr.respond(sessionId, rm.id, { value: "Deny" });
+    await settle(sessionId);
+    const added = (await mgr.snapshot(sessionId)).transcript.messages.slice(from);
+    const lines = added.filter((m: any) => m.role === "autoAnswer");
+    assert.deepEqual(lines.map((l: any) => [l.subject, l.answer]), [["git push origin HEAD", "allow"]]);
+    const results = added.filter((m: any) => m.role === "toolResult" && m.toolName === "bash");
+    assert.equal(results.length, 2);
+    assert.ok(results.some((m: any) => /denied/i.test(JSON.stringify(m.content))), "the user's deny reached the rm call");
+  } finally {
+    jev.setDelay(0);
+  }
+});
+
+// --- the audit trail survives reloads and restarts (issue #22); keep this last: it replaces `mgr` ---
+
+test("an automatic allow stays in the transcript: in a fresh snapshot, and after a server restart", { skip }, async () => {
+  await enable();
+  const added = await run(sessionId, "please push");
+  const line = added.find((m: any) => m.role === "autoAnswer");
+  assert.ok(line);
+  const has = (t: any) => t.messages.some((m: any) => m.role === "autoAnswer" && m.requestId === line.requestId);
+
+  // A fresh snapshot, its transcript rebuilt from pi's messages.
+  mgr.live.get(sessionId).loaded = false;
+  assert.ok(has((await mgr.snapshot(sessionId)).transcript), "after a reload");
+
+  // A server restart: a new manager reads the stopped session from its file.
+  await mgr.shutdown();
+  const { SessionManager } = await import("../src/sessions.ts");
+  mgr = new SessionManager(db, secrets, async () => ({ GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" }));
+  mgr.on("event", (_id: string, ev: any) => events.push(ev));
+  const t = (await mgr.snapshot(sessionId)).transcript;
+  assert.ok(has(t), "after a restart");
+  assert.equal(t.messages.filter((m: any) => m.role === "autoAnswer" && m.requestId === line.requestId).length, 1, "once");
+  // Once pi runs again, its messages and the stored lines merge the same way.
+  await mgr.start(sessionId);
+  mgr.live.get(sessionId).loaded = false;
+  assert.ok(has((await mgr.snapshot(sessionId)).transcript), "after resuming");
 });

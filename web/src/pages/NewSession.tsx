@@ -3,7 +3,7 @@ import { go } from "../App.tsx";
 import { api } from "../api.ts";
 import { SkillPicker, useSkills } from "../session/Composer.tsx";
 import { useStore } from "../store.tsx";
-import type { Repo, SessionSummary, Skill } from "../types.ts";
+import type { AutoApproveMode, Repo, SessionSummary, Skill } from "../types.ts";
 import { Empty, PageHeader, Spinner, issueUrl, parseIssueRef } from "../ui.tsx";
 
 export function NewSession({
@@ -29,8 +29,10 @@ export function NewSession({
   const [prompt, setPrompt] = useState(prefillPrompt ?? "");
   const [picker, setPicker] = useState(false);
   const [mode, setMode] = useState<"pipeline" | "direct">("pipeline");
+  const [autoApprove, setAutoApprove] = useState<AutoApproveMode>("inherit");
+  const [typesafe, setTypesafe] = useState(false);
   const [creating, setCreating] = useState(false);
-  const skills = useSkills();
+  const skills = useSkills(undefined, typesafe);
 
   useEffect(() => {
     api
@@ -54,6 +56,8 @@ export function NewSession({
         prompt,
         mode,
         issueRef: fromIssue ? issueRef : undefined,
+        autoApprove,
+        typesafeSkill: typesafe,
       });
       upsert(s);
       go(`#/session/${s.id}`);
@@ -124,6 +128,24 @@ export function NewSession({
               asks you its questions; your task goes out right after.
             </div>
           )}
+          <label>
+            Auto-approve
+            <select className="input" value={autoApprove} onChange={(e) => setAutoApprove(e.target.value as AutoApproveMode)}>
+              <option value="inherit">Follow Settings (the global switch)</option>
+              <option value="on">On for this session</option>
+              <option value="off">Off for this session: every permission waits for you</option>
+            </select>
+          </label>
+          <label className="check">
+            <input type="checkbox" aria-label="TypeSafe skill" checked={typesafe} onChange={(e) => setTypesafe(e.target.checked)} />
+            <span>
+              TypeSafe skill{" "}
+              <span className="muted small">
+                Loads <code>typesafe-ai</code> for this session only. It guides code that calls TypeSafe’s System One models (such as Jev): the
+                questions and the state you send. It is not a general coding aid.
+              </span>
+            </span>
+          </label>
           <label>
             Title <span className="muted small">(optional)</span>
             <input className="input" placeholder="Taken from the first line of the task" value={title} onChange={(e) => setTitle(e.target.value)} />

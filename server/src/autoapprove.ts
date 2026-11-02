@@ -1,7 +1,7 @@
 import { config } from "./config.ts";
 import type { Db } from "./db.ts";
 import { getSetting, putSetting } from "./db.ts";
-import { complete, listModelsAt } from "./llm.ts";
+import { complete, listModelsAt, within } from "./llm.ts";
 import { GLOBAL_SCOPE, type SecretStore } from "./secrets.ts";
 import { getModelSettings, LLM_KEY_ENV } from "./settings.ts";
 
@@ -378,15 +378,15 @@ const stateOf = (p: Permission) => ({
 
 /** Ask the risk judge about one permission. Never throws: a failure is a verdict too.
  * The "local" kind calls the agent's own endpoint (the model settings' base URL and LLM key),
- * given by `local`; the other kinds use the saved judge URL and judge token. */
-export async function judgePermission(p: Permission, settings: AutoApproveSettings, saved: JudgeToken, local?: { baseUrl: string; apiKey?: string }): Promise<Verdict> {
+ * given by `local`; the other kinds use the saved judge URL and judge token. `cancel` hangs up the call. */
+export async function judgePermission(p: Permission, settings: AutoApproveSettings, saved: JudgeToken, local?: { baseUrl: string; apiKey?: string }, cancel?: AbortSignal): Promise<Verdict> {
   const j = settings.judge;
   const by = judgeName(j);
   if (j.kind === "local" || j.protocol === "openai") {
     const ep = j.kind === "local" && local ? { url: local.baseUrl, key: local.apiKey } : { url: j.baseUrl, key: tokenFor(j.baseUrl, saved) };
     let reply: string;
     try {
-      const call = { maxTokens: 1024, timeoutMs: config.autoApproveTimeoutMs, temperature: 0 };
+      const call = { maxTokens: 1024, timeoutMs: config.autoApproveTimeoutMs, temperature: 0, signal: cancel };
       reply = await complete({ baseUrl: ep.url, modelId: j.model }, ep.key, CHAT_PROMPT, JSON.stringify(stateOf(p), null, 2), call);
     } catch (err) {
       const { status, body } = err as { status?: number; body?: string };
@@ -406,7 +406,7 @@ export async function judgePermission(p: Permission, settings: AutoApproveSettin
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders(token) },
       body: JSON.stringify({ model: j.model, state: stateOf(p), questions: QUESTIONS }),
-      signal: AbortSignal.timeout(config.autoApproveTimeoutMs),
+      signal: within(config.autoApproveTimeoutMs, cancel),
     });
     text = await res.text();
   } catch (err) {
@@ -543,8 +543,8 @@ const keyFor = (url: string, saved: ReviewerKey | string | undefined): string | 
   return saved.keyOrigin ? (new URL(url).origin === saved.keyOrigin ? saved.reviewerKey : undefined) : saved.reviewerKey;
 };
 
-/** Ask the reviewer about a call the judge did not rate safe. Never throws: a failure is a verdict too. */
-export async function reviewPermission(p: Permission, ctx: ReviewContext, settings: AutoApproveSettings, saved: ReviewerKey | string | undefined): Promise<ReviewVerdict> {
+/** Ask the reviewer about a call the judge did not rate safe. Never throws: a failure is a verdict too. `cancel` hangs up the call. */
+export async function reviewPermission(p: Permission, ctx: ReviewContext, settings: AutoApproveSettings, saved: ReviewerKey | string | undefined, cancel?: AbortSignal): Promise<ReviewVerdict> {
   const by = reviewerName(settings);
   if (!settings.reviewer.model) return { outcome: "failed", by, note: `${by} has no model id set.` };
   const savedKey = typeof saved === "string" ? saved : saved?.reviewerKey;
@@ -565,7 +565,7 @@ export async function reviewPermission(p: Permission, ctx: ReviewContext, settin
           system: `${REVIEWER_SYSTEM}\n${VERDICT_REPLY}`,
           messages: [{ role: "user", content: JSON.stringify(state) }],
         }),
-        signal: AbortSignal.timeout(config.reviewerTimeoutMs),
+        signal: within(config.reviewerTimeoutMs, cancel),
       });
       text = await res.text();
     } catch (err) {
@@ -589,7 +589,7 @@ export async function reviewPermission(p: Permission, ctx: ReviewContext, settin
   }
   let reply: string;
   try {
-    const call = { maxTokens: 1024, timeoutMs: config.reviewerTimeoutMs, temperature: 0 };
+    const call = { maxTokens: 1024, timeoutMs: config.reviewerTimeoutMs, temperature: 0, signal: cancel };
     const url = `${settings.reviewer.baseUrl.replace(/\/+$/, "")}/chat/completions`;
     const key = keyFor(url, saved);
     reply = await complete({ baseUrl: settings.reviewer.baseUrl, modelId: settings.reviewer.model }, key, `${REVIEWER_SYSTEM}\n${VERDICT_REPLY}. Nothing else.`, JSON.stringify(state, null, 2), call);

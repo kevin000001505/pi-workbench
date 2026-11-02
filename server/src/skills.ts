@@ -66,14 +66,17 @@ export function scanSkills(root: string, source: Skill["source"]): Skill[] {
   return skills;
 }
 
-/** The skills a session in `cwd` can use: the repo's own first (pi keeps the first on a name clash). */
-export function listSkills(globalDir: string, cwd?: string): Skill[] {
+/**
+ * The skills a session in `cwd` can use: the repo's own first (pi keeps the first on a name clash),
+ * then the global ones, then `extraDirs` (single skill dirs only this session loads).
+ */
+export function listSkills(globalDir: string, cwd?: string, extraDirs: string[] = []): Skill[] {
   const repo = cwd
     ? [...scanSkills(path.join(cwd, ".agents", "skills"), "repo"), ...scanSkills(path.join(cwd, ".pi", "skills"), "repo")]
     : [];
   const seen = new Set<string>();
   const out: Skill[] = [];
-  for (const s of [...repo, ...scanSkills(globalDir, "global")]) {
+  for (const s of [...repo, ...scanSkills(globalDir, "global"), ...extraDirs.flatMap((d) => scanSkills(d, "global"))]) {
     if (seen.has(s.name)) continue;
     seen.add(s.name);
     out.push(s);

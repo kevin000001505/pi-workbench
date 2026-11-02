@@ -253,8 +253,12 @@ test("old databases gain the pipeline columns", async () => {
   old.prepare("INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at) VALUES ('s','r','t','b','main','/w',0,0)").run();
   old.close();
   const db = openDb(file);
-  const row = db.prepare("SELECT mode, phase, active_run, attention, issue_ref FROM sessions").get() as any;
-  assert.deepEqual({ ...row }, { mode: "direct", phase: "direct", active_run: null, attention: null, issue_ref: null });
+  const row = db.prepare("SELECT mode, phase, active_run, attention, issue_ref, auto_approve, typesafe_skill FROM sessions").get() as any;
+  // auto_approve null: existing sessions inherit the global switch; and they have no TypeSafe skill.
+  assert.deepEqual({ ...row }, { mode: "direct", phase: "direct", active_run: null, attention: null, issue_ref: null, auto_approve: null, typesafe_skill: 0 });
+  // The auto-approve audit trail's table is created too.
+  db.prepare("INSERT INTO auto_decisions (session_id, run_id, request_id, event, created_at) VALUES ('s', 's', 'r1', '{}', 0)").run();
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM auto_decisions").get() as any).n, 1);
 });
 
 test("README documents the issues feature for a fresh setup", () => {

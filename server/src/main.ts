@@ -2,11 +2,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
-import { config } from "./config.ts";
+import path from "node:path";
+import { config, TYPESAFE_SKILL } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { GitEnv } from "./git.ts";
 import { GitHub, GitHubError } from "./github.ts";
-import { autoApproveView, configureAutoApprove, getAutoApproveSettings, listModelsFor, localJudge, saveAutoApproveKey, saveReviewerKey, savedJudgeToken, savedReviewerKey, testJudge, testReviewer } from "./autoapprove.ts";
+import { autoApproveView, getAutoApproveSettings, listModelsFor, localJudge, saveAutoApproveKey, saveReviewerKey, savedJudgeToken, savedReviewerKey, testJudge, testReviewer } from "./autoapprove.ts";
 import { checkRequestOrigin, type Ctx, HttpError, readJson, Router, sendJson, serveStatic } from "./http.ts";
 import { listModelsAt, probeEndpoint } from "./llm.ts";
 import { draftPr, openPr, changes } from "./prs.ts";
@@ -151,12 +152,13 @@ const router = new Router()
       prompt: String(body.prompt ?? ""),
       mode: body.mode === "direct" ? "direct" : "pipeline",
       issueRef: body.issueRef ? String(body.issueRef) : undefined,
+      autoApprove: body.autoApprove,
+      typesafeSkill: body.typesafeSkill,
     }),
   )
   .on("GET", "/api/sessions/:id", ({ params }) => sessions.snapshot(params.id))
   .on("PATCH", "/api/sessions/:id", ({ params, body }) => {
-    if (typeof body.title === "string") sessions.rename(params.id, body.title);
-    return sessions.summary(params.id);
+    return sessions.patch(params.id, body);
   })
   .on("DELETE", "/api/sessions/:id", async ({ params }) => {
     await sessions.archive(params.id);
@@ -224,13 +226,15 @@ const router = new Router()
   .on("GET", "/api/skills", ({ query }) => {
     const id = query.get("sessionId");
     const cwd = id ? sessions.repoOf(id).row.worktree : undefined;
-    return listSkills(config.skillsDir, cwd).map(({ path: _p, ...s }) => s);
+    // `typesafe=1`: the New session form, with the TypeSafe box ticked, before the session exists.
+    const extra = id ? sessions.extraSkillDirs(id) : query.get("typesafe") === "1" ? [path.join(config.optionalSkillsDir, TYPESAFE_SKILL)] : [];
+    return listSkills(config.skillsDir, cwd, extra).map(({ path: _p, ...s }) => s);
   })
 
   // --- settings & secrets ---------------------------------------------------------------
   .on("GET", "/api/settings", () => ({ model: getModelSettings(db), approval: getApprovalSettings(db), autoApprove: autoApproveView(db, secrets) }))
   .on("PUT", "/api/settings/auto-approve", async ({ body }) => {
-    await configureAutoApprove(db, secrets, body);
+    await sessions.applyAutoApproveSettings(body);
     return autoApproveView(db, secrets);
   })
   .on("PUT", "/api/settings/auto-approve/keys", ({ body }) => {

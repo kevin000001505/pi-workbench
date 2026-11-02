@@ -98,13 +98,22 @@ function sameOrigin(a: string, b: string) {
   }
 }
 
+/** A fetch signal: the timeout, and also `cancel` when one is given. */
+export const within = (timeoutMs: number, cancel?: AbortSignal) =>
+  cancel ? AbortSignal.any([AbortSignal.timeout(timeoutMs), cancel]) : AbortSignal.timeout(timeoutMs);
+
 /** One non-streaming chat completion; returns the assistant text with any <think> block removed. */
 export async function complete(
   m: Pick<ModelSettings, "baseUrl" | "modelId">,
   apiKey: string | undefined,
   system: string,
   user: string,
-  { maxTokens = 4000, timeoutMs = 300_000, temperature = 0.2 }: { maxTokens?: number; timeoutMs?: number; temperature?: number } = {},
+  {
+    maxTokens = 4000,
+    timeoutMs = 300_000,
+    temperature = 0.2,
+    signal,
+  }: { maxTokens?: number; timeoutMs?: number; temperature?: number; /** Cancels the call early. */ signal?: AbortSignal } = {},
 ) {
   const res = await fetch(`${m.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
     method: "POST",
@@ -119,7 +128,7 @@ export async function complete(
       temperature,
       stream: false,
     }),
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: within(timeoutMs, signal),
   });
   if (!res.ok) {
     const text = await res.text();
