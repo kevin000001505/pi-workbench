@@ -27,7 +27,7 @@ export type SessionRow = {
   archived: number;
   /** "pipeline" (grill → tickets → implement) or "direct" (plain agent turns). */
   mode: string;
-  /** setup | grill | spec | tickets | implement | review | done | direct */
+  /** setup | grill | spec | tickets | implement | review | retro | done | direct */
   phase: string;
   /** Short summary of the decisions agreed while grilling. */
   grill_summary: string | null;
@@ -36,6 +36,8 @@ export type SessionRow = {
   spec_ref: string | null;
   /** pi session id of the final code-review run. */
   review_run: string | null;
+  /** pi session id of the end-of-spec retro run, when one ran. */
+  retro_run: string | null;
   /** pi session id of the conversation on screen: the session id itself, or a ticket's run. */
   active_run: string | null;
   /** Why the pipeline stopped and waits for the user; null while it may proceed. */
@@ -62,6 +64,18 @@ export type TicketRow = {
   run_id: string | null;
   started_at: number | null;
   finished_at: number | null;
+  /** The commit the ticket's first run started from. */
+  start_commit: string | null;
+  /** Why the stop rule stopped this ticket's run, when it did. */
+  stop_reason: string | null;
+  /** pi session id of the rescue run, when one started. */
+  rescue_run_id: string | null;
+  /** JSON of the finish_diagnosis arguments the rescue run reported, when it did. */
+  diagnosis: string | null;
+  /** pi session id of the fix run, when one started. */
+  fix_run_id: string | null;
+  /** null | diagnosing | fixing | rescued | failed */
+  rescue_state: string | null;
 };
 
 export type SecretRow = {
@@ -123,9 +137,16 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ["sessions", "spec", "TEXT"],
   ["sessions", "spec_ref", "TEXT"],
   ["sessions", "review_run", "TEXT"],
+  ["sessions", "retro_run", "TEXT"],
   ["sessions", "issue_ref", "TEXT"],
   ["sessions", "auto_approve", "TEXT"],
   ["sessions", "typesafe_skill", "INTEGER NOT NULL DEFAULT 0"],
+  ["tickets", "start_commit", "TEXT"],
+  ["tickets", "stop_reason", "TEXT"],
+  ["tickets", "rescue_run_id", "TEXT"],
+  ["tickets", "diagnosis", "TEXT"],
+  ["tickets", "fix_run_id", "TEXT"],
+  ["tickets", "rescue_state", "TEXT"],
 ];
 
 function migrate(db: DatabaseSync) {

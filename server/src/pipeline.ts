@@ -10,7 +10,7 @@
  * - review: one fresh /skill:code-review run over the whole branch that fixes what it finds; ends with finish_review.
  */
 
-export type Phase = "setup" | "grill" | "spec" | "tickets" | "implement" | "review" | "done" | "direct";
+export type Phase = "setup" | "grill" | "spec" | "tickets" | "implement" | "review" | "retro" | "done" | "direct";
 
 export type Ticket = {
   num: number;

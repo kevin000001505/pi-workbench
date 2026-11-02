@@ -14,7 +14,7 @@ import { redact } from "../src/git.ts";
 import { checkRequestOrigin, Router } from "../src/http.ts";
 import { requireTrackedRepo } from "../src/repos.ts";
 import { GLOBAL_SCOPE, assertUserScope, SecretStore, userSecrets } from "../src/secrets.ts";
-import { DEFAULT_RULES, getApprovalSettings, LLM_KEY_ENV, saveApprovalSettings, saveModelSettings } from "../src/settings.ts";
+import { DEFAULT_RULES, getApprovalSettings, getPipelineSettings, LLM_KEY_ENV, saveApprovalSettings, saveModelSettings, savePipelineSettings } from "../src/settings.ts";
 import { listSkills, parseFrontmatter } from "../src/skills.ts";
 
 const tmpDb = () => openDb(path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wb-")), "t.db"));
@@ -90,6 +90,24 @@ test("settings validate input", () => {
   assert.equal(a.rules[0].tool, "bash");
   assert.equal(a.rules[0].label, "make deploy");
   assert.equal(a.outsideWorktree, false);
+
+  // The stop-rule limits: defaults, positive-integer validation, and partial saves.
+  const s = getPipelineSettings(db);
+  assert.deepEqual(s, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 });
+  for (const [k, v] of [
+    ["timeLimitMinutes", 0],
+    ["timeLimitMinutes", -5],
+    ["timeLimitMinutes", 2.5],
+    ["timeLimitMinutes", "30"],
+    ["repeatLimit", 0],
+    ["toolCallLimit", -1],
+  ] as [keyof typeof s, unknown][]) {
+    assert.throws(() => savePipelineSettings(db, { [k]: v } as any), /must be a positive integer/, `${k}=${String(v)}`);
+  }
+  const saved = savePipelineSettings(db, { timeLimitMinutes: 5 });
+  assert.deepEqual(saved, { timeLimitMinutes: 5, repeatLimit: 3, toolCallLimit: 300 });
+  assert.deepEqual(getPipelineSettings(db), saved, "a partial save keeps the other limits");
+  assert.deepEqual(Object.keys(getPipelineSettings(db)).sort(), ["repeatLimit", "timeLimitMinutes", "toolCallLimit"]);
 });
 
 test("frontmatter parser handles quoted, plain and folded values", () => {
@@ -279,12 +297,19 @@ test("old databases gain the pipeline columns", async () => {
   old.exec(
     "CREATE TABLE sessions (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, title TEXT NOT NULL, branch TEXT NOT NULL, base_branch TEXT NOT NULL, worktree TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, pr_number INTEGER, pr_url TEXT, held_prompt TEXT, archived INTEGER NOT NULL DEFAULT 0)",
   );
+  old.exec(
+    "CREATE TABLE tickets (session_id TEXT NOT NULL, num INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, blocked_by TEXT NOT NULL DEFAULT '[]', tracker_ref TEXT, status TEXT NOT NULL DEFAULT 'ready', note TEXT, run_id TEXT, started_at INTEGER, finished_at INTEGER, PRIMARY KEY (session_id, num))",
+  );
   old.prepare("INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at) VALUES ('s','r','t','b','main','/w',0,0)").run();
+  old.prepare("INSERT INTO tickets (session_id, num, title, body) VALUES ('s',1,'T','b')").run();
   old.close();
   const db = openDb(file);
-  const row = db.prepare("SELECT mode, phase, active_run, attention, issue_ref, auto_approve, typesafe_skill FROM sessions").get() as any;
+  const row = db.prepare("SELECT mode, phase, active_run, attention, issue_ref, auto_approve, typesafe_skill, retro_run FROM sessions").get() as any;
   // auto_approve null: existing sessions inherit the global switch; and they have no TypeSafe skill.
-  assert.deepEqual({ ...row }, { mode: "direct", phase: "direct", active_run: null, attention: null, issue_ref: null, auto_approve: null, typesafe_skill: 0 });
+  assert.deepEqual({ ...row }, { mode: "direct", phase: "direct", active_run: null, attention: null, issue_ref: null, auto_approve: null, typesafe_skill: 0, retro_run: null });
+  // The stop-rule and rescue columns land on old tickets rows the same way.
+  const trow = db.prepare("SELECT start_commit, stop_reason, rescue_run_id, diagnosis, fix_run_id, rescue_state FROM tickets").get() as any;
+  assert.deepEqual({ ...trow }, { start_commit: null, stop_reason: null, rescue_run_id: null, diagnosis: null, fix_run_id: null, rescue_state: null });
   // The auto-approve audit trail's table is created too.
   db.prepare("INSERT INTO auto_decisions (session_id, run_id, request_id, event, created_at) VALUES ('s', 's', 'r1', '{}', 0)").run();
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM auto_decisions").get() as any).n, 1);
@@ -328,6 +353,26 @@ test("every pipeline prompt starts with a /skill: command pi will expand", async
     // pi needs an argument after the skill name on the first line.
     assert.match(prompt.split("\n")[0], /^\/skill:[\w-]+ \S/);
   }
+});
+
+test("glossary and ADR 0003 record the stop-rule, rescue and retro vocabulary", () => {
+  const glossary = fs.readFileSync(new URL("../../GLOSSARY.md", import.meta.url), "utf8");
+  for (const term of ["Stop rule", "Rescue run", "Fix run", "Retro run"]) {
+    assert.match(glossary, new RegExp(`\\*\\*${term}\\*\\*:`), `glossary defines ${term}`);
+  }
+  // The relationship: the Reviewer's settings drive the Reviewer, rescue and retro runs.
+  assert.match(glossary, /an empty Reviewer model turns all three off/i);
+  // The Phase union puts retro between review and done, server and web.
+  assert.match(fs.readFileSync(new URL("../src/pipeline.ts", import.meta.url), "utf8"), /"review" \| "retro" \| "done"/);
+  assert.match(fs.readFileSync(new URL("../../web/src/types.ts", import.meta.url), "utf8"), /"review" \| "retro" \| "done"/);
+  const adrs = fs.readdirSync(new URL("../../docs/adr", import.meta.url));
+  const file = adrs.find((f) => f.startsWith("0003-"));
+  assert.ok(file, "ADR 0003 exists");
+  const adr = fs.readFileSync(new URL(`../../docs/adr/${file}`, import.meta.url), "utf8");
+  assert.match(adr, /localhost proxy/i, "the proxy decision");
+  assert.match(adr, /key in the rescue run/i, "the considered alternative: the key in the rescue run's environment");
+  assert.match(adr, /process\.env/i, "the rejection reason: the rescue agent can read process.env");
+  assert.match(adr, /curl/i, "the rejection reason: approval rules gate only curl and wget");
 });
 
 test("auto-approve settings: off by default, validated on save", () => {
