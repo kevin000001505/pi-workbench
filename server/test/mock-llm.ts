@@ -148,12 +148,17 @@ function pipelineScript(userText: string, step: number, lastResult: string): Rep
     return { text: "Published 3 tickets." };
   }
   if (userText.includes('<skill name="code-review"')) {
+    // LONGREVIEW in the spec: three checks between the commit and finish_review.
+    if (userText.includes("LONGREVIEW") && step >= 1 && step <= 3) return { tool: { name: "bash", args: { command: `echo check ${step}` } } };
+    if (userText.includes("LONGREVIEW") && step === 4) return { tool: { name: "finish_review", args: { note: "Checked three times" } } };
     if (step === 0) return { tool: { name: "bash", args: { command: 'echo reviewed >> work.txt && git add -A && git commit -qm "Fix review findings" && git push -q origin HEAD && echo fixed' } } };
     if (step === 1) return { tool: { name: "finish_review", args: { note: "Fixed one naming issue" } } };
     return { text: "Review done." };
   }
   if (userText.includes('<skill name="tdd"')) {
     const num = /Ticket #(\d+)/.exec(userText)?.[1] ?? "?";
+    const stuck = stuckTicket(userText, step);
+    if (stuck) return stuck;
     const push = userText.includes("PUSHME") ? " && git push -q origin HEAD" : "";
     if (step === 0) return { tool: { name: "bash", args: { command: `echo "ticket ${num}" >> work.txt && git add -A && git commit -qm "Ticket ${num}"${push} && echo committed` } } };
     if (step === 1) {
@@ -161,6 +166,37 @@ function pipelineScript(userText: string, step: number, lastResult: string): Rep
       return { tool: { name: "finish_ticket", args: { status: blocked ? "blocked" : "done", note: blocked ? "Needs a docs folder decision" : `Ticket ${num} appended to work.txt` } } };
     }
     return { text: `Ticket ${num} finished.` };
+  }
+  return undefined;
+}
+
+/**
+ * Ticket bodies that drive the stop rule (issue #39):
+ * - LOOPME: the same failing bash call forever (the repeat limit)
+ * - WANDERME: a different bash call each step (the tool-call limit)
+ * - SLOWME: a long `sleep` (the time limit); with ASKME, an ask_user first (the clock pauses)
+ * - CYCLEME: test, write, test, write, test, then finish_ticket done (a TDD cycle, never a loop)
+ * - QUICKME: finish_ticket done at once
+ * - SILENTME: a text reply, no finish_ticket
+ */
+function stuckTicket(userText: string, step: number): Reply | undefined {
+  if (userText.includes("LOOPME")) return { tool: { name: "bash", args: { command: "echo tests failed: expected Hello; exit 1" } } };
+  if (userText.includes("WANDERME")) return { tool: { name: "bash", args: { command: `echo call ${step}` } } };
+  if (userText.includes("SLOWME")) {
+    const ask = userText.includes("ASKME");
+    if (ask && step === 0) return { tool: { name: "ask_user", args: { question: "Which greeting?", options: ["Hello", "Hi"] } } };
+    if (step === (ask ? 1 : 0)) return { tool: { name: "bash", args: { command: "sleep 30" } } };
+    return { text: "Slept." };
+  }
+  if (userText.includes("CYCLEME")) {
+    if (step >= 5) return step === 5 ? { tool: { name: "finish_ticket", args: { status: "done", note: "Cycled" } } } : { text: "Cycled." };
+    return step % 2 === 0
+      ? { tool: { name: "bash", args: { command: "echo running the tests" } } }
+      : { tool: { name: "write", args: { path: "cycle.txt", content: `v${step}\n` } } };
+  }
+  if (userText.includes("SILENTME")) return { text: "I am not sure what to do." };
+  if (userText.includes("QUICKME")) {
+    return step === 0 ? { tool: { name: "finish_ticket", args: { status: "done", note: "Quick" } } } : { text: "Quick." };
   }
   return undefined;
 }

@@ -332,3 +332,136 @@ test("a rescue run spawns with the Reviewer model through the proxy; the token i
   const env2 = fs.readFileSync(`/proc/${mgr.live.get(s.id).proc.pid}/environ`, "utf8");
   assert.ok(!env2.includes(RESCUE_TOKEN_ENV), "other runs' environments are unchanged");
 });
+
+// --- the stop rule (issue #39) ---------------------------------------------------------------
+
+let specNum = 100;
+/** A session started from a one-ticket spec issue whose body drives the mock (see mock-llm.ts). */
+async function solveOne(body: string, spec = "A stuck ticket.") {
+  const n = (specNum += 10);
+  ghMock.seedSubIssues("me", "demo", { number: n, title: `Spec ${n}`, body: `## Solution\n${spec}` }, [{ number: n + 1, title: "Stuck", body }]);
+  return mgr.create({ repoId: "me/demo", title: `Spec ${n}`, issueRef: `me/demo#${n}`, mode: "pipeline", startFrom: "tickets" });
+}
+const flagged = (id: string) => waitFor(() => mgr.summary(id).attention);
+const settled = (id: string) => waitFor(() => !mgr.live.get(id).transcript.busy);
+const toolCalls = (id: string, runId: string, name = "bash") => mgr.runTranscript(id, runId).messages.filter((m: any) => m.role === "toolResult" && m.toolName === name).length;
+/** The Reviewer off: a stuck ticket stops the pipeline, with no rescue (issue #40). */
+const rescueOff = () => auto.saveAutoApproveSettings(db, { reviewer: { model: "" } });
+const notices = (id: string) => events.filter((e) => e.id === id && e.ev.type === "wb_notify").map((e) => e.ev.message as string);
+
+test("a ticket that repeats one bash call trips the repeat limit: the session is flagged with the call, and the ticket keeps the stop reason", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { savePipelineSettings } = await import("../src/settings.ts");
+  rescueOff();
+  savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 });
+  const s = await solveOne("Make the tests pass. LOOPME");
+  const attention = await flagged(s.id);
+  assert.match(attention, /Ticket #1 hit the stop rule: the repeat limit/);
+  assert.match(attention, /tests failed: expected Hello/);
+  assert.match(attention, /\d\d:\d\d/, "it says when");
+  assert.ok(notices(s.id).includes(attention), "a notification says the same");
+  await settled(s.id);
+  const runId = mgr.summary(s.id).tickets[0].runId;
+  assert.ok(toolCalls(s.id, runId) <= 3, "the third identical call stops the run");
+  const row = db.prepare("SELECT stop_reason FROM tickets WHERE session_id = ? AND num = 1").get(s.id);
+  assert.match(row.stop_reason, /repeat/);
+});
+
+test("a TDD cycle that runs the same test command between writes never trips the repeat limit", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { savePipelineSettings } = await import("../src/settings.ts");
+  rescueOff();
+  savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 2, toolCallLimit: 300 });
+  const s = await solveOne("Cycle red and green. CYCLEME");
+  await waitFor(() => mgr.summary(s.id).phase === "done" || mgr.summary(s.id).attention);
+  assert.equal(mgr.summary(s.id).attention, null);
+  assert.equal(mgr.summary(s.id).tickets[0].status, "done");
+});
+
+test("a run that makes many different calls stops at the tool-call limit", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { savePipelineSettings } = await import("../src/settings.ts");
+  rescueOff();
+  savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 4 });
+  const s = await solveOne("Wander around. WANDERME");
+  assert.match(await flagged(s.id), /Ticket #1 hit the stop rule: the tool-call limit \(5 tool calls, limit 4\)/);
+  await settled(s.id);
+  assert.ok(toolCalls(s.id, mgr.summary(s.id).tickets[0].runId) <= 5);
+});
+
+test("the time limit trips on working time; a decision waiting for the user pauses the clock", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { savePipelineSettings } = await import("../src/settings.ts");
+  rescueOff();
+  const { config } = await import("../src/config.ts");
+  const minute = config.stopRuleMinuteMs;
+  config.stopRuleMinuteMs = 300;
+  try {
+    savePipelineSettings(db, { timeLimitMinutes: 1, repeatLimit: 3, toolCallLimit: 300 });
+    const s = await solveOne("Take your time. ASKME SLOWME");
+    const req = await waitFor(() => mgr.summary(s.id).pending[0]);
+    // Away for four times the limit: the clock is paused, so the run is not stopped.
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.equal(mgr.summary(s.id).attention, null);
+    const answeredAt = Date.now();
+    mgr.respond(s.id, req.id, { value: "Hello" });
+    // Back at work, the long `sleep` passes the limit.
+    assert.match(await flagged(s.id), /Ticket #1 hit the stop rule: the time limit/);
+    const row = db.prepare("SELECT stop_reason FROM tickets WHERE session_id = ? AND num = 1").get(s.id);
+    assert.ok(JSON.parse(row.stop_reason).at >= answeredAt, "the clock fired only after the user answered");
+    await settled(s.id);
+    assert.equal(toolCalls(s.id, mgr.summary(s.id).tickets[0].runId), 1, "the sleep ran before the limit passed");
+  } finally {
+    config.stopRuleMinuteMs = minute;
+  }
+});
+
+test("a user abort of a ticket run keeps today's behavior: no stop-rule flag", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { savePipelineSettings } = await import("../src/settings.ts");
+  rescueOff();
+  savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 });
+  const s = await solveOne("Take your time. SLOWME");
+  await waitFor(() => Object.keys(mgr.live.get(s.id).transcript.tools).length > 0);
+  await mgr.abort(s.id);
+  const attention = await flagged(s.id);
+  assert.match(attention, /Ticket #1 was stopped/);
+  assert.doesNotMatch(attention, /stop rule/);
+  const row = db.prepare("SELECT stop_reason FROM tickets WHERE session_id = ? AND num = 1").get(s.id);
+  assert.equal(row.stop_reason, null);
+});
+
+test("the stop rule watches only implement-phase runs: setup and review runs pass a tool-call limit of 1", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { savePipelineSettings } = await import("../src/settings.ts");
+  rescueOff();
+  savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 1 });
+  try {
+    const s = await solveOne("Done at once. QUICKME", "A quick ticket. LONGREVIEW");
+    await waitFor(() => mgr.summary(s.id).phase === "done" || mgr.summary(s.id).attention);
+    assert.equal(mgr.summary(s.id).attention, null);
+    // The review run made five calls (a commit, three checks, finish_review) under the same limit.
+    const review = mgr.summary(s.id).runs.find((r: any) => r.label === "Review");
+    assert.equal(toolCalls(s.id, review.id), 4);
+    assert.equal(toolCalls(s.id, review.id, "finish_review"), 1);
+  } finally {
+    savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 });
+  }
+});
+
+test("an idle run's clock is paused: a ticket that stopped without finishing does not trip the time limit while the user is away", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { savePipelineSettings } = await import("../src/settings.ts");
+  rescueOff();
+  const { config } = await import("../src/config.ts");
+  const minute = config.stopRuleMinuteMs;
+  config.stopRuleMinuteMs = 300;
+  try {
+    savePipelineSettings(db, { timeLimitMinutes: 1, repeatLimit: 3, toolCallLimit: 300 });
+    const s = await solveOne("Unsure. SILENTME");
+    assert.match(await flagged(s.id), /Ticket #1 stopped without finishing/);
+    await settled(s.id);
+    await new Promise((r) => setTimeout(r, 1200));
+    // The user replies: the run answers and settles again without finishing, well inside the limit.
+    events.length = 0;
+    await mgr.send(s.id, "please continue");
+    await waitFor(() => notices(s.id).length > 0);
+    assert.match(mgr.summary(s.id).attention, /Ticket #1 stopped without finishing/);
+  } finally {
+    config.stopRuleMinuteMs = minute;
+    savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 });
+  }
+});

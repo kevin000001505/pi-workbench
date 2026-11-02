@@ -32,6 +32,8 @@ export const config = {
   autoApproveTimeoutMs: Number(process.env.AUTO_APPROVE_TIMEOUT_MS ?? 60_000),
   /** How long the frontier reviewer may take before a permission falls back to the user. */
   reviewerTimeoutMs: Number(process.env.REVIEWER_TIMEOUT_MS ?? 120_000),
+  /** How long a stop-rule "minute" is; tests shorten it to trip the time limit fast. */
+  stopRuleMinuteMs: Number(process.env.STOP_RULE_MINUTE_MS ?? 60_000),
   githubApi: process.env.GITHUB_API_URL ?? "https://api.github.com",
   /** Where repos are cloned from; tests point it at local bare repos. */
   githubCloneBase: process.env.GITHUB_CLONE_BASE ?? "https://github.com",

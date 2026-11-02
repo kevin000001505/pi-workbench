@@ -48,7 +48,8 @@ import {
 import { createWorktree, getRepo, removeWorktree, slugify, worktreeNeedsSetup } from "./repos.ts";
 import { loadSshHosts } from "./ssh.ts";
 import type { SecretStore } from "./secrets.ts";
-import { getModelSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
+import { getModelSettings, getPipelineSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
+import { describeStopReason, type StopReason, StopRule } from "./stop-rule.ts";
 import { type RpcRecord, RpcProcess } from "./rpc.ts";
 import { isRescueyRun, RESCUE_PROVIDER_ID, RESCUE_TOKEN_ENV, type RescueProxy } from "./rescue-proxy.ts";
 
@@ -145,6 +146,8 @@ type Live = {
   /** finish_ticket's (or finish_review's) report for the current run, applied when the run settles. */
   finished?: { status: "done" | "blocked"; note: string };
   lastSettleAborted: boolean;
+  /** The stop rule watching the live implement-phase run, and its clock. */
+  watch?: { rule: StopRule; timer: NodeJS.Timeout };
   /** The missing-TypeSafe-skill toast went out; the summary keeps showing the state after it. */
   warnedMissingSkill?: boolean;
 };
@@ -569,6 +572,10 @@ export class SessionManager extends EventEmitter {
     }
     applyEvent(s.transcript, rec);
     this.emit("event", id, rec);
+    if (rec.type === "tool_execution_start" && s.watch) {
+      const reason = s.watch.rule.toolCall(rec.toolName as string, rec.args);
+      if (reason) this.stopRuleFired(id, s, reason);
+    }
     if (rec.type === "tool_execution_start" && (PIPELINE_TOOLS as readonly string[]).includes(rec.toolName as string)) {
       s.toolArgs.set(rec.toolCallId as string, { name: rec.toolName as string, args: rec.args });
     }
@@ -918,7 +925,14 @@ export class SessionManager extends EventEmitter {
     if (!ticket) return;
     const report = s.finished;
     s.finished = undefined;
-    if (report?.status === "done") {
+    const stopped = s.watch?.rule.reason;
+    if (stopped) {
+      // The stop rule aborted the run: not a user abort, and not a report the run made.
+      this.unwatch(s);
+      const why = describeStopReason(stopped);
+      this.updateTicket(id, ticket.num, { status: "blocked", note: `Stopped by ${why}`, stop_reason: JSON.stringify(stopped), finished_at: Date.now() });
+      this.flag(id, `Ticket #${ticket.num} hit the stop rule: ${why}. Retry it, mark it done, or reply to the agent.`);
+    } else if (report?.status === "done") {
       this.updateTicket(id, ticket.num, { status: "done", note: report.note || null, finished_at: Date.now() });
       await this.runNext(id);
     } else if (report?.status === "blocked") {
@@ -973,7 +987,37 @@ export class SessionManager extends EventEmitter {
     await this.switchRun(id, runId, true);
     const row = this.row(id);
     const finished = this.tickets(id).filter((x) => x.status === "done");
+    this.watch(id);
     await this.send(id, implementPrompt({ ...t, runId }, row.spec, row.spec_ref, finished));
+  }
+
+  /**
+   * Put the live run under the stop rule, with the pipeline limits as saved now. The clock runs
+   * only while the run works: it pauses while a permission or a decision waits for the user.
+   */
+  private watch(id: string) {
+    const s = this.state(id);
+    this.unwatch(s);
+    const rule = new StopRule(getPipelineSettings(this.db), config.stopRuleMinuteMs);
+    const timer = setInterval(() => {
+      const paused = !s.transcript.busy || [...s.pending.values()].some(waitsOnUser);
+      const reason = rule.tick(paused);
+      if (reason) this.stopRuleFired(id, s, reason);
+    }, Math.min(1000, Math.max(20, config.stopRuleMinuteMs / 20)));
+    timer.unref();
+    s.watch = { rule, timer };
+  }
+
+  private unwatch(s: Live) {
+    if (s.watch) clearInterval(s.watch.timer);
+    s.watch = undefined;
+  }
+
+  /** A stop-rule condition fired: the reason is on the live state first, then the run is aborted. */
+  private stopRuleFired(id: string, s: Live, _reason: StopReason) {
+    clearInterval(s.watch!.timer);
+    this.emitSummary(id, true);
+    void this.abort(id).catch(() => {});
   }
 
   /** Point the session at another pi conversation: stop the current process, swap, tell viewers. */
@@ -985,6 +1029,7 @@ export class SessionManager extends EventEmitter {
     s.pending.clear();
     s.toolArgs.clear();
     s.finished = undefined;
+    this.unwatch(s);
     s.transcript = emptyTranscript();
     s.loaded = fresh;
     this.update(id, { active_run: runId });
