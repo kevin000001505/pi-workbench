@@ -94,12 +94,16 @@ before(async () => {
   ghMock = await startMockGitHub(path.join(tmp, "gh"));
   config.githubApi = ghMock.url;
   const { GitHub } = await import("../src/github.ts");
-  mgr = new SessionManager(db, secrets, async () => ({
+  const { githubDelivery } = await import("../src/delivery.ts");
+  const { getModelSettings } = await import("../src/settings.ts");
+  const gitEnv = async () => ({
     GIT_AUTHOR_NAME: "t",
     GIT_AUTHOR_EMAIL: "t@t",
     GIT_COMMITTER_NAME: "t",
     GIT_COMMITTER_EMAIL: "t@t",
-  }), undefined, (ref) => new GitHub("ghp_test").ticketsFromIssueRef(ref), proxy);
+  });
+  const delivery = githubDelivery({ github: () => new GitHub("ghp_test"), gitEnv, model: () => getModelSettings(db), llmKey: () => undefined });
+  mgr = new SessionManager(db, secrets, gitEnv, undefined, (ref) => new GitHub("ghp_test").ticketsFromIssueRef(ref), proxy, delivery);
   mgr.on("event", (id: string, ev: any) => events.push({ id, ev }));
 });
 
@@ -188,14 +192,21 @@ test("a pipeline session grills, writes a spec and tickets, implements them one 
   assert.ok(!(await mgr.snapshot(s.id)).transcript.messages.some((m: any) => m.role === "autoAnswer"));
 
   // Skip the blocked ticket: one fresh code-review run covers the whole branch, then the pipeline
-  // finishes and returns to the plan conversation.
+  // opens the PR. GitHub has no me/demo repo yet, so the PR cannot open: the session stays in
+  // review (the card in QA) with the reason, on the review run.
   await mgr.pipelineAction(s.id, "skip");
   assert.equal(mgr.summary(s.id).phase, "review");
-  await waitFor(() => mgr.summary(s.id).phase === "done");
-  const done = mgr.summary(s.id);
-  assert.equal(done.attention, null);
-  assert.equal(done.activeRun, s.id);
-  assert.equal(done.runs[done.runs.length - 1].label, "Review");
+  const failed = await waitFor(() => {
+    const x = mgr.summary(s.id);
+    return x.phase === "review" && x.attention ? x : undefined;
+  });
+  assert.match(failed.attention, /The PR could not open: .*No commits between main and/);
+  assert.equal(failed.prNumber, null);
+  assert.equal(failed.runs[failed.runs.length - 1].label, "Review");
+  assert.equal(failed.activeRun, failed.runs[failed.runs.length - 1].id);
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(mgr.summary(s.id).phase, "review", "a failed PR open does not move on");
+  assert.equal(ghMock.pulls.length, 0);
   const review = mock.requests.find((r) => JSON.stringify(r.messages ?? []).includes('<skill name=\\"code-review\\"'));
   assert.match(JSON.stringify(review.messages), /since origin\/main/);
   assert.ok(!JSON.stringify(review.messages).includes("Ticket #3: Add docs"), "the review run starts fresh");
@@ -205,9 +216,14 @@ test("a pipeline session grills, writes a spec and tickets, implements them one 
   assert.equal(autoAnswers()[1].answer, "allow");
   const row = db.prepare("SELECT worktree FROM sessions WHERE id = ?").get(s.id);
   assert.deepEqual(sh(row.worktree, "log", "--format=%s", "-4").trim().split("\n"), ["Fix review findings", "Ticket 3", "Ticket 2", "Ticket 1"]);
+
+  // The pipeline's Stop pauses the card in Issues.
+  await mgr.pipelineAction(s.id, "stop");
+  assert.equal(mgr.summary(s.id).phase, "ready");
+  assert.equal(mgr.summary(s.id).attention, null);
 });
 
-test("a session started from a spec's ticket issues implements every ticket, then reviews", { skip: !hasPi && "pi CLI not found" }, async () => {
+test("a session started from a spec's ticket issues implements every ticket, reviews, then opens the PR", { skip: !hasPi && "pi CLI not found" }, async () => {
   ghMock.seedSubIssues(
     "me",
     "demo",
@@ -218,6 +234,9 @@ test("a session started from a spec's ticket issues implements every ticket, the
       { number: 10, title: "Add docs", body: "Document it.", blockedBy: [8, 9] },
     ],
   );
+  // GitHub knows me/demo now (its bare repo is the clone's origin), so this session's PR opens.
+  fs.mkdirSync(path.join(tmp, "gh", "me"), { recursive: true });
+  fs.symlinkSync(path.join(tmp, "remote.git"), path.join(tmp, "gh", "me", "demo.git"));
   const s = await mgr.create({ repoId: "me/demo", title: "Greeting suite", issueRef: "me/demo#7", mode: "pipeline", startFrom: "tickets" });
   assert.equal(s.mode, "pipeline");
   // The first session never pushed its setup marker, so this one may start in setup; either way it lands on implement.
@@ -230,11 +249,22 @@ test("a session started from a spec's ticket issues implements every ticket, the
     sum0.tickets.map((t: any) => `${t.num}:${t.blockedBy.join(",")}:${t.trackerRef}`),
     ["1::8", "2:1:9", "3:1,2:10"],
   );
+  // After the review, the workbench pushes the branch and opens the PR: phase `pr`, the card in Review.
   const done = await waitFor(() => {
     const x = mgr.summary(s.id);
-    return x.phase === "done" ? x : undefined;
+    return x.phase === "pr" ? x : undefined;
   });
   assert.deepEqual(done.tickets.map((t: any) => t.status), ["done", "done", "done"]);
+  assert.equal(done.attention, null);
+  assert.equal(done.activeRun, s.id, "back on the plan conversation");
+  const pr = ghMock.pulls.at(-1);
+  assert.equal(done.prNumber, pr.number);
+  assert.equal(done.prUrl, pr.html_url);
+  assert.equal(pr.head, done.branch);
+  assert.equal(pr.base, "main");
+  assert.equal(pr.title, "Add a friendly greeting", "the model drafted the PR");
+  for (const n of [8, 9, 10, 7]) assert.match(pr.body, new RegExp(`Closes #${n}\\b`));
+  assert.equal(sh(path.join(tmp, "remote.git"), "log", "--format=%s", "-1", done.branch).trim(), "Fix review findings", "the branch is pushed");
   // Ticket 2's fresh run carried the spec text read from the spec issue.
   const t2 = mock.requests.find((r) => JSON.stringify(r.messages ?? []).includes("Ticket #2: Add a test"));
   assert.match(JSON.stringify(t2.messages), /hello.txt says Hello/);

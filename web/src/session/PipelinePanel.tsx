@@ -127,7 +127,7 @@ export function PipelinePanel({ s, viewRun, onView }: { s: SessionSummary; viewR
             {open ? "Hide" : "Show"} plan
           </button>
         )}
-        {s.phase !== "done" && (
+        {s.phase !== "done" && s.phase !== "pr" && s.phase !== "ready" && (
           <button className="btn btn-ghost btn-sm danger" disabled={busy} onClick={() => act("stop")}>
             Stop pipeline
           </button>

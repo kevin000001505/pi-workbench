@@ -9,6 +9,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { startMockLlm } from "./mock-llm.ts";
@@ -159,7 +160,7 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
   assert.equal((await api("GET", "/api/board?repo=kevin/nope")).status, 404);
 });
 
-test("a card started from a spec's ticket issues skips Issues: Doing, then QA, then Done", { skip: !hasPi && "pi CLI not found" }, async () => {
+test("a card started from a spec's ticket issues skips Issues: Doing, then QA, then Review with the opened PR", { skip: !hasPi && "pi CLI not found" }, async () => {
   gh.seedSubIssues("kevin", "demo", { number: 7, title: "Greeting suite", body: "## Solution\nhello.txt says Hello." }, [
     { number: 8, title: "Write hello.txt", body: "Create hello.txt containing Hello. BLOCKME" },
   ]);
@@ -176,23 +177,69 @@ test("a card started from a spec's ticket issues skips Issues: Doing, then QA, t
   const perm = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
   assert.equal(await column(), "qa");
   assert.equal((await api("POST", `/api/sessions/${s.id}/respond`, { requestId: perm.id, value: perm.options[0] })).status, 200);
-  await waitFor(async () => (await column()) === "done");
+  // After the review, the workbench opens the PR: the card moves to Review with its PR badge.
+  await waitFor(async () => (await column()) === "review");
   const card = (await board()).find((c) => c.id === s.id);
   assert.deepEqual(card.tickets, { done: 1, total: 1 });
   assert.equal(card.attention, null);
   assert.match(card.specRef, /issues\/7$/);
-  assert.equal(card.pr, null);
+  const pr = gh.pulls.at(-1);
+  assert.match(pr.body, /Closes #8/);
+  assert.match(pr.body, /Closes #7/);
+  // A check still runs on the PR head.
+  assert.deepEqual(card.pr, { number: pr.number, url: pr.html_url, state: "checks" });
   // The card detail reads the review's note from the session.
   assert.equal((await summary(s.id)).reviewNote, "Fixed one naming issue");
 
   // The newest card still sorts by column, after the older ones in To do and Issues.
-  assert.deepEqual((await board()).map((c) => c.column), ["todo", "issues", "done"]);
+  assert.deepEqual((await board()).map((c) => c.column), ["todo", "issues", "review"]);
 
-  // A PR opened on the session shows on its card.
-  const pr = await api("POST", `/api/sessions/${s.id}/pr`, { title: "Greeting suite", body: "Closes #7" });
-  assert.equal(pr.status, 200, JSON.stringify(pr.json));
-  const withPr = (await board()).find((c) => c.id === s.id);
-  assert.deepEqual(withPr.pr, { number: pr.json.number, url: pr.json.url, state: null });
+  // The badge follows the PR on GitHub: every check passed, a check failed, then a merge conflict.
+  gh.checkRuns.splice(1);
+  assert.equal((await board()).find((c) => c.id === s.id).pr.state, "open");
+  gh.checkRuns[0].conclusion = "failure";
+  assert.equal((await board()).find((c) => c.id === s.id).pr.state, "checks", "a failed check");
+  pr.mergeable_state = "dirty";
+  assert.equal((await board()).find((c) => c.id === s.id).pr.state, "conflict");
+});
+
+/** Put a session in Done the way a merge will, stamping when it got there. */
+function markDone(id: string) {
+  const db = new DatabaseSync(path.join(process.env.DATA_DIR!, "workbench.db"));
+  db.prepare("UPDATE sessions SET phase = 'done', done_at = ? WHERE id = ?").run(Date.now(), id);
+  db.close();
+}
+
+test("Done lists merged cards newest first, and a done limit hides the older ones", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "history");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/history" })).status, 200);
+  const ids: string[] = [];
+  for (const title of ["First", "Second", "Third"]) {
+    const s = (await api("POST", "/api/sessions", { repoId: "kevin/history", title, prompt: `add ${title}` })).json;
+    await waitFor(async () => (await summary(s.id)).pending.some((p: any) => p.kind === "decision"));
+    // Stop ends the run (the card pauses in Issues); until Approve exists, the db write puts it in Done.
+    assert.equal((await api("POST", `/api/sessions/${s.id}/pipeline`, { action: "stop" })).status, 200);
+    await waitFor(async () => (await summary(s.id)).phase === "ready");
+    markDone(s.id);
+    await waitFor(async () => (await summary(s.id)).phase === "done");
+    ids.push(s.id);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  // A later message in an older card's session does not move it up: Done sorts by when the card got there.
+  const touched = (await summary(ids[2])).updatedAt;
+  assert.equal((await api("POST", `/api/sessions/${ids[0]}/prompt`, { message: "one more thing" })).status, 200);
+  assert.ok((await summary(ids[0])).updatedAt > touched, "the older card's session is now the latest updated");
+  const all = await api("GET", "/api/board?repo=kevin/history");
+  assert.deepEqual(all.json.cards.map((c: any) => [c.title, c.column]), [["Third", "done"], ["Second", "done"], ["First", "done"]]);
+  assert.equal(all.json.doneHidden, 0);
+
+  const two = await api("GET", "/api/board?repo=kevin/history&done=2");
+  assert.equal(two.status, 200);
+  assert.deepEqual(two.json.cards.map((c: any) => c.title), ["Third", "Second"]);
+  assert.equal(two.json.doneHidden, 1);
+  // "Show more" raises the limit.
+  assert.deepEqual((await api("GET", "/api/board?repo=kevin/history&done=3")).json.cards.length, 3);
+  assert.equal((await api("GET", "/api/board?repo=kevin/history&done=nope")).status, 400);
 });
 
 test("a move is a command: Issues → Doing is Solve all, a forward move with no command is refused", { skip: !hasPi && "pi CLI not found" }, async () => {

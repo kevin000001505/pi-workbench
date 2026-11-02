@@ -97,7 +97,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     lastState.current.set(s.id, key);
     if (prev !== undefined && prev !== key) {
       if (s.attention) notify(s, "Pipeline needs you", s.attention, `${s.id}-attention`);
-      else if (s.phase === "done" && s.mode === "pipeline" && !prev.endsWith("|done")) notify(s, "All tickets done", "Review and create the PR.", `${s.id}-done`);
+      else if (s.phase === "pr" && s.mode === "pipeline" && !prev.endsWith("|pr")) notify(s, "PR opened", `PR #${s.prNumber ?? ""} is open. Review it on the board.`, `${s.id}-pr`);
     }
     setSessions((prev) => ({ ...prev, [s.id]: s }));
   }, []);

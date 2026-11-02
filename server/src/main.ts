@@ -3,7 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import path from "node:path";
-import { boardCards } from "../../shared/board.ts";
+import { boardCards, DONE_PAGE, limitDone, prState } from "../../shared/board.ts";
 import { config, TYPESAFE_SKILL } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { GitEnv } from "./git.ts";
@@ -11,6 +11,7 @@ import { GitHub, GitHubError } from "./github.ts";
 import { autoApproveView, getAutoApproveSettings, listModelsFor, localJudge, saveAutoApproveKey, saveReviewerKey, savedJudgeToken, savedReviewerKey, testJudge, testReviewer } from "./autoapprove.ts";
 import { checkRequestOrigin, type Ctx, HttpError, readJson, Router, sendJson, serveStatic } from "./http.ts";
 import { listModelsAt, probeEndpoint } from "./llm.ts";
+import { githubDelivery } from "./delivery.ts";
 import { draftPr, openPr, changes } from "./prs.ts";
 import { addRepo, assertRepoName, clonePath, getRepo, listRepos, repoNeedsSetup, requireTrackedRepo } from "./repos.ts";
 import { assertUserScope, GLOBAL_SCOPE, SecretStore, userSecrets } from "./secrets.ts";
@@ -64,9 +65,18 @@ async function gitEnv(): Promise<GitEnv> {
   return { ...identity.env, ...env };
 }
 
-const sessions = new SessionManager(db, secrets, gitEnv, () => applySsh(db, secrets, config.agentHome, config.piAgentDir), (ref) => github().ticketsFromIssueRef(ref));
-
 const llmKey = () => secrets.get(GLOBAL_SCOPE, LLM_KEY_ENV);
+
+const delivery = githubDelivery({ github, gitEnv, model: () => getModelSettings(db), llmKey });
+const sessions = new SessionManager(
+  db,
+  secrets,
+  gitEnv,
+  () => applySsh(db, secrets, config.agentHome, config.piAgentDir),
+  (ref) => github().ticketsFromIssueRef(ref),
+  undefined,
+  delivery,
+);
 
 async function repoView(r: ReturnType<typeof listRepos>[number]) {
   return {
@@ -151,9 +161,19 @@ const router = new Router()
   })
 
   // --- board ---------------------------------------------------------------------------------
-  .on("GET", "/api/board", ({ query }) => {
+  .on("GET", "/api/board", async ({ query }) => {
     const repo = requireTrackedRepo(db, query.get("repo") ?? "");
-    return { cards: boardCards(sessions.list().filter((s) => s.repoId === repo.id)) };
+    // `done` is how many Done cards to list, newest first; the board's "show more" raises it.
+    const done = query.has("done") ? Number(query.get("done")) : DONE_PAGE;
+    if (!Number.isInteger(done) || done < 0) throw new HttpError(400, "done must be a whole number of cards");
+    const board = limitDone(boardCards(sessions.list().filter((s) => s.repoId === repo.id)), done);
+    // The PR badge's state comes from GitHub; a card whose PR cannot be read keeps state null.
+    await Promise.all(
+      board.cards.map(async (c) => {
+        if (c.pr) c.pr.state = await github().pullStatus(repo.owner, repo.name, c.pr.number).then(prState, () => null);
+      }),
+    );
+    return board;
   })
 
   // --- sessions -----------------------------------------------------------------------------

@@ -38,6 +38,8 @@ export type SessionRow = {
   review_run: string | null;
   /** finish_review's note from the last review run, for the card detail. */
   review_note: string | null;
+  /** When the card last reached Done; the board lists Done newest first by it. */
+  done_at: number | null;
   /** pi session id of the end-of-spec retro run, when one ran. */
   retro_run: string | null;
   /** pi session id of the conversation on screen: the session id itself, or a ticket's run. */
@@ -144,6 +146,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ["sessions", "auto_approve", "TEXT"],
   ["sessions", "typesafe_skill", "INTEGER NOT NULL DEFAULT 0"],
   ["sessions", "review_note", "TEXT"],
+  ["sessions", "done_at", "INTEGER"],
   ["tickets", "start_commit", "TEXT"],
   ["tickets", "stop_reason", "TEXT"],
   ["tickets", "rescue_run_id", "TEXT"],
@@ -156,6 +159,12 @@ function migrate(db: DatabaseSync) {
   for (const [table, column, type] of ADDED_COLUMNS) {
     const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
     if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
+  // `done` used to mean "reviewed"; it now means "merged", and a reviewed card with a PR is `pr`.
+  // Once only: a card merged after this must stay `done`.
+  if (!getSetting(db, "migrated.donePr")) {
+    db.exec("UPDATE sessions SET phase = 'pr' WHERE phase = 'done' AND pr_number IS NOT NULL");
+    putSetting(db, "migrated.donePr", true);
   }
 }
 
