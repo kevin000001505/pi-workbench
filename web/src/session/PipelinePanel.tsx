@@ -44,7 +44,7 @@ export const phaseLabel = (s: SessionSummary) => {
 };
 
 /** "#12" for GitHub issues, the file name for local ticket files. */
-const refLabel = (ref: string) => {
+export const refLabel = (ref: string) => {
   const issue = /^https?:\/\/.*\/issues\/(\d+)$/.exec(ref) ?? /^#?(\d+)$/.exec(ref);
   return issue ? `#${issue[1]}` : ref.split("/").pop() || ref;
 };

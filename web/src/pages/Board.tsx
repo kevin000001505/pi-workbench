@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { type Card, type Column, COLUMNS } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
+import { CardDetail } from "./CardDetail.tsx";
 import type { Repo } from "../types.ts";
 import "../board.css";
 
@@ -73,10 +74,10 @@ function Icon({ name }: { name: keyof typeof ICONS }) {
   );
 }
 
-function BoardCard({ card, activity, onDrag }: { card: Card; activity: string; onDrag: (card: Card | null) => void }) {
+function BoardCard({ card, activity, onDrag, onOpen }: { card: Card; activity: string; onDrag: (card: Card | null) => void; onOpen: () => void }) {
   const line = card.attention ?? activity;
   return (
-    // The card detail panel is a later ticket; until then a card opens its session.
+    // A click opens the card detail; a modified click still opens the session in a new tab.
     <a
       className="kz-card"
       href={`#/session/${card.id}`}
@@ -87,6 +88,11 @@ function BoardCard({ card, activity, onDrag }: { card: Card; activity: string; o
         onDrag(card);
       }}
       onDragEnd={() => onDrag(null)}
+      onClick={(e) => {
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        e.preventDefault();
+        onOpen();
+      }}
     >
       <div className="head">
         <div className="title">{card.title}</div>
@@ -119,6 +125,7 @@ export function Board({ repoId }: { repoId?: string }) {
   const [dragged, setDragged] = useState<Card | null>(null);
   const [over, setOver] = useState<Column | null>(null);
   const [refetch, setRefetch] = useState(0);
+  const [openId, setOpenId] = useState<string | null>(null);
 
   useEffect(() => {
     api.get<Repo[]>("/api/repos").then(setRepos, (e) => setError(e.message));
@@ -165,6 +172,9 @@ export function Board({ repoId }: { repoId?: string }) {
     for (const c of cards ?? []) m.get(c.column)?.push(c);
     return m;
   }, [cards]);
+
+  const open = openId ? (cards ?? []).find((c) => c.id === openId) : undefined;
+  const closeDetail = useCallback(() => setOpenId(null), []);
 
   if (repos && repos.length === 0) {
     return (
@@ -230,13 +240,14 @@ export function Board({ repoId }: { repoId?: string }) {
               </h2>
               <div className="kz-cards">
                 {list.map((c) => (
-                  <BoardCard key={c.id} card={c} activity={sessions[c.id]?.activity ?? ""} onDrag={setDragged} />
+                  <BoardCard key={c.id} card={c} activity={sessions[c.id]?.activity ?? ""} onDrag={setDragged} onOpen={() => setOpenId(c.id)} />
                 ))}
               </div>
             </section>
           );
         })}
       </div>
+      {open && <CardDetail card={open} onClose={closeDetail} />}
     </div>
   );
 }

@@ -36,6 +36,8 @@ export type SessionRow = {
   spec_ref: string | null;
   /** pi session id of the final code-review run. */
   review_run: string | null;
+  /** finish_review's note from the last review run, for the card detail. */
+  review_note: string | null;
   /** pi session id of the end-of-spec retro run, when one ran. */
   retro_run: string | null;
   /** pi session id of the conversation on screen: the session id itself, or a ticket's run. */
@@ -141,6 +143,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ["sessions", "issue_ref", "TEXT"],
   ["sessions", "auto_approve", "TEXT"],
   ["sessions", "typesafe_skill", "INTEGER NOT NULL DEFAULT 0"],
+  ["sessions", "review_note", "TEXT"],
   ["tickets", "start_commit", "TEXT"],
   ["tickets", "stop_reason", "TEXT"],
   ["tickets", "rescue_run_id", "TEXT"],
