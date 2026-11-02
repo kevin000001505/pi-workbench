@@ -1,14 +1,14 @@
 import type { RepoRow, SessionRow } from "./db.ts";
 import { git, type GitEnv } from "./git.ts";
-import type { GitHub } from "./github.ts";
+import { GitHubError, type GitHub } from "./github.ts";
 import type { Ticket } from "./pipeline.ts";
 import { draftPr, openPr } from "./prs.ts";
 import type { ModelSettings } from "./settings.ts";
 
 /**
  * How a card's work reaches GitHub. `SessionManager` gets one from main.ts, so it holds no
- * GitHub client and no model settings itself. Today it opens the PR; merge, close the PR,
- * delete the branch and close the issues join it later.
+ * GitHub client and no model settings itself. It opens the PR, merges it, deletes the branch
+ * and closes the issues; closing the PR joins it later.
  */
 export type Delivery = {
   /**
@@ -16,7 +16,19 @@ export type Delivery = {
    * A session that has a PR already pushes to it and opens no second one.
    */
   openPr(row: SessionRow, repo: RepoRow, tickets: Ticket[]): Promise<{ number: number; url: string }>;
+  /**
+   * Merge the session's PR with a merge commit. A merge conflict resolves to `{ conflict }`; any
+   * other refusal (branch protection, red required checks) throws with GitHub's message.
+   * A PR that is merged already counts as merged.
+   */
+  merge(row: SessionRow, repo: RepoRow): Promise<MergeResult>;
+  /** Delete the session's branch on GitHub. */
+  deleteBranch(row: SessionRow, repo: RepoRow): Promise<void>;
+  /** Close these issues of the repo. */
+  closeIssues(repo: RepoRow, numbers: number[]): Promise<void>;
 };
+
+export type MergeResult = { merged: true } | { conflict: string };
 
 export type DeliveryDeps = {
   github: () => GitHub;
@@ -37,6 +49,36 @@ export function githubDelivery(deps: DeliveryDeps): Delivery {
       const draft = await draftPr(row, env, deps.model(), deps.llmKey(), tickets);
       const pr = await openPr(row, repo, deps.github(), env, { title: draft.title, body: draft.body });
       return { number: pr.number, url: pr.html_url };
+    },
+
+    async merge(row, repo) {
+      if (!row.pr_number) throw new Error("this card has no PR");
+      const gh = deps.github();
+      const conflict = async () => {
+        const status = await gh.pullStatus(repo.owner, repo.name, row.pr_number!);
+        if (status.state === "merged") return { merged: true } as const;
+        return status.mergeableState === "dirty" ? { conflict: `PR #${row.pr_number} has a merge conflict with ${row.base_branch}` } : null;
+      };
+      try {
+        await gh.mergePull(repo.owner, repo.name, row.pr_number);
+        return { merged: true };
+      } catch (err) {
+        // GitHub answers a conflict, a protection rule and a merged PR with the same 405: ask the PR which it was.
+        if (err instanceof GitHubError && (err.status === 405 || err.status === 409)) {
+          const after = await conflict().catch(() => null);
+          if (after) return after;
+        }
+        throw err;
+      }
+    },
+
+    async deleteBranch(row, repo) {
+      await deps.github().deleteBranch(repo.owner, repo.name, row.branch);
+    },
+
+    async closeIssues(repo, numbers) {
+      const gh = deps.github();
+      for (const n of numbers) await gh.closeIssue(repo.owner, repo.name, n);
     },
   };
 }

@@ -273,6 +273,12 @@ test("the origin issue's Closes line is deduped against ticket lines by number",
   assert.equal(originCloses("me/app", ""), ""); // malformed ref
   assert.equal(originCloses("me/app#42", section("Closes #42")), ""); // a ticket already closes it
   assert.equal(originCloses("me/app#1", section("Closes #12")), "Closes #1\n"); // 1 is not 12
+  // The spec issue closes too: as `#n` or an issues URL, once, and not when a ticket or the origin already does.
+  assert.equal(originCloses(null, "", "#12"), "Closes #12\n");
+  assert.equal(originCloses("me/app#42", "", "https://github.com/me/app/issues/12"), "Closes #42\nCloses #12\n");
+  assert.equal(originCloses("me/app#42", "", "https://github.com/me/app/issues/42"), "Closes #42\n");
+  assert.equal(originCloses(null, section("Closes #12"), "#12"), "");
+  assert.equal(originCloses(null, "", ".scratch/greeting/spec.md"), "");
 });
 
 test("requireTrackedRepo resolves tracked repos and rejects the rest", () => {

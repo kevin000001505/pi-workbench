@@ -44,22 +44,28 @@ function newFileDiff(root: string, file: string) {
 }
 
 /**
- * The `Closes #n` line for the session's origin issue, ready to append after the ticket section.
- * Empty when the session has no origin issue, or when a ticket line already closes the same
- * number (matched as a whole number, so `#1` is not deduped against `#12`).
+ * The `Closes #n` lines for the session's origin issue (`owner/name#n`) and its spec issue
+ * (`#n` or an issues URL), ready to append after the ticket section. A ref that names no issue
+ * (a `.scratch` path) adds nothing, and a number that a ticket line or the other ref already
+ * closes is not repeated (matched as a whole number, so `#1` is not deduped against `#12`).
  */
-export function originCloses(issueRef: string | null, ticketSection: string): string {
-  const m = /#(\d+)$/.exec(issueRef ?? "");
-  if (!m) return "";
+export function originCloses(issueRef: string | null, ticketSection: string, specRef: string | null = null): string {
   const closed = [...ticketSection.matchAll(/Closes #(\d+)/g)].map((x) => x[1]);
-  return closed.includes(m[1]) ? "" : `Closes #${m[1]}\n`;
+  let lines = "";
+  for (const ref of [issueRef, specRef]) {
+    const m = /(?:#|\/issues\/)(\d+)$/.exec(ref ?? "");
+    if (!m || closed.includes(m[1])) continue;
+    closed.push(m[1]);
+    lines += `Closes #${m[1]}\n`;
+  }
+  return lines;
 }
 
 /** Ask the configured model for a title and body; fall back to the session title and commit list. */
 export async function draftPr(row: SessionRow, env: GitEnv, model: ModelSettings, apiKey: string | undefined, tickets: Ticket[] = []) {
   const c = await changes(row, env);
   const ticketList = ticketsSection(tickets);
-  const issueLine = originCloses(row.issue_ref, ticketList);
+  const issueLine = originCloses(row.issue_ref, ticketList, row.spec_ref);
   const fallback = { title: row.title, body: `## Summary\n\n${c.log || "- (no commits yet)"}\n${ticketList}${issueLine}` };
   const diff = `${c.committed}\n${c.uncommitted}`.trim();
   if (!diff) return { ...fallback, drafted: false, error: "No changes against the base branch yet", ...c };
@@ -88,6 +94,13 @@ export function ticketsSection(tickets: Ticket[]) {
     return `- [${t.status === "done" ? "x" : " "}] #${t.num} ${t.title}${ref ? ` (${ref})` : ""}`;
   });
   return `\n## Tickets\n\n${lines.join("\n")}\n`;
+}
+
+/** The issue numbers the PR body's `Closes` lines name: the ticket issues, then the origin and spec issues. */
+export function closedIssues(row: SessionRow, tickets: Ticket[]): number[] {
+  const section = ticketsSection(tickets);
+  const lines = `${section}${originCloses(row.issue_ref, section, row.spec_ref)}`;
+  return [...new Set([...lines.matchAll(/Closes #(\d+)/g)].map((m) => Number(m[1])))];
 }
 
 export async function openPr(

@@ -8,7 +8,7 @@ const unclaimedIssue = (card: Card) => {
 };
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
-import { CardDetail } from "./CardDetail.tsx";
+import { approveQuestion, CardDetail } from "./CardDetail.tsx";
 import { matches, NewCard, Search, typingIn, wordsOf } from "./BoardDialogs.tsx";
 import type { Repo } from "../types.ts";
 import "../board.css";
@@ -186,6 +186,8 @@ export function Board({ repoId }: { repoId?: string }) {
     setDragged(null);
     setOver(null);
     if (!card || card.column === column || !repo) return;
+    // Review → Done is Approve: it merges the PR, so it asks first.
+    if (card.column === "review" && column === "done" && !confirm(approveQuestion(card))) return;
     // An unclaimed card's move creates its session; the server answers with that session.
     const issue = unclaimedIssue(card);
     const url = issue !== null ? `/api/repos/${repo.id}/issues/${issue}/move` : `/api/sessions/${card.id}/move`;

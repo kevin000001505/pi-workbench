@@ -15,7 +15,8 @@ import {
 import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
 import type { Db, RepoRow, SessionRow, TicketRow } from "./db.ts";
 import type { GitEnv } from "./git.ts";
-import type { Delivery } from "./delivery.ts";
+import type { Delivery, MergeResult } from "./delivery.ts";
+import { closedIssues } from "./prs.ts";
 import {
   allDone,
   grillPrompt,
@@ -214,6 +215,8 @@ export class SessionManager extends EventEmitter {
   private delivery?: Delivery;
   private live = new Map<string, Live>();
   private summaryTimers = new Map<string, NodeJS.Timeout>();
+  /** Sessions whose Approve is in flight, so a second click does not merge twice. */
+  private approving = new Set<string>();
 
   constructor(db: Db, secrets: SecretStore, gitEnv: () => Promise<GitEnv>, refreshSsh?: () => void, fetchTicketSeed?: (ref: string) => Promise<TicketSeed>, rescueProxy?: RescueProxy, delivery?: Delivery) {
     super();
@@ -1062,6 +1065,7 @@ export class SessionManager extends EventEmitter {
    */
   private readonly moves: Partial<Record<`${Column}>${Column}`, (id: string) => Promise<void>>> = {
     "issues>doing": (id) => this.solveAll(id),
+    "review>done": (id) => this.approve(id),
     "doing>issues": (id) => this.pause(id),
     "qa>issues": (id) => this.pause(id),
     "review>issues": (id) => this.pause(id),
@@ -1097,6 +1101,56 @@ export class SessionManager extends EventEmitter {
     for (const t of this.tickets(id)) if (t.status === "running") this.updateTicket(id, t.num, { status: "ready" });
     this.update(id, { phase: "implement" });
     await this.runNext(id);
+  }
+
+  /**
+   * Approve: merge the card's PR with a merge commit, then deliver it (`delivered`). A merge
+   * conflict goes to `mergeConflict`; any other refusal keeps `pr` with GitHub's message.
+   */
+  async approve(id: string) {
+    const row = this.row(id);
+    if (row.phase !== "pr" || this.approving.has(id)) throw Object.assign(new Error("Only a card in Review with its PR open can be approved."), { status: 409 });
+    this.approving.add(id);
+    try {
+      const { repo } = this.repoOf(id);
+      let result: MergeResult;
+      try {
+        if (!this.delivery) throw new Error("this workbench has no GitHub connection");
+        result = await this.delivery.merge(row, repo);
+      } catch (err) {
+        this.flag(id, `GitHub refused the merge: ${(err as Error).message}. Fix it on GitHub, then approve again.`);
+        return;
+      }
+      if ("conflict" in result) await this.mergeConflict(id, result.conflict);
+      else await this.delivered(id, repo);
+    } finally {
+      this.approving.delete(id);
+      this.emitSummary(id, true);
+    }
+  }
+
+  /** The merge stopped on a conflict. The card stays in Review; #52 starts the resolve run here. */
+  private async mergeConflict(id: string, reason: string) {
+    this.flag(id, `${reason}. Resolve it on the branch, then approve again.`);
+  }
+
+  /**
+   * The PR is merged: close the issues when GitHub will not (a base that is not the default
+   * branch ignores `Closes`), delete the branch on GitHub and the worktree, and set `done`.
+   * A cleanup step that fails does not undo the merge; its reason goes on the card.
+   */
+  private async delivered(id: string, repo: RepoRow) {
+    const row = this.row(id);
+    const delivery = this.delivery!;
+    const problems: string[] = [];
+    if (row.base_branch !== repo.default_branch) {
+      await delivery.closeIssues(repo, closedIssues(row, this.tickets(id))).catch((err) => problems.push(`the issues did not close (${(err as Error).message})`));
+    }
+    await delivery.deleteBranch(row, repo).catch((err) => problems.push(`the branch was not deleted (${(err as Error).message})`));
+    await this.stop(id).catch(() => {});
+    if (fs.existsSync(row.worktree)) await removeWorktree(repo, row.worktree).catch((err) => problems.push(`the worktree was not removed (${(err as Error).message})`));
+    this.update(id, { phase: "done", attention: problems.length ? `PR #${row.pr_number} is merged, but ${problems.join(", and ")}.` : null });
+    this.emit("event", id, { type: "wb_notify", message: `PR #${row.pr_number} is merged.`, level: "info" });
   }
 
   /** A drag of a card to another column; the card's column follows from the phase it leaves. */

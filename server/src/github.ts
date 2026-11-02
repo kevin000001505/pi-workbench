@@ -234,6 +234,20 @@ export class GitHub {
     );
   }
 
+  /** Merge a PR with a merge commit. GitHub refuses (405) a conflict, red required checks and branch protection. */
+  mergePull(owner: string, name: string, number: number) {
+    return this.req<{ sha: string; merged: boolean; message: string }>("PUT", `/repos/${owner}/${name}/pulls/${number}/merge`, { merge_method: "merge" });
+  }
+
+  /** Delete a branch on GitHub. */
+  deleteBranch(owner: string, name: string, branch: string) {
+    return this.req<void>("DELETE", `/repos/${owner}/${name}/git/refs/heads/${branch.split("/").map(encodeURIComponent).join("/")}`);
+  }
+
+  closeIssue(owner: string, name: string, number: number) {
+    return this.req<{ number: number }>("PATCH", `/repos/${owner}/${name}/issues/${number}`, { state: "closed" });
+  }
+
   async pullStatus(owner: string, name: string, number: number) {
     const pr = await this.req<{
       state: string;

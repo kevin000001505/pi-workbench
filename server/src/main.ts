@@ -260,6 +260,10 @@ const router = new Router()
     await sessions.move(params.id, body.column);
     return sessions.summary(params.id);
   })
+  .on("POST", "/api/sessions/:id/approve", async ({ params }) => {
+    await sessions.approve(params.id);
+    return sessions.summary(params.id);
+  })
   .on("GET", "/api/sessions/:id/runs/:runId", ({ params }) => sessions.runTranscript(params.id, params.runId))
   .on("GET", "/api/sessions/:id/changes", async ({ params }) => {
     const { row } = sessions.repoOf(params.id);
