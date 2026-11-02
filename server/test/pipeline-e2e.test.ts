@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import { startMockLlm } from "./mock-llm.ts";
 import { startMockGitHub } from "./mock-github.ts";
+import { RESCUE_TOKEN_ENV, startRescueProxy } from "../src/rescue-proxy.ts";
 
 const piBin = process.env.PI_BIN ?? "pi";
 const hasPi = spawnSync(piBin, ["--version"]).status === 0;
@@ -24,10 +25,15 @@ process.env.SKILLS_DIR = path.join(tmp, "skills");
 // extension, so the assertions cover the code under test.
 process.env.PI_EXTENSION = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "pi-extension", "workbench.ts");
 
+const RESCUE_KEY = "sk-pipeline-reviewer-key-123456";
+
 let mock: Awaited<ReturnType<typeof startMockLlm>>;
 let ghMock: Awaited<ReturnType<typeof startMockGitHub>>;
+let proxy: Awaited<ReturnType<typeof startRescueProxy>>;
 let mgr: any;
 let db: any;
+let auto: typeof import("../src/autoapprove.ts");
+let secrets: any;
 const events: { id: string; ev: any }[] = [];
 const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
 
@@ -51,6 +57,7 @@ async function answerNext(id: string, expect: RegExp) {
 before(async () => {
   if (!hasPi) return;
   mock = await startMockLlm();
+  proxy = await startRescueProxy(() => {});
   const { config } = await import("../src/config.ts");
   const { openDb } = await import("../src/db.ts");
   const { SecretStore } = await import("../src/secrets.ts");
@@ -59,7 +66,7 @@ before(async () => {
   config.piBin = piBin;
   db = openDb(config.dbFile);
   saveModelSettings(db, { baseUrl: mock.url });
-  writePiConfig(db);
+  writePiConfig(db, proxy.url);
 
   // Skills the pipeline invokes; pi expands /skill:name from these.
   for (const name of ["grill-with-docs", "to-spec", "to-tickets", "tdd", "code-review", "setup-matt-pocock-skills"]) {
@@ -79,11 +86,11 @@ before(async () => {
   sh(tmp, "clone", "-q", path.join(tmp, "remote.git"), clone);
   db.prepare("INSERT INTO repos (id, owner, name, default_branch, private, added_at) VALUES ('me/demo','me','demo','main',1,0)").run();
 
-  const secrets = new SecretStore(db, process.env.WORKBENCH_MASTER_KEY!);
+  secrets = new SecretStore(db, process.env.WORKBENCH_MASTER_KEY!);
   // Auto-approve on, judged by the local model on the agent's endpoint (the mock answers SAFE for
   // `git push`): gated calls in ticket and review runs are answered without the user.
-  const { configureAutoApprove } = await import("../src/autoapprove.ts");
-  await configureAutoApprove(db, secrets, { enabled: true, judge: { kind: "local", model: "mock-judge" } as any });
+  auto = await import("../src/autoapprove.ts");
+  await auto.configureAutoApprove(db, secrets, { enabled: true, judge: { kind: "local", model: "mock-judge" } } as any);
   ghMock = await startMockGitHub(path.join(tmp, "gh"));
   config.githubApi = ghMock.url;
   const { GitHub } = await import("../src/github.ts");
@@ -92,7 +99,7 @@ before(async () => {
     GIT_AUTHOR_EMAIL: "t@t",
     GIT_COMMITTER_NAME: "t",
     GIT_COMMITTER_EMAIL: "t@t",
-  }), undefined, (ref) => new GitHub("ghp_test").ticketsFromIssueRef(ref));
+  }), undefined, (ref) => new GitHub("ghp_test").ticketsFromIssueRef(ref), proxy);
   mgr.on("event", (id: string, ev: any) => events.push({ id, ev }));
 });
 
@@ -101,6 +108,7 @@ after(async () => {
   await mgr.shutdown();
   await mock.close();
   await ghMock.close();
+  await proxy.close();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -245,4 +253,82 @@ test("Direct mode skips the pipeline", { skip: !hasPi && "pi CLI not found" }, a
   assert.equal(t.isError, false);
   assert.match(JSON.stringify(t.content), /<skill name=\\"tdd\\"[\s\S]*tdd body/);
   assert.equal(mgr.summary(s.id).runs.length, 1);
+});
+
+test("the generated models.json carries the workbench-rescue provider for the Reviewer, with no literal key", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { writePiConfig } = await import("../src/settings.ts");
+  const { config } = await import("../src/config.ts");
+  const read = () => JSON.parse(fs.readFileSync(path.join(config.piAgentDir, "models.json"), "utf8"));
+  // The Reviewer is on: openai, bound to the mock's origin.
+  auto.saveReviewerKey(secrets, { key: "reviewerKey", value: RESCUE_KEY, baseUrl: mock.url });
+  auto.saveAutoApproveSettings(db, { reviewer: { provider: "openai", baseUrl: mock.url, model: "mock-rescue" } });
+  writePiConfig(db, proxy.url);
+  const models = read();
+  assert.equal(models.providers["workbench"].api, "openai-completions", "the local provider is unchanged");
+  const rescue = models.providers["workbench-rescue"];
+  assert.ok(rescue, "the rescue provider is generated");
+  assert.equal(rescue.api, "openai-completions", "the rescue api follows the Reviewer's provider");
+  assert.equal(rescue.baseUrl, proxy.url);
+  assert.equal(rescue.apiKey, `$${RESCUE_TOKEN_ENV}`, "the api key is a reference to the token variable");
+  assert.equal(rescue.models[0].id, "mock-rescue", "the rescue model is the Reviewer's model");
+  assert.ok(!JSON.stringify(models).includes(RESCUE_KEY), "the Reviewer key never appears in models.json");
+  // An anthropic Reviewer switches the api.
+  auto.saveAutoApproveSettings(db, { reviewer: { provider: "anthropic", baseUrl: mock.url, model: "mock-rescue" } });
+  writePiConfig(db, proxy.url);
+  assert.equal(read().providers["workbench-rescue"].api, "anthropic-messages");
+  // An empty Reviewer model turns rescue off: no rescue provider.
+  auto.saveAutoApproveSettings(db, { reviewer: { provider: "anthropic", baseUrl: mock.url, model: "" } });
+  writePiConfig(db, proxy.url);
+  assert.equal(read().providers["workbench-rescue"], undefined, "reviewer off means no rescue provider");
+});
+
+test("a rescue run spawns with the Reviewer model through the proxy; the token is per-run and revoked on exit", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { writePiConfig } = await import("../src/settings.ts");
+  // The Reviewer is on, openai, bound to the mock's origin; the proxy is pointed at it.
+  auto.saveReviewerKey(secrets, { key: "reviewerKey", value: RESCUE_KEY, baseUrl: mock.url });
+  auto.saveAutoApproveSettings(db, { reviewer: { provider: "openai", baseUrl: mock.url, model: "mock-rescue" } });
+  writePiConfig(db, proxy.url);
+  const s = await mgr.create({ repoId: "me/demo", title: "Rescue hop", prompt: "hello rescue", mode: "direct" });
+  await waitFor(async () => {
+    const tr = mgr.live.get(s.id).transcript;
+    return !tr.busy && tr.messages.some((m: any) => m.role === "assistant" && JSON.stringify(m.content).includes("Hello from the mock"));
+  });
+  // A normal run: no token variable, no Reviewer key in the environment.
+  const env0 = fs.readFileSync(`/proc/${mgr.live.get(s.id).proc.pid}/environ`, "utf8");
+  assert.ok(!env0.includes(RESCUE_TOKEN_ENV), "a normal run gets no rescue token");
+  assert.ok(!env0.includes(RESCUE_KEY));
+  // The rescue run: a fresh pi process for the rescue run id.
+  const rescueRunId = `${s.id}-t1-rescue-${Date.now().toString(36)}`;
+  await mgr.switchRun(s.id, rescueRunId, true);
+  await mgr.send(s.id, "rescue test");
+  const req = await waitFor(() => mock.requests.find((r) => r.model === "mock-rescue"));
+  assert.equal(req.auth, `Bearer ${RESCUE_KEY}`, "the Reviewer key is in the provider's header");
+  assert.equal(req.path, "/v1/chat/completions");
+  await waitFor(async () => {
+    const tr = mgr.live.get(s.id).transcript;
+    return !tr.busy && tr.messages.some((m: any) => m.role === "assistant" && JSON.stringify(m.content).includes("Hello from the mock"));
+  });
+  // The rescue run's environment: the token variable, and no Reviewer key.
+  const env1 = fs.readFileSync(`/proc/${mgr.live.get(s.id).proc.pid}/environ`, "utf8");
+  assert.ok(!env1.includes(RESCUE_KEY), "the Reviewer key never reaches the rescue run");
+  const token = env1.split("\0").find((x) => x.startsWith(`${RESCUE_TOKEN_ENV}=`))?.slice(RESCUE_TOKEN_ENV.length + 1);
+  assert.ok(token, "the rescue run's environment has the token variable");
+  // Stop the run: the token is revoked with the process.
+  await mgr.stop(s.id);
+  await waitFor(() => mgr.live.get(s.id).proc?.exited);
+  const dead = await fetch(`${proxy.url}/v1/chat/completions`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: "{}",
+  });
+  assert.equal(dead.status, 401, "the token of an exited run is refused");
+  // Back on the plan conversation: the next run is local again, with no token.
+  await mgr.switchRun(s.id, s.id, true);
+  await mgr.send(s.id, "hello again");
+  await waitFor(async () => {
+    const tr = mgr.live.get(s.id).transcript;
+    return !tr.busy && tr.messages.some((m: any) => m.role === "assistant" && JSON.stringify(m.content).includes("Hello from the mock"));
+  });
+  const env2 = fs.readFileSync(`/proc/${mgr.live.get(s.id).proc.pid}/environ`, "utf8");
+  assert.ok(!env2.includes(RESCUE_TOKEN_ENV), "other runs' environments are unchanged");
 });

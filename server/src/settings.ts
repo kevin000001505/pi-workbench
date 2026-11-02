@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import { getAutoApproveSettings } from "./autoapprove.ts";
 import { config, PROVIDER_ID } from "./config.ts";
 import { type Db, getSetting, putSetting } from "./db.ts";
 import { HttpError } from "./http.ts";
+import { RESCUE_PROVIDER_ID, RESCUE_TOKEN_ENV } from "./rescue-proxy.ts";
 
 export type ModelSettings = {
   baseUrl: string;
@@ -134,10 +136,13 @@ export const LLM_KEY_ENV = "LLM_API_KEY";
 export const rulesFile = () => path.join(config.piAgentDir, "workbench-rules.json");
 
 /**
- * Regenerate pi's agent dir from the db: models.json (the one provider), settings.json (default model,
- * global skills and our extension), and the approval rules the extension re-reads on every tool call.
+ * Regenerate pi's agent dir from the db: models.json (the workbench provider, and the
+ * workbench-rescue provider for rescue and retro runs, ADR 0003), settings.json (default
+ * model, global skills and our extension), and the approval rules the extension re-reads on
+ * every tool call. The rescue provider points at the rescue proxy and reads the key from the
+ * run's token environment variable; the Reviewer key never appears in the file.
  */
-export function writePiConfig(db: Db) {
+export function writePiConfig(db: Db, rescueProxyUrl?: string) {
   const m = getModelSettings(db);
   fs.mkdirSync(config.piAgentDir, { recursive: true });
   const model: Record<string, unknown> = {
@@ -150,18 +155,39 @@ export function writePiConfig(db: Db) {
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   };
   if (m.thinkingFormat) model.compat = { thinkingFormat: m.thinkingFormat };
-  writeJson(path.join(config.piAgentDir, "models.json"), {
-    providers: {
-      [PROVIDER_ID]: {
-        name: "Workbench LLM",
-        baseUrl: m.baseUrl,
-        api: "openai-completions",
-        // Local servers ignore the key; a hosted endpoint gets it from the LLM_API_KEY secret.
-        apiKey: `$${LLM_KEY_ENV}`,
-        models: [model],
-      },
+  const providers: Record<string, unknown> = {
+    [PROVIDER_ID]: {
+      name: "Workbench LLM",
+      baseUrl: m.baseUrl,
+      api: "openai-completions",
+      // Local servers ignore the key; a hosted endpoint gets it from the LLM_API_KEY secret.
+      apiKey: `$${LLM_KEY_ENV}`,
+      models: [model],
     },
-  });
+  };
+  // A second provider for rescue and retro runs: the Reviewer's model through the localhost
+  // proxy (ADR 0003). Generated only when the Reviewer has a model (an empty one turns rescue
+  // and retro off) and the proxy URL is known.
+  const reviewer = getAutoApproveSettings(db).reviewer;
+  if (rescueProxyUrl && reviewer.model) {
+    providers[RESCUE_PROVIDER_ID] = {
+      name: "Workbench rescue (the Reviewer model)",
+      baseUrl: rescueProxyUrl,
+      api: reviewer.provider === "anthropic" ? "anthropic-messages" : "openai-completions",
+      // The key here is the run's token; the proxy swaps it for the Reviewer key.
+      apiKey: `$${RESCUE_TOKEN_ENV}`,
+      models: [{
+        id: reviewer.model,
+        name: reviewer.model,
+        input: ["text"],
+        // Frontier models the Reviewer settings point at; adjust if the real limits differ.
+        contextWindow: 200_000,
+        maxTokens: 16_384,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }],
+    };
+  }
+  writeJson(path.join(config.piAgentDir, "models.json"), { providers });
   const settingsFile = path.join(config.piAgentDir, "settings.json");
   const existing = fs.existsSync(settingsFile) ? JSON.parse(fs.readFileSync(settingsFile, "utf8")) : {};
   writeJson(settingsFile, {

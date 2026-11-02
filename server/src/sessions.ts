@@ -50,6 +50,8 @@ import { loadSshHosts } from "./ssh.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
 import { type RpcRecord, RpcProcess } from "./rpc.ts";
+import { getAutoApproveSettings } from "./autoapprove.ts";
+import { isRescueyRun, RESCUE_PROVIDER_ID, RESCUE_TOKEN_ENV, type RescueProxy } from "./rescue-proxy.ts";
 
 export type SessionStatus = "stopped" | "starting" | "running" | "waiting" | "idle" | "error";
 
@@ -201,16 +203,19 @@ export class SessionManager extends EventEmitter {
   private refreshSsh?: () => void;
   /** Fetches a spec issue's ticket sub-issues for sessions started from the Issues page; the server wires GitHub here. */
   private fetchTicketSeed?: (ref: string) => Promise<TicketSeed>;
+  /** The localhost proxy rescue and retro runs call the Reviewer model through (ADR 0003). */
+  private rescueProxy?: RescueProxy;
   private live = new Map<string, Live>();
   private summaryTimers = new Map<string, NodeJS.Timeout>();
 
-  constructor(db: Db, secrets: SecretStore, gitEnv: () => Promise<GitEnv>, refreshSsh?: () => void, fetchTicketSeed?: (ref: string) => Promise<TicketSeed>) {
+  constructor(db: Db, secrets: SecretStore, gitEnv: () => Promise<GitEnv>, refreshSsh?: () => void, fetchTicketSeed?: (ref: string) => Promise<TicketSeed>, rescueProxy?: RescueProxy) {
     super();
     this.db = db;
     this.secrets = secrets;
     this.gitEnv = gitEnv;
     this.refreshSsh = refreshSsh;
     this.fetchTicketSeed = fetchTicketSeed;
+    this.rescueProxy = rescueProxy;
   }
 
   private row(id: string): SessionRow {
@@ -472,6 +477,17 @@ export class SessionManager extends EventEmitter {
     // The extension's Skill tool looks there too, so only these sessions can load them.
     if (extraSkills.length) env.PI_WORKBENCH_EXTRA_SKILLS = extraSkills.join(path.delimiter);
     const runId = this.runOf(row);
+    // Rescue and retro runs call the Reviewer model through the rescue proxy: the run gets a
+    // per-run token in its environment only, and the Reviewer key stays in the server (ADR 0003).
+    const rescuey = !!this.rescueProxy && isRescueyRun(runId);
+    let provider = PROVIDER_ID;
+    let modelId = m.modelId;
+    if (rescuey) {
+      const reviewer = getAutoApproveSettings(this.db).reviewer;
+      provider = RESCUE_PROVIDER_ID;
+      modelId = reviewer.model;
+      env[RESCUE_TOKEN_ENV] = this.rescueProxy!.mint(runId);
+    }
     const ticket = this.tickets(id).find((t) => t.runId === runId);
     const label = ticket ? ` · #${ticket.num}` : runId === row.review_run ? " · review" : "";
     s.error = null;
@@ -483,7 +499,7 @@ export class SessionManager extends EventEmitter {
         "--session-id", runId,
         "--name", `${row.title}${label}`,
         "--approve", "--offline",
-        "--provider", PROVIDER_ID, "--model", m.modelId,
+        "--provider", provider, "--model", modelId,
         "--append-system-prompt", EXPLAIN_PROMPT,
         ...extraSkills.flatMap((dir) => ["--skill", dir]),
       ],
@@ -498,6 +514,8 @@ export class SessionManager extends EventEmitter {
       if (s.stderr.length > 200) s.stderr.splice(0, s.stderr.length - 200);
     });
     proc.on("exit", (code: number | null, signal: string | null) => {
+      // The run is gone: its rescue token stops working, so a leaked one is useless.
+      if (rescuey) this.rescueProxy!.revoke(runId);
       if (s.proc !== proc) return;
       this.dropReviews(s);
       s.pending.clear();
