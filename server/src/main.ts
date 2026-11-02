@@ -3,7 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import path from "node:path";
-import { boardCards, prState } from "../../shared/board.ts";
+import { boardCards, DONE_PAGE, limitDone, prState } from "../../shared/board.ts";
 import { config, TYPESAFE_SKILL } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { GitEnv } from "./git.ts";
@@ -163,14 +163,17 @@ const router = new Router()
   // --- board ---------------------------------------------------------------------------------
   .on("GET", "/api/board", async ({ query }) => {
     const repo = requireTrackedRepo(db, query.get("repo") ?? "");
-    const cards = boardCards(sessions.list().filter((s) => s.repoId === repo.id));
+    // `done` is how many Done cards to list, newest first; the board's "show more" raises it.
+    const done = query.has("done") ? Number(query.get("done")) : DONE_PAGE;
+    if (!Number.isInteger(done) || done < 0) throw new HttpError(400, "done must be a whole number of cards");
+    const board = limitDone(boardCards(sessions.list().filter((s) => s.repoId === repo.id)), done);
     // The PR badge's state comes from GitHub; a card whose PR cannot be read keeps state null.
     await Promise.all(
-      cards.map(async (c) => {
+      board.cards.map(async (c) => {
         if (c.pr) c.pr.state = await github().pullStatus(repo.owner, repo.name, c.pr.number).then(prState, () => null);
       }),
     );
-    return { cards };
+    return board;
   })
 
   // --- sessions -----------------------------------------------------------------------------
@@ -228,6 +231,10 @@ const router = new Router()
   .on("POST", "/api/sessions/:id/pipeline", async ({ params, body }) => {
     if (!["retry", "skip", "stop"].includes(body.action)) throw new HttpError(400, "action must be retry, skip or stop");
     await sessions.pipelineAction(params.id, body.action);
+    return sessions.summary(params.id);
+  })
+  .on("POST", "/api/sessions/:id/move", async ({ params, body }) => {
+    await sessions.move(params.id, body.column);
     return sessions.summary(params.id);
   })
   .on("GET", "/api/sessions/:id/runs/:runId", ({ params }) => sessions.runTranscript(params.id, params.runId))

@@ -44,6 +44,8 @@ export type CardSource = {
   prNumber: number | null;
   prUrl: string | null;
   specRef: string | null;
+  /** When the card reached Done; Done lists the newest first. */
+  doneAt?: number | null;
   tickets: { status: string }[];
 };
 
@@ -84,11 +86,25 @@ export function cardOf(s: CardSource): Card | null {
   };
 }
 
-/** The cards of these sessions in column order; inside a column, in the order given. */
+/** How many Done cards the board shows at first, and how many more each "show more" adds. */
+export const DONE_PAGE = 20;
+
+/** Keep the newest `limit` Done cards of a board (cards in boardCards order); say how many are hidden. */
+export function limitDone(cards: Card[], limit: number): { cards: Card[]; doneHidden: number } {
+  let done = 0;
+  const kept = cards.filter((c) => c.column !== "done" || ++done <= limit);
+  return { cards: kept, doneHidden: cards.length - kept.length };
+}
+
+/**
+ * The cards of these sessions in column order; inside a column, in the order given, except Done,
+ * which lists the newest first by when each card got there.
+ */
 export function boardCards(sessions: CardSource[]): Card[] {
   const order = new Map(COLUMNS.map((c, i) => [c.id, i]));
+  const doneAt = new Map(sessions.map((s) => [s.id, s.doneAt ?? 0]));
   return sessions
     .map(cardOf)
     .filter((c): c is Card => c !== null)
-    .sort((a, b) => order.get(a.column)! - order.get(b.column)!);
+    .sort((a, b) => order.get(a.column)! - order.get(b.column)! || (a.column === "done" ? doneAt.get(b.id)! - doneAt.get(a.id)! : 0));
 }

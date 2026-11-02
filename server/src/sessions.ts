@@ -32,6 +32,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
+import { type Column, COLUMNS, columnOf } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
   configureAutoApprove,
@@ -115,6 +116,9 @@ export type SessionSummary = {
   grillSummary: string | null;
   spec: string | null;
   specRef: string | null;
+  reviewNote: string | null;
+  /** When the card last reached Done. */
+  doneAt: number | null;
   /** The GitHub issue this session solves, e.g. `owner/name#123`; null for plain sessions. */
   issueRef: string | null;
   /** The session's own auto-approve setting, and whether auto-approve is in effect for it now. */
@@ -228,6 +232,8 @@ export class SessionManager extends EventEmitter {
   }
 
   private update(id: string, fields: Partial<SessionRow>) {
+    // Every way into Done stamps when it happened, for the board's Done history.
+    if (fields.phase === "done" && fields.done_at === undefined) fields = { ...fields, done_at: Date.now() };
     const keys = Object.keys(fields);
     this.db.prepare(`UPDATE sessions SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`).run(
       ...keys.map((k) => (fields as any)[k]),
@@ -306,6 +312,8 @@ export class SessionManager extends EventEmitter {
       grillSummary: row.grill_summary,
       spec: row.spec,
       specRef: row.spec_ref,
+      reviewNote: row.review_note,
+      doneAt: row.done_at,
       issueRef: row.issue_ref,
       autoApprove: autoApproveMode(row.auto_approve),
       autoApproveActive: this.autoApproveActive(row),
@@ -935,7 +943,10 @@ export class SessionManager extends EventEmitter {
   private async afterReviewRun(id: string, s: Live) {
     const report = s.finished;
     s.finished = undefined;
-    if (report) await this.finishPipeline(id, report.note);
+    if (report) {
+      this.update(id, { review_note: report.note || null });
+      await this.finishPipeline(id, report.note);
+    }
     else if (s.lastSettleAborted) this.flag(id, "The review was stopped. Reply to continue it, retry it, or mark it done.");
     else this.flag(id, "The review stopped without finishing. Reply to the agent, retry it, or mark it done.");
   }
@@ -1031,6 +1042,34 @@ export class SessionManager extends EventEmitter {
       this.update(id, { attention: null });
       await this.runNext(id);
     }
+    this.emitSummary(id, true);
+  }
+
+  /**
+   * The board's moves (`<from>><to>` columns): each drag is a command that changes the phase.
+   * A move with no entry here is refused with 409, so the card snaps back.
+   */
+  private readonly moves: Partial<Record<`${Column}>${Column}`, (id: string) => Promise<void>>> = {
+    "issues>doing": (id) => this.solveAll(id),
+  };
+
+  /** Solve all: the paused session implements its tickets, one fresh run each. */
+  private async solveAll(id: string) {
+    // A ticket a stopped run left `running` starts again.
+    for (const t of this.tickets(id)) if (t.status === "running") this.updateTicket(id, t.num, { status: "ready" });
+    this.update(id, { phase: "implement" });
+    await this.runNext(id);
+  }
+
+  /** A drag of a card to another column; the card's column follows from the phase it leaves. */
+  async move(id: string, to: Column) {
+    const from = columnOf(this.row(id).phase);
+    const command = from ? this.moves[`${from}>${to}`] : undefined;
+    if (!command) {
+      const label = (c: Column | null) => COLUMNS.find((x) => x.id === c)?.label ?? "this place";
+      throw Object.assign(new Error(`This card cannot move from ${label(from)} to ${label(to)} now.`), { status: 409 });
+    }
+    await command(id);
     this.emitSummary(id, true);
   }
 
