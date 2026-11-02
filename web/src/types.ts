@@ -75,6 +75,8 @@ export type SessionSummary = {
   grillSummary: string | null;
   spec: string | null;
   specRef: string | null;
+  /** finish_review's note from the last review run. */
+  reviewNote: string | null;
   issueRef: string | null;
   /** The session's own auto-approve setting, and whether auto-approve is in effect for it now. */
   autoApprove: AutoApproveMode;

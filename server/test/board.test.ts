@@ -182,6 +182,8 @@ test("a card started from a spec's ticket issues skips Issues: Doing, then QA, t
   assert.equal(card.attention, null);
   assert.match(card.specRef, /issues\/7$/);
   assert.equal(card.pr, null);
+  // The card detail reads the review's note from the session.
+  assert.equal((await summary(s.id)).reviewNote, "Fixed one naming issue");
 
   // The newest card still sorts by column, after the older ones in To do and Issues.
   assert.deepEqual((await board()).map((c) => c.column), ["todo", "issues", "done"]);

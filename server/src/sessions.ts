@@ -114,6 +114,7 @@ export type SessionSummary = {
   grillSummary: string | null;
   spec: string | null;
   specRef: string | null;
+  reviewNote: string | null;
   /** The GitHub issue this session solves, e.g. `owner/name#123`; null for plain sessions. */
   issueRef: string | null;
   /** The session's own auto-approve setting, and whether auto-approve is in effect for it now. */
@@ -302,6 +303,7 @@ export class SessionManager extends EventEmitter {
       grillSummary: row.grill_summary,
       spec: row.spec,
       specRef: row.spec_ref,
+      reviewNote: row.review_note,
       issueRef: row.issue_ref,
       autoApprove: autoApproveMode(row.auto_approve),
       autoApproveActive: this.autoApproveActive(row),
@@ -931,7 +933,10 @@ export class SessionManager extends EventEmitter {
   private async afterReviewRun(id: string, s: Live) {
     const report = s.finished;
     s.finished = undefined;
-    if (report) await this.finishPipeline(id, report.note);
+    if (report) {
+      this.update(id, { review_note: report.note || null });
+      await this.finishPipeline(id, report.note);
+    }
     else if (s.lastSettleAborted) this.flag(id, "The review was stopped. Reply to continue it, retry it, or mark it done.");
     else this.flag(id, "The review stopped without finishing. Reply to the agent, retry it, or mark it done.");
   }
