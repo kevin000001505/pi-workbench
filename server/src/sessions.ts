@@ -31,6 +31,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
+import { type Column, COLUMNS, columnOf } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
   configureAutoApprove,
@@ -1026,6 +1027,34 @@ export class SessionManager extends EventEmitter {
       this.update(id, { attention: null });
       await this.runNext(id);
     }
+    this.emitSummary(id, true);
+  }
+
+  /**
+   * The board's moves (`<from>><to>` columns): each drag is a command that changes the phase.
+   * A move with no entry here is refused with 409, so the card snaps back.
+   */
+  private readonly moves: Partial<Record<`${Column}>${Column}`, (id: string) => Promise<void>>> = {
+    "issues>doing": (id) => this.solveAll(id),
+  };
+
+  /** Solve all: the paused session implements its tickets, one fresh run each. */
+  private async solveAll(id: string) {
+    // A ticket a stopped run left `running` starts again.
+    for (const t of this.tickets(id)) if (t.status === "running") this.updateTicket(id, t.num, { status: "ready" });
+    this.update(id, { phase: "implement" });
+    await this.runNext(id);
+  }
+
+  /** A drag of a card to another column; the card's column follows from the phase it leaves. */
+  async move(id: string, to: Column) {
+    const from = columnOf(this.row(id).phase);
+    const command = from ? this.moves[`${from}>${to}`] : undefined;
+    if (!command) {
+      const label = (c: Column | null) => COLUMNS.find((x) => x.id === c)?.label ?? "this place";
+      throw Object.assign(new Error(`This card cannot move from ${label(from)} to ${label(to)} now.`), { status: 409 });
+    }
+    await command(id);
     this.emitSummary(id, true);
   }
 

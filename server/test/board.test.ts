@@ -224,3 +224,39 @@ test("Done lists merged cards newest first, and a done limit hides the older one
   assert.deepEqual((await api("GET", "/api/board?repo=kevin/history&done=3")).json.cards.length, 3);
   assert.equal((await api("GET", "/api/board?repo=kevin/history&done=nope")).status, 400);
 });
+
+test("a move is a command: Issues → Doing is Solve all, a forward move with no command is refused", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const cards = await board();
+  const greeting = cards.find((c) => c.title === "Greeting");
+  const farewell = cards.find((c) => c.title === "Farewell");
+  assert.equal(greeting.column, "issues");
+  assert.equal(farewell.column, "todo");
+  const move = (id: string, column: string) => api("POST", `/api/sessions/${id}/move`, { column });
+
+  // To do → Doing while the grill runs has no command: 409, and the card stays in To do.
+  const refused = await move(farewell.id, "doing");
+  assert.equal(refused.status, 409);
+  assert.equal(await columnOf(farewell.id), "todo");
+  assert.equal((await summary(farewell.id)).phase, "grill");
+
+  // A move from another site is refused before it runs.
+  const crossSite = await fetch(`${base}/api/sessions/${greeting.id}/move`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Origin: "http://evil.example" },
+    body: JSON.stringify({ column: "doing" }),
+  });
+  assert.equal(crossSite.status, 403);
+  assert.equal(await columnOf(greeting.id), "issues");
+
+  // Issues → Doing is Solve all: the paused session implements its first ticket in a fresh run.
+  const solved = await move(greeting.id, "doing");
+  assert.equal(solved.status, 200, JSON.stringify(solved.json));
+  assert.equal(solved.json.phase, "implement");
+  assert.equal(await columnOf(greeting.id), "doing");
+  const running = await waitFor(async () => {
+    const x = await summary(greeting.id);
+    return x.tickets[0].status === "running" && x.activeRun === x.tickets[0].runId ? x : undefined;
+  });
+  assert.deepEqual(running.tickets.map((t: any) => t.status), ["running", "ready", "ready"]);
+  await waitFor(() => mock.requests.some((r) => JSON.stringify(r.messages ?? []).includes("Ticket #1: Write hello.txt")));
+});

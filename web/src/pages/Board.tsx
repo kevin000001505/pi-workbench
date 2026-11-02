@@ -82,14 +82,20 @@ function Icon({ name }: { name: keyof typeof ICONS }) {
   );
 }
 
-function BoardCard({ card, activity, onOpen }: { card: Card; activity: string; onOpen: () => void }) {
+function BoardCard({ card, activity, onDrag, onOpen }: { card: Card; activity: string; onDrag: (card: Card | null) => void; onOpen: () => void }) {
   const line = card.attention ?? activity;
   return (
     // A click opens the card detail; a modified click still opens the session in a new tab.
     <a
       className="kz-card"
       href={`#/session/${card.id}`}
-      draggable={false}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", card.id);
+        onDrag(card);
+      }}
+      onDragEnd={() => onDrag(null)}
       onClick={(e) => {
         if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
         e.preventDefault();
@@ -124,6 +130,9 @@ export function Board({ repoId }: { repoId?: string }) {
   const [repos, setRepos] = useState<Repo[] | null>(null);
   const [cards, setCards] = useState<Card[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [dragged, setDragged] = useState<Card | null>(null);
+  const [over, setOver] = useState<Column | null>(null);
+  const [refetch, setRefetch] = useState(0);
   const [openId, setOpenId] = useState<string | null>(null);
   const [doneHidden, setDoneHidden] = useState(0);
   const [doneLimit, setDoneLimit] = useState(DONE_PAGE);
@@ -157,7 +166,20 @@ export function Board({ repoId }: { repoId?: string }) {
     return () => {
       live = false;
     };
-  }, [repo?.id, key, doneLimit]);
+  }, [repo?.id, key, doneLimit, refetch]);
+
+  // A drop is a command to the server. The card changes column only when the server accepts it;
+  // a refused move leaves it where it was (it snaps back) and shows why.
+  const drop = (column: Column) => {
+    const card = dragged;
+    setDragged(null);
+    setOver(null);
+    if (!card || card.column === column) return;
+    api.post(`/api/sessions/${card.id}/move`, { column }).then(
+      () => (setError(null), setRefetch((n) => n + 1)),
+      (e) => setError(e.message),
+    );
+  };
 
   // A board of another repo starts again with the first page of Done.
   useEffect(() => setDoneLimit(DONE_PAGE), [repo?.id]);
@@ -257,7 +279,24 @@ export function Board({ repoId }: { repoId?: string }) {
         {COLUMNS.map((col) => {
           const list = byColumn.get(col.id) ?? [];
           return (
-            <section key={col.id} className="kz-column" data-column={col.id}>
+            <section
+              key={col.id}
+              className={`kz-column ${over === col.id && dragged?.column !== col.id ? "drop-target" : ""}`}
+              data-column={col.id}
+              onDragOver={(e) => {
+                if (!dragged) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                if (over !== col.id) setOver(col.id);
+              }}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOver(null);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                drop(col.id);
+              }}
+            >
               <h2>
                 <StatusIcon column={col.id} />
                 {col.label}
@@ -265,7 +304,7 @@ export function Board({ repoId }: { repoId?: string }) {
               </h2>
               <div className="kz-cards">
                 {list.map((c) => (
-                  <BoardCard key={c.id} card={c} activity={sessions[c.id]?.activity ?? ""} onOpen={() => setOpenId(c.id)} />
+                  <BoardCard key={c.id} card={c} activity={sessions[c.id]?.activity ?? ""} onDrag={setDragged} onOpen={() => setOpenId(c.id)} />
                 ))}
                 {col.id === "done" && doneHidden > 0 && (
                   <button className="kz-more" onClick={() => setDoneLimit((n) => n + DONE_PAGE)}>
