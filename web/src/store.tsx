@@ -7,6 +7,8 @@ type Toast = { id: number; text: string; level: "info" | "warning" | "error" };
 type Store = {
   connected: boolean;
   sessions: Record<string, SessionSummary>;
+  /** Per repo id, how many `wb_board` events (a card created or removed) came in; a board refetches on a change. */
+  boardChanges: Record<string, number>;
   transcript: (id: string) => Transcript | undefined;
   stderr: (id: string) => string[];
   /** Bumps whenever the open transcript changes; components read it to re-render. */
@@ -54,6 +56,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [connected, setConnected] = useState(false);
   const [sessions, setSessions] = useState<Record<string, SessionSummary>>({});
   const [version, setVersion] = useState(0);
+  const [boardChanges, setBoardChanges] = useState<Record<string, number>>({});
   const [toasts, setToasts] = useState<Toast[]>([]);
   const transcripts = useRef(new Map<string, Transcript>());
   const stderrs = useRef(new Map<string, string[]>());
@@ -133,6 +136,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           case "summary":
             upsert(msg.session);
             break;
+          case "wb_board":
+            setBoardChanges((prev) => ({ ...prev, [msg.repoId]: (prev[msg.repoId] ?? 0) + 1 }));
+            break;
           case "removed":
             setSessions((prev) => {
               const { [msg.id]: _, ...rest } = prev;
@@ -195,6 +201,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     () => ({
       connected,
       sessions,
+      boardChanges,
       version,
       transcript: (id) => transcripts.current.get(id),
       stderr: (id) => stderrs.current.get(id) ?? [],
@@ -204,7 +211,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast,
       dismiss: (id) => setToasts((t) => t.filter((x) => x.id !== id)),
     }),
-    [connected, sessions, version, watch, upsert, toasts, toast],
+    [connected, sessions, boardChanges, version, watch, upsert, toasts, toast],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

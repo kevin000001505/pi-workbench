@@ -17,7 +17,7 @@ An issue the pipeline's ticket phase publishes, referenced from a ticket's track
 _Avoid_: sub-issue
 
 **Solve all tickets**:
-The Issues page button on an issue that owns ticket sub-issues: one pipeline session reads every open ticket sub-issue with its blocking edges from GitHub, skips grill/spec/tickets, implements the tickets one fresh run at a time in dependency order, and opens a PR whose merge closes the spec issue and every ticket issue.
+The move of a card from Issues to Doing (for an unclaimed card, it creates the session): one pipeline session reads every open ticket sub-issue with its blocking edges from GitHub, skips grill/spec/tickets, implements the tickets one fresh run at a time in dependency order, and opens a PR whose merge closes the spec issue and every ticket issue.
 _Avoid_: solve all issues (that is the Start session flow, one session per issue)
 
 **Solve**:
@@ -93,6 +93,9 @@ _Avoid_: backlog, draft
 **Issues** (column):
 The column for a feature whose spec issue and ticket issues are on GitHub and that waits for Solve all.
 _Avoid_: ready (as a column name)
+
+**Unclaimed card**:
+A card in Issues for a spec issue on GitHub that has open ticket sub-issues and that no session claims yet. A move to Doing starts Solve all; a move to To do grills on that spec issue to rework it.
 
 **Doing**:
 The column for a feature whose tickets are being implemented.

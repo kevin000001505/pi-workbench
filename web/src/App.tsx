@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { Board } from "./pages/Board.tsx";
-import { Issues } from "./pages/Issues.tsx";
 import { NewSession } from "./pages/NewSession.tsx";
 import { Repos } from "./pages/Repos.tsx";
 import { Secrets } from "./pages/Secrets.tsx";
@@ -27,14 +26,13 @@ export type Route =
   | { page: "repos" }
   | { page: "secrets" }
   | { page: "ssh" }
-  | { page: "settings" }
-  | { page: "issues"; repoId?: string; number?: number };
+  | { page: "settings" };
 
 function parse(hash: string): Route {
   const [path, query] = hash.replace(/^#/, "").split("?");
   const params = new URLSearchParams(query ?? "");
   const parts = path.split("/").filter(Boolean);
-  const [page, a, b] = parts;
+  const [page, a] = parts;
   switch (page) {
     case "session":
       return a ? { page: "session", id: a } : { page: "sessions" };
@@ -48,12 +46,6 @@ function parse(hash: string): Route {
         prefillTitle: params.get("title") ?? undefined,
         prefillPrompt: params.get("prompt") ?? undefined,
         prefillBase: params.get("base") ?? undefined,
-      };
-    case "issues":
-      return {
-        page: "issues",
-        repoId: a ? decodeURIComponent(a) : undefined,
-        number: b && /^\d+$/.test(b) ? Number(b) : undefined,
       };
     case "sessions":
     case "repos":
@@ -110,7 +102,6 @@ export function App() {
         {route.page === "secrets" && <Secrets />}
         {route.page === "ssh" && <Ssh />}
         {route.page === "settings" && <Settings />}
-        {route.page === "issues" && <Issues repoId={route.repoId} number={route.number} />}
       </main>
       <div className="toasts" role="status">
         {toasts.map((t) => (

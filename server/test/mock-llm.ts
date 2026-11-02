@@ -109,7 +109,8 @@ function textOf(content: unknown): string {
 /**
  * The pipeline's phases, scripted by step (assistant replies since the last user message):
  * - grill-with-docs: ask to confirm → save_grill_summary → done
- * - to-spec: ask about seams → write the spec file → save_spec → done
+ * - to-spec: ask about seams → write the spec file → save_spec → done (trackerRef: the task's
+ *   `SPEC_REF=<ref>`, or the spec file)
  * - to-tickets: ask to approve → write .scratch files → record_tickets (3 tickets) → done
  * - tdd (a ticket): commit a line for the ticket (and `git push`, a gated call, if the ticket says
  *   PUSHME) → finish_ticket (blocked if the ticket says BLOCKME) → done
@@ -129,9 +130,10 @@ function pipelineScript(userText: string, step: number, lastResult: string, conv
     if (step === 0) return { tool: { name: "ask_user", args: { question: "Test at the file level, through one seam: the hello.txt contents. OK?", options: ["Yes", "No"] } } };
     if (step === 1) return { tool: { name: "bash", args: { command: "mkdir -p .scratch/greeting && echo spec > .scratch/greeting/spec.md && echo published" } } };
     if (step === 2) {
-      // A task that says `GHSPEC <url>` publishes its spec as that GitHub issue.
-      const issue = /GHSPEC (\S+)/.exec(conversation)?.[1];
-      return { tool: { name: "save_spec", args: { spec: "## Problem Statement\nNo greeting.\n## Solution\nhello.txt says Hello.", trackerRef: issue ?? ".scratch/greeting/spec.md" } } };
+      // A task that says `SPEC_REF=<ref>` publishes its spec there (an issue ref, as to-spec gives on GitHub);
+      // one that says `GHSPEC <url>` publishes it as that GitHub issue.
+      const ref = /SPEC_REF=(\S+)/.exec(conversation)?.[1] ?? /GHSPEC (\S+)/.exec(conversation)?.[1];
+      return { tool: { name: "save_spec", args: { spec: "## Problem Statement\nNo greeting.\n## Solution\nhello.txt says Hello.", trackerRef: ref ?? ".scratch/greeting/spec.md" } } };
     }
     return { text: "Spec published." };
   }

@@ -97,14 +97,50 @@ export function limitDone(cards: Card[], limit: number): { cards: Card[]; doneHi
 }
 
 /**
- * The cards of these sessions in column order; inside a column, in the order given, except Done,
- * which lists the newest first by when each card got there.
+ * The cards of these sessions in column order, then the unclaimed cards (which sit in Issues);
+ * inside a column, in the order given, except Done, which lists the newest first by when each
+ * card got there.
  */
-export function boardCards(sessions: CardSource[]): Card[] {
+export function boardCards(sessions: CardSource[], unclaimed: Card[] = []): Card[] {
   const order = new Map(COLUMNS.map((c, i) => [c.id, i]));
   const doneAt = new Map(sessions.map((s) => [s.id, s.doneAt ?? 0]));
-  return sessions
-    .map(cardOf)
-    .filter((c): c is Card => c !== null)
+  return [...sessions.map(cardOf).filter((c): c is Card => c !== null), ...unclaimed]
     .sort((a, b) => order.get(a.column)! - order.get(b.column)! || (a.column === "done" ? doneAt.get(b.id)! - doneAt.get(a.id)! : 0));
+}
+
+/** A spec issue on GitHub: an open issue with open ticket sub-issues. */
+export type SpecIssue = { number: number; title: string; url: string; openTickets: number };
+
+/** An unclaimed card's id: `issue:<number>` of its spec issue, as it has no session yet. */
+export const unclaimedId = (number: number) => `issue:${number}`;
+
+/**
+ * The issue number in `repoId` that a session's issue or spec ref names: `owner/name#12`,
+ * `#12`, `12`, or the issue's GitHub URL. Null for any other ref (a spec file path, another repo).
+ */
+export function issueNumberOf(ref: string | null, repoId: string): number | null {
+  const r = (ref ?? "").trim();
+  const m = /^#?(\d+)$/.exec(r) ?? /^([^/\s]+\/[^/#\s]+)#(\d+)$/.exec(r) ?? /^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/issues\/(\d+)\/?$/.exec(r);
+  if (!m) return null;
+  if (m.length === 3 && m[1].toLowerCase() !== repoId.toLowerCase()) return null;
+  return Number(m.at(-1));
+}
+
+/**
+ * The unclaimed cards: the spec issues (each has open tickets) that no session's ref (its issue ref or
+ * spec ref) names. They show in Issues; a move to Doing or To do gives each its session.
+ */
+export function unclaimedCards(specs: SpecIssue[], claims: (string | null)[], repoId: string): Card[] {
+  const claimed = new Set(claims.map((r) => issueNumberOf(r, repoId)));
+  return specs
+    .filter((s) => !claimed.has(s.number))
+    .map((s) => ({
+      id: unclaimedId(s.number),
+      title: s.title,
+      column: "issues" as const,
+      tickets: { done: 0, total: s.openTickets },
+      attention: null,
+      pr: null,
+      specRef: s.url,
+    }));
 }

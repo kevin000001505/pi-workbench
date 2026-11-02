@@ -1,3 +1,4 @@
+import type { SpecIssue } from "../../shared/board.ts";
 import { config } from "./config.ts";
 
 export type GhUser = { login: string; id: number; name: string | null };
@@ -159,6 +160,27 @@ export class GitHub {
         })),
       } as GhTicketSeed;
     });
+  }
+
+  /**
+   * The repo's spec issues for the board's unclaimed cards: open issues with open sub-issues, from
+   * one GraphQL call over the open issues and their sub-issue counts. Cap: the 100 most recently
+   * updated open issues.
+   */
+  listSpecIssues(owner: string, name: string): Promise<SpecIssue[]> {
+    type GqIssue = { number: number; title: string; url: string; subIssuesSummary: { total: number; completed: number } | null };
+    const q = `query($owner: String!, $name: String!) {
+      repository(owner: $owner, name: $name) {
+        issues(first: 100, states: OPEN, orderBy: { field: UPDATED_AT, direction: DESC }) {
+          nodes { number title url subIssuesSummary { total completed } }
+        }
+      }
+    }`;
+    return this.gq<{ repository: { issues: { nodes: GqIssue[] } } | null }>(q, { owner, name }).then((d) =>
+      (d.repository?.issues.nodes ?? [])
+        .map((i) => ({ number: i.number, title: i.title, url: i.url, openTickets: (i.subIssuesSummary?.total ?? 0) - (i.subIssuesSummary?.completed ?? 0) }))
+        .filter((i) => i.openTickets > 0),
+    );
   }
 
   /** Parse `owner/name#123` and fetch its spec plus ticket sub-issues. */

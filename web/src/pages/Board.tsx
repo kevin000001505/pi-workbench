@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type Card, type Column, COLUMNS, DONE_PAGE } from "../../../shared/board.ts";
+
+/** An unclaimed card's spec issue number (its id is `issue:<number>`); null for a session's card. */
+const unclaimedIssue = (card: Card) => {
+  const m = /^issue:(\d+)$/.exec(card.id);
+  return m ? Number(m[1]) : null;
+};
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import { approveQuestion, CardDetail } from "./CardDetail.tsx";
@@ -83,12 +89,17 @@ function Icon({ name }: { name: keyof typeof ICONS }) {
 }
 
 function BoardCard({ card, activity, onDrag, onOpen }: { card: Card; activity: string; onDrag: (card: Card | null) => void; onOpen: () => void }) {
-  const line = card.attention ?? activity;
+  const issue = unclaimedIssue(card);
+  const unclaimed = issue !== null;
+  const line = card.attention ?? (unclaimed ? `Spec issue #${issue}: drag it to Doing to solve its tickets, or to To do to rework it` : activity);
   return (
     // A click opens the card detail; a modified click still opens the session in a new tab.
+    // An unclaimed card has no session yet: a click opens its spec issue on GitHub.
     <a
       className="kz-card"
-      href={`#/session/${card.id}`}
+      href={unclaimed ? (card.specRef ?? undefined) : `#/session/${card.id}`}
+      target={unclaimed ? "_blank" : undefined}
+      rel={unclaimed ? "noopener" : undefined}
       draggable
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = "move";
@@ -97,7 +108,7 @@ function BoardCard({ card, activity, onDrag, onOpen }: { card: Card; activity: s
       }}
       onDragEnd={() => onDrag(null)}
       onClick={(e) => {
-        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        if (unclaimed || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
         e.preventDefault();
         onOpen();
       }}
@@ -126,7 +137,7 @@ function BoardCard({ card, activity, onDrag, onOpen }: { card: Card; activity: s
 
 /** The kanban view of one repo's features: one card per pipeline session, in kanzo's look. */
 export function Board({ repoId }: { repoId?: string }) {
-  const { sessions } = useStore();
+  const { sessions, boardChanges } = useStore();
   const [repos, setRepos] = useState<Repo[] | null>(null);
   const [cards, setCards] = useState<Card[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -166,7 +177,7 @@ export function Board({ repoId }: { repoId?: string }) {
     return () => {
       live = false;
     };
-  }, [repo?.id, key, doneLimit, refetch]);
+  }, [repo?.id, key, doneLimit, refetch, repo ? boardChanges[repo.id] : 0]);
 
   // A drop is a command to the server. The card changes column only when the server accepts it;
   // a refused move leaves it where it was (it snaps back) and shows why.
@@ -174,10 +185,13 @@ export function Board({ repoId }: { repoId?: string }) {
     const card = dragged;
     setDragged(null);
     setOver(null);
-    if (!card || card.column === column) return;
+    if (!card || card.column === column || !repo) return;
     // Review → Done is Approve: it merges the PR, so it asks first.
     if (card.column === "review" && column === "done" && !confirm(approveQuestion(card))) return;
-    api.post(`/api/sessions/${card.id}/move`, { column }).then(
+    // An unclaimed card's move creates its session; the server answers with that session.
+    const issue = unclaimedIssue(card);
+    const url = issue !== null ? `/api/repos/${repo.id}/issues/${issue}/move` : `/api/sessions/${card.id}/move`;
+    api.post(url, { column }).then(
       () => (setError(null), setRefetch((n) => n + 1)),
       (e) => setError(e.message),
     );
@@ -218,7 +232,8 @@ export function Board({ repoId }: { repoId?: string }) {
     return m;
   }, [cards, filter]);
 
-  const open = openId ? (cards ?? []).find((c) => c.id === openId) : undefined;
+  // An unclaimed card has no session, so no card detail.
+  const open = openId ? (cards ?? []).find((c) => c.id === openId && unclaimedIssue(c) === null) : undefined;
   const closeDetail = useCallback(() => setOpenId(null), []);
 
   if (repos && repos.length === 0) {
@@ -335,7 +350,9 @@ export function Board({ repoId }: { repoId?: string }) {
           onClose={() => setSearching(false)}
           onPick={(id) => {
             setSearching(false);
-            setOpenId(id);
+            const picked = (cards ?? []).find((c) => c.id === id);
+            if (picked && unclaimedIssue(picked) !== null) window.open(picked.specRef ?? undefined, "_blank", "noopener");
+            else setOpenId(id);
           }}
         />
       )}

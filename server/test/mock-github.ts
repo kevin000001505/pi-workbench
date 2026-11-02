@@ -160,13 +160,32 @@ export function startMockGitHub(root: string, login = "kevin") {
       if (!all) return send(404, { message: "Not Found" });
       return send(200, comments.filter((c) => c.owner === m[1] && c.name === m[2] && c.issueNumber === Number(m[3])));
     }
-    // The workbench's one GraphQL call: an issue's sub-issues and their blockedBy edges.
+    // The workbench's GraphQL calls: an issue's sub-issues and their blockedBy edges, and the repo's open issues with sub-issue counts.
     if (req.method === "POST" && p === "/graphql") {
       // GitHub's GraphQL Issue type has `url`, not REST's `html_url`; reject `html_url` with HTTP 200 + errors like GitHub does.
       if (/\bhtml_url\b/.test(String(body.query ?? ""))) {
         return send(200, { errors: [{ message: "Field 'html_url' doesn't exist on type 'Issue'" }] });
       }
       const { variables } = body;
+      // The board's repo-wide query: the open issues with their sub-issue counts.
+      if (variables.number === undefined) {
+        const all = repoIssues(variables.owner, variables.name);
+        if (!all) return send(200, { data: { repository: null }, errors: [{ type: "NOT_FOUND", message: "Could not resolve to a Repository" }] });
+        const specs = Object.entries(subIssueSeeds)
+          .filter(([k]) => k.startsWith(`${variables.owner}/${variables.name}#`))
+          .map(([, seed]) => seed)
+          .filter((seed) => (seed.spec.state ?? "OPEN") === "OPEN");
+        const nodes = [
+          ...all.filter((i) => !i.pull_request && i.state === "open").map((i) => ({ number: i.number, title: i.title, url: i.html_url, subIssuesSummary: { total: 0, completed: 0 } })),
+          ...specs.map((seed) => ({
+            number: seed.spec.number,
+            title: seed.spec.title,
+            url: seed.spec.url ?? `https://github.com/${variables.owner}/${variables.name}/issues/${seed.spec.number}`,
+            subIssuesSummary: { total: seed.subs.length, completed: seed.subs.filter((x: any) => (x.state ?? "OPEN") !== "OPEN").length },
+          })),
+        ];
+        return send(200, { data: { repository: { issues: { nodes } } } });
+      }
       const seed = subIssueSeeds[`${variables.owner}/${variables.name}#${variables.number}`];
       if (!seed) {
         return send(200, {

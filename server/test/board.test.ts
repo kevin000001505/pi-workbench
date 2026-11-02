@@ -12,6 +12,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
+import { WebSocket } from "ws";
 import { startMockLlm } from "./mock-llm.ts";
 import { startMockGitHub } from "./mock-github.ts";
 
@@ -398,4 +399,117 @@ test("a backward move clears the card's attention", { skip: !hasPi && "pi CLI no
   assert.equal(card.column, "todo");
   assert.equal(card.attention, null);
   await waitFor(() => mock.requests.some((r) => /Rework the spec \(\S*issues\/40\)/.test(JSON.stringify(r.messages ?? []))));
+});
+
+/** The board events a WebSocket client hears, from now on. */
+async function boardEvents() {
+  const ws = new WebSocket(`${base.replace("http", "ws")}/ws`);
+  const seen: string[] = [];
+  ws.on("message", (raw) => {
+    const msg = JSON.parse(raw.toString());
+    if (msg.type === "wb_board") seen.push(msg.repoId);
+  });
+  await new Promise((r) => ws.once("open", r));
+  return { seen, close: () => ws.close() };
+}
+
+test("an unclaimed spec issue shows in Issues; its move to Doing solves its tickets, its move to To do reworks it", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.seedSubIssues("kevin", "demo", { number: 50, title: "Old spec", body: "## Solution\nold.txt says Old." }, [
+    { number: 51, title: "Write old.txt", body: "Create old.txt containing Old." },
+    { number: 52, title: "Check old.txt", body: "Check it.", blockedBy: [51] },
+    { number: 53, title: "A solved ticket", body: "Done already.", state: "CLOSED" },
+  ]);
+  gh.seedSubIssues("kevin", "demo", { number: 60, title: "Rework me", body: "## Solution\nre.txt says Re." }, [{ number: 61, title: "Write re.txt", body: "Create re.txt." }]);
+  // A spec whose tickets are all closed is no card.
+  gh.seedSubIssues("kevin", "demo", { number: 70, title: "All solved", body: "Done." }, [{ number: 71, title: "Solved", body: "x", state: "CLOSED" }]);
+  const unclaimed = (await board()).filter((c) => c.id.startsWith("issue:"));
+  // The specs a session already claims (#7, #20, #30, #40), and plain issues, are left out.
+  assert.deepEqual(unclaimed, [
+    { id: "issue:50", title: "Old spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/50" },
+    { id: "issue:60", title: "Rework me", column: "issues", tickets: { done: 0, total: 1 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/60" },
+  ]);
+  const move = (number: number, column: string, headers: Record<string, string> = {}) =>
+    fetch(`${base}/api/repos/kevin/demo/issues/${number}/move`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify({ column }),
+    }).then(async (r) => ({ status: r.status, json: (await r.json().catch(() => null)) as any }));
+
+  // A move with no command, and a move from another site, are refused; the card stays.
+  assert.equal((await move(50, "review")).status, 409);
+  assert.equal((await move(50, "doing", { Origin: "http://evil.example" })).status, 403);
+  assert.ok((await board()).some((c) => c.id === "issue:50"));
+
+  const events = await boardEvents();
+  // Unclaimed → Doing is Solve all: a session from the spec's open tickets, and it is now that session's card.
+  const solved = await move(50, "doing");
+  assert.equal(solved.status, 200, JSON.stringify(solved.json));
+  assert.equal(solved.json.issueRef, "kevin/demo#50");
+  assert.equal(solved.json.title, "Old spec");
+  assert.deepEqual(solved.json.tickets.map((t: any) => t.title), ["Write old.txt", "Check old.txt"]);
+  assert.ok(!(await board()).some((c) => c.id === "issue:50"), "the unclaimed card is gone");
+  // The demo repo sets up first (To do), then the tickets run in Doing.
+  const card = await waitFor(async () => (await board()).find((c) => c.id === solved.json.id && c.column === "doing"));
+  assert.equal(card.specRef, "https://github.com/kevin/demo/issues/50");
+  await waitFor(() => events.seen.length >= 1);
+  assert.equal(events.seen[0], "kevin/demo");
+
+  // A claimed spec issue has no unclaimed card to move.
+  assert.equal((await move(50, "todo")).status, 409);
+
+  // Unclaimed → To do: a pipeline session on the spec issue grills in rework mode on that spec.
+  const reworked = await move(60, "todo");
+  assert.equal(reworked.status, 200, JSON.stringify(reworked.json));
+  assert.equal(reworked.json.mode, "pipeline");
+  assert.equal(reworked.json.specRef, "https://github.com/kevin/demo/issues/60");
+  assert.equal(reworked.json.title, "Rework me");
+  assert.deepEqual(reworked.json.tickets, [], "the tickets come from the reworked breakdown, not the old one");
+  assert.equal(await columnOf(reworked.json.id), "todo");
+  await waitFor(async () => (await summary(reworked.json.id)).phase === "grill");
+  assert.ok(!(await board()).some((c) => c.id === "issue:60"));
+  const decision = await waitFor(async () => (await summary(reworked.json.id)).pending.find((p: any) => p.kind === "decision"));
+  assert.match(decision.title, /shared understanding/);
+  const reworkRuns = mock.requests.map((r) => JSON.stringify(r.messages ?? [])).filter((m) => m.includes("Rework the spec (https://github.com/kevin/demo/issues/60)"));
+  assert.ok(reworkRuns.length > 0, "the grill gets the rework prompt on the spec issue");
+  assert.ok(!reworkRuns.some((m) => m.includes("grill-with-docs → to-spec → to-tickets → implement")), "not a fresh grill of a new feature");
+  // The spec is grilled again, so the session holds no spec text yet, as after a rework move.
+  assert.equal((await summary(reworked.json.id)).spec, null);
+  await waitFor(() => events.seen.length >= 2);
+
+  // A card made with New card announces itself too; a direct session is no card.
+  const before = events.seen.length;
+  await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Quick two", prompt: "hi", mode: "direct" });
+  const fresh = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Wave goodbye", prompt: "wave goodbye" })).json;
+  assert.ok(fresh.id);
+  await waitFor(() => events.seen.length > before);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual(events.seen.slice(before), ["kevin/demo"]);
+  events.close();
+  // Fewer live pi processes for the tests after this one.
+  for (const s of (await api("GET", "/api/sessions")).json) await api("POST", `/api/sessions/${s.id}/stop`, {});
+});
+
+test("a card's spec issue, in any ref form to-spec gives, is claimed: no unclaimed card for it", { skip: !hasPi && "pi CLI not found" }, async () => {
+  for (const n of [80, 81, 82, 83, 84]) {
+    gh.seedSubIssues("kevin", "demo", { number: n, title: `Spec ${n}`, body: "## Solution\nSomething." }, [{ number: n + 100, title: "Do it", body: "Do it." }]);
+  }
+  const unclaimed = async () => (await board()).filter((c) => c.id.startsWith("issue:")).map((c) => c.id);
+  assert.deepEqual(await unclaimed(), ["issue:80", "issue:81", "issue:82", "issue:83", "issue:84"]);
+  // A session made from an issue claims it by its issue ref.
+  const fromIssue = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "From 84", prompt: "work on 84", issueRef: "kevin/demo#84" })).json;
+  assert.ok(fromIssue.id);
+  assert.equal((await api("POST", `/api/sessions/${fromIssue.id}/stop`, {})).status, 200);
+  // Cards whose to-spec published the spec as an issue claim it by the spec ref.
+  for (const ref of ["#80", "https://github.com/kevin/demo/issues/81", "82", "kevin/other#83"]) {
+    const created = await api("POST", "/api/sessions", { repoId: "kevin/demo", title: `Spec at ${ref}`, prompt: `build it SPEC_REF=${ref}` });
+    assert.equal(created.status, 200, JSON.stringify(created.json));
+    const s = created.json;
+    await answerNext(s.id, /shared understanding/);
+    await waitFor(async () => (await summary(s.id)).phase === "spec");
+    await answerNext(s.id, /seam/);
+    await waitFor(async () => (await summary(s.id)).specRef === ref);
+    assert.equal((await api("POST", `/api/sessions/${s.id}/stop`, {})).status, 200);
+  }
+  // #83 is in another repo's ref, so this repo's #83 stays unclaimed.
+  assert.deepEqual(await unclaimed(), ["issue:83"]);
 });
