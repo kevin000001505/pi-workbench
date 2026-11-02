@@ -28,7 +28,7 @@ export const waitingOn = (s: { pending: UiRequest[] }) => s.pending.filter(waits
 
 export type AutoApproveSettings = {
   enabled: boolean;
-  judge: { baseUrl: string; model: string; protocol: JudgeProtocol; yesAbove: number; noBelow: number };
+  judge: { kind: JudgeKind; baseUrl: string; model: string; protocol: JudgeProtocol; yesAbove: number; noBelow: number };
   reviewer: ReviewerSettings;
   /** Whether the write-only keys are set (their values never come back), and the judge host it is bound to. */
   keys: { judgeToken: boolean; tokenOrigin?: string; reviewerKey: boolean; reviewerKeyOrigin?: string };
@@ -47,6 +47,9 @@ export const REVIEWER_DEFAULT_URL: Record<ReviewerProvider, string> = {
 /** What the judge URL speaks, read from its model list: TypeSafe System One or OpenAI-compatible chat. */
 export type JudgeProtocol = "systemone" | "openai";
 export type JudgeModels = { protocol: JudgeProtocol; models: string[] };
+
+/** Which risk judge: the Jev API, or a local model on the agent's own endpoint. */
+export type JudgeKind = "jev" | "local";
 
 export type SessionSummary = {
   id: string;

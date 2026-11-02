@@ -15,7 +15,6 @@ import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 import { RISKY, SAFE, startMockJudge } from "./mock-judge.ts";
 import { startMockLlm } from "./mock-llm.ts";
-import { startMockReviewer } from "./mock-reviewer.ts";
 
 const piBin = process.env.PI_BIN ?? "pi";
 const hasPi = spawnSync(piBin, ["--version"]).status === 0;
@@ -33,7 +32,6 @@ const TOKEN = "jev-secret-token";
 let mock: Awaited<ReturnType<typeof startMockLlm>>;
 let jev: Awaited<ReturnType<typeof startMockJudge>>;
 let chat: Awaited<ReturnType<typeof startMockJudge>>;
-let reviewer: Awaited<ReturnType<typeof startMockReviewer>>;
 let mgr: any;
 let db: any;
 let secrets: any;
@@ -90,9 +88,6 @@ before(async () => {
   mock = await startMockLlm();
   jev = await startMockJudge({ protocol: "systemone", model: "jev-latest", token: TOKEN });
   chat = await startMockJudge({ protocol: "openai", model: "mock-judge" });
-  // The reviewer the settings point at: scripted, and by default it escalates, so a call the
-  // judge did not rate safe still lands on the user's card, as these tests expect.
-  reviewer = await startMockReviewer({ provider: "anthropic", model: "reviewer-mock", key: "reviewer-test-key", defaultVerdict: "escalate" });
   const { config } = await import("../src/config.ts");
   const { openDb } = await import("../src/db.ts");
   const { SecretStore } = await import("../src/secrets.ts");
@@ -125,8 +120,6 @@ before(async () => {
 
   secrets = new SecretStore(db, process.env.WORKBENCH_MASTER_KEY!);
   auto.saveAutoApproveKey(secrets, { key: "judgeToken", value: TOKEN, baseUrl: jev.url });
-  auto.saveReviewerKey(secrets, { key: "reviewerKey", value: "reviewer-test-key", baseUrl: reviewer.url });
-  auto.saveAutoApproveSettings(db, { reviewer: { provider: "anthropic", model: "reviewer-mock", baseUrl: reviewer.url } });
   mgr = new SessionManager(db, secrets, async () => ({
     GIT_AUTHOR_NAME: "t",
     GIT_AUTHOR_EMAIL: "t@t",
@@ -145,6 +138,7 @@ beforeEach(() => {
   // A test that fails before its scripted reply is used must not leave it for the next one.
   jev.replies.length = 0;
   chat.replies.length = 0;
+  mock.judgeReplies.length = 0;
 });
 
 after(async () => {
@@ -153,7 +147,6 @@ after(async () => {
   await mock.close();
   await jev.close();
   await chat.close();
-  await reviewer.close();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -459,6 +452,115 @@ test("Settings → Test reports whether the saved judge answers", { skip }, asyn
   const bad = await auto.testJudge(auto.getAutoApproveSettings(db), auto.savedJudgeToken(secrets));
   assert.equal(bad.ok, false);
   assert.match(bad.message, /HTTP 401/);
+});
+
+// --- issue #20: the local judge kind (the agent's own OpenAI-compatible endpoint) --------------
+
+const LLM_KEY = "llm-secret-for-judge";
+
+/** Turn auto-approve on with the local kind: the judge model runs on the agent's endpoint. */
+const enableLocal = () => auto.configureAutoApprove(db, secrets, { enabled: true, judge: { kind: "local", model: "mock-judge", baseUrl: mock.url } });
+
+/** The permission card once the local judge has spoken (failed, or waiting with a rating). */
+async function judgedCard(id: string, prompt: string) {
+  await mgr.send(id, prompt);
+  return waitFor(() => {
+    const r = mgr.summary(id).pending.find((x: any) => x.kind === "permission" && x.judge && x.judge.state !== "judging");
+    return r;
+  });
+}
+
+test("the local judge kind judges on the agent's endpoint with the LLM key: SAFE allows, with the line", { skip }, async () => {
+  const { GLOBAL_SCOPE } = await import("../src/secrets.ts");
+  const { LLM_KEY_ENV } = await import("../src/settings.ts");
+  secrets.set(GLOBAL_SCOPE, LLM_KEY_ENV, LLM_KEY);
+  await enableLocal();
+  const saved = auto.getAutoApproveSettings(db);
+  assert.equal(saved.judge.kind, "local");
+  assert.equal(saved.judge.protocol, "openai", "the agent's endpoint is chat-shaped");
+  const from = mock.requests.length;
+  const added = await run(sessionId, "please push");
+  const result = added.find((m: any) => m.role === "toolResult");
+  assert.ok(!JSON.stringify(result.content).includes("denied"), "the call ran");
+  const line = added.find((m: any) => m.role === "autoAnswer");
+  assert.equal(line.answer, "allow");
+  assert.equal(line.by, "local judge");
+  assert.equal(line.detail, "SAFE");
+  // The judge call went to the agent's endpoint (the model settings' URL) with the LLM key.
+  const req = mock.requests.slice(from).find((r) => r.path === "/v1/chat/completions" && r.model === "mock-judge");
+  assert.ok(req, "the judge model was asked at the agent's endpoint");
+  assert.equal(req.stream, false, "non-streaming");
+  assert.equal(req.auth, `Bearer ${LLM_KEY}`);
+  assert.ok(JSON.stringify(req.messages).includes("git push origin HEAD"), "the call's state");
+});
+
+test("the local judge's RISKY and DANGEROUS wait for the user with the rating", { skip }, async () => {
+  await enableLocal();
+  for (const [prompt, word] of [
+    ["please rm the build dir", "risky"],
+    ["please nuke /mnt/data", "dangerous"],
+  ] as const) {
+    const req = await judgedCard(sessionId, prompt);
+    assert.equal(req.judge.state, "waiting", word);
+    assert.equal(req.judge.rating, word);
+    assert.match(req.judge.note, new RegExp(word), word);
+    assert.equal(mgr.summary(sessionId).status, "waiting", word);
+    await deny(sessionId, req);
+  }
+});
+
+test("a local judge reply that is not a level word waits with a failure note", { skip }, async () => {
+  await enableLocal();
+  for (const [reply, why] of [
+    [{ text: "Probably fine, I think." }, /SAFE, RISKY or DANGEROUS/],
+    [{ status: 500, body: JSON.stringify({ src: "llama-swap", error: { message: "upstream command exited prematurely" } }) }, /HTTP 500: upstream command exited prematurely/],
+  ] as const) {
+    mock.judgeReplies.push(reply);
+    const req = await judgedCard(sessionId, "please push");
+    assert.equal(req.judge.state, "failed");
+    assert.match(req.judge.note, why);
+    assert.equal(mgr.summary(sessionId).status, "waiting");
+    await deny(sessionId, req);
+  }
+  // A think block in the reply is stripped; the word still decides.
+  mock.judgeReplies.push({ text: "  \n\n SAFE" });
+  const added = await run(sessionId, "please push");
+  assert.equal(added.find((m: any) => m.role === "autoAnswer")?.detail, "SAFE");
+});
+
+test("Settings → Test works for the local kind", { skip }, async () => {
+  await enableLocal();
+  const ok = await auto.testJudge(auto.getAutoApproveSettings(db), auto.savedJudgeToken(secrets), auto.localJudge(db, secrets));
+  assert.equal(ok.ok, true);
+  assert.match(ok.message, /local judge/);
+  assert.match(ok.message, /safe/);
+  mock.judgeReplies.push({ status: 401 });
+  const bad = await auto.testJudge(auto.getAutoApproveSettings(db), auto.savedJudgeToken(secrets), auto.localJudge(db, secrets));
+  assert.equal(bad.ok, false);
+  assert.match(bad.message, /HTTP 401/);
+});
+
+test("non-judge non-streaming calls at the agent's endpoint keep the PR-draft answer", { skip }, async () => {
+  const { complete } = await import("../src/llm.ts");
+  const pr = await complete({ baseUrl: mock.url, modelId: "mock-small" }, "k", "draft a PR", "x");
+  assert.match(pr, /Add a friendly greeting/, "the PR draft, not a level word");
+  const word = await complete({ baseUrl: mock.url, modelId: "mock-judge" }, "k", "rate", "x");
+  assert.equal(word.trim(), "SAFE", "the judge model answers a level word");
+});
+
+test("switching the dropdown back to Jev uses Jev again, with no restart", { skip }, async () => {
+  await enableLocal();
+  const proc = mgr.live.get(sessionId).proc;
+  await enable({ kind: "jev" });
+  assert.equal(auto.getAutoApproveSettings(db).judge.kind, "jev");
+  const fromJev = jev.requests.length;
+  const judgeCall = (r: any) => r.path === "/v1/chat/completions" && r.model === "mock-judge" && !r.stream;
+  const fromJudge = mock.requests.filter(judgeCall).length;
+  const added = await run(sessionId, "please push");
+  assert.equal(added.find((m: any) => m.role === "autoAnswer")?.by, "jev-latest", "Jev judges again");
+  assert.ok(jev.requests.slice(fromJev).some((r) => r.path === "/v1/systemone"));
+  assert.equal(mock.requests.filter(judgeCall).length, fromJudge, "no local judge call after the switch");
+  assert.equal(mgr.live.get(sessionId).proc, proc, "the session was not restarted");
 });
 
 test("the judge token never reaches pi: not its environment, not the model's requests", { skip }, async () => {

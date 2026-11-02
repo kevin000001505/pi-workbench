@@ -12,19 +12,42 @@ import type { AddressInfo } from "node:net";
  * - "list" → bash `ls`
  * - "setup-matt-pocock-skills" → writes docs/agents/issue-tracker.md, then commits
  * - anything else → "Hello from the mock model."
+ *
+ * It also answers the workbench's local risk judge (issue #20): a non-streaming call for the judge
+ * model id (`mock-judge`) gets a level word, by the command in the question's state (queued
+ * `judgeReplies` answer first), while every other non-streaming call keeps the PR-draft answer.
  */
-export function startMockLlm(port = 0): Promise<{ url: string; requests: any[]; close: () => Promise<void> }> {
+export function startMockLlm(port = 0): Promise<{ url: string; requests: any[]; judgeReplies: any[]; close: () => Promise<void> }> {
   const requests: any[] = [];
+  const judgeReplies: any[] = [];
   const server = http.createServer(async (req, res) => {
     if (req.url?.endsWith("/models")) {
+      requests.push({ path: req.url, auth: req.headers.authorization });
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ data: [{ id: "Qwen3.8-27B-radiance" }, { id: "mock-small" }] }));
+      res.end(JSON.stringify({ data: [{ id: "Qwen3.8-27B-radiance" }, { id: "mock-small" }, { id: "mock-judge" }] }));
       return;
     }
     let raw = "";
     for await (const c of req) raw += c;
     const body = JSON.parse(raw || "{}");
-    requests.push(body);
+    requests.push({ ...body, path: req.url, auth: req.headers.authorization });
+    if (!body.stream && body.model === "mock-judge") {
+      // The local risk judge: a non-streaming call for the judge model id gets a level word.
+      const queued = judgeReplies.shift();
+      if (queued) {
+        if (queued.delayMs) await new Promise((r) => setTimeout(r, queued.delayMs));
+        if (queued.status && queued.status !== 200) {
+          res.writeHead(queued.status, { "Content-Type": "application/json" });
+          return res.end(typeof queued.body === "string" ? queued.body : JSON.stringify(queued.body));
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: queued.text } }] }));
+      }
+      const command = /"command"\s*:\s*"([^"]*)"/.exec(textOf((body.messages ?? []).at(-1)?.content))?.[1] ?? "";
+      const word = command.includes("rm -rf /mnt") ? "DANGEROUS" : command.includes("rm ") ? "RISKY" : "SAFE";
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: word } }] }));
+    }
     const reply = script(body.messages ?? []);
     if (!body.stream) {
       // Non-streaming calls are the workbench's PR drafts.
@@ -64,7 +87,7 @@ export function startMockLlm(port = 0): Promise<{ url: string; requests: any[]; 
   return new Promise((resolve) => {
     server.listen(port, process.env.MOCK_HOST ?? "127.0.0.1", () => {
       const { port: p } = server.address() as AddressInfo;
-      resolve({ url: `http://127.0.0.1:${p}/v1`, requests, close: () => new Promise((r) => server.close(() => r())) });
+      resolve({ url: `http://127.0.0.1:${p}/v1`, requests, judgeReplies, close: () => new Promise((r) => server.close(() => r())) });
     });
   });
 }
