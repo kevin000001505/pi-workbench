@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import type { Card } from "../../../shared/board.ts";
-import { COLUMNS } from "../../../shared/board.ts";
+import { COLUMNS, refLabel } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { PendingCard } from "../session/PendingCard.tsx";
-import { phaseLabel, refLabel } from "../session/PipelinePanel.tsx";
+import { phaseLabel } from "../session/PipelinePanel.tsx";
 import { useStore } from "../store.tsx";
 import { isResolvedNote, type Ticket } from "../types.ts";
 import { Markdown, Spinner } from "../ui.tsx";

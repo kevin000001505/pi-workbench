@@ -134,6 +134,17 @@ export function parseIssueRef(ref: string | null): { repo: string | null; number
 }
 
 /**
+ * A ref's short label: `name#12` for an issue ref that names a repo (`owner/name#12` or the
+ * issue's URL), `#12` for one that does not, and the file name for any other ref (a local ticket
+ * or spec file).
+ */
+export function refLabel(ref: string): string {
+  const issue = parseIssueRef(ref);
+  if (!issue) return ref.split("/").pop() || ref;
+  return issue.repo ? `${issue.repo.split("/").pop()}#${issue.number}` : `#${issue.number}`;
+}
+
+/**
  * The issue number in `repoId` that a session's issue or spec ref names (see parseIssueRef).
  * Null for any other ref (a spec file path, another repo's issue).
  */

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { parseIssueRef } from "../../../shared/board.ts";
+import { refLabel } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import { isResolvedNote, type Phase, type SessionSummary, type Ticket } from "../types.ts";
@@ -45,13 +45,6 @@ export const phaseLabel = (s: SessionSummary) => {
     default:
       return "";
   }
-};
-
-/** "#12" for GitHub issues (any ref form parseIssueRef reads), the file name for local ticket files. */
-export const refLabel = (ref: string) => {
-  const issue = parseIssueRef(ref);
-  if (!issue) return ref.split("/").pop() || ref;
-  return issue.repo ? `${issue.repo.split("/").pop()}#${issue.number}` : `#${issue.number}`;
 };
 
 const RESCUE_LABEL = { diagnosing: "rescue: diagnosing", fixing: "rescue: fixing", rescued: "rescued", failed: "rescue failed" } as const;
