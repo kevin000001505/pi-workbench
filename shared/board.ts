@@ -60,13 +60,14 @@ export type Card = {
   specRef: string | null;
 };
 
-/** The PR badge: open, checks (a check runs or failed), or conflict (the branch does not merge). */
-export type PrState = "open" | "checks" | "conflict";
+/** The PR badge: open, checks (a check runs or failed), conflict (the branch does not merge), or merged. */
+export type PrState = "open" | "checks" | "conflict" | "merged";
 
 /** What the badge reads from GitHub's pull request status. */
 export type PrStatus = { state: string; mergeableState: string; checks: { pending: number; failed: number } };
 
 export function prState(s: PrStatus): PrState {
+  if (s.state === "merged") return "merged";
   if (s.mergeableState === "dirty") return "conflict";
   if (s.checks.pending > 0 || s.checks.failed > 0) return "checks";
   return "open";
@@ -114,16 +115,32 @@ export type SpecIssue = { number: number; title: string; url: string; openTicket
 /** An unclaimed card's id: `issue:<number>` of its spec issue, as it has no session yet. */
 export const unclaimedId = (number: number) => `issue:${number}`;
 
+/** The spec issue number of an unclaimed card's id (`issue:<number>`); null for a session's card. */
+export function unclaimedNumber(id: string): number | null {
+  const m = /^issue:(\d+)$/.exec(id);
+  return m ? Number(m[1]) : null;
+}
+
 /**
- * The issue number in `repoId` that a session's issue or spec ref names: `owner/name#12`,
- * `#12`, `12`, or the issue's GitHub URL. Null for any other ref (a spec file path, another repo).
+ * The issue an issue ref names: `owner/name#12` or the issue's GitHub URL (with its repo), or
+ * `#12` and `12` (no repo: the repo the ref is read in). Null for any other ref (a spec file path).
+ */
+export function parseIssueRef(ref: string | null): { repo: string | null; number: number } | null {
+  const r = (ref ?? "").trim();
+  const bare = /^#?(\d+)$/.exec(r);
+  if (bare) return { repo: null, number: Number(bare[1]) };
+  const m = /^([^/\s]+\/[^/#\s]+)#(\d+)$/.exec(r) ?? /^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/issues\/(\d+)\/?$/.exec(r);
+  return m ? { repo: m[1], number: Number(m[2]) } : null;
+}
+
+/**
+ * The issue number in `repoId` that a session's issue or spec ref names (see parseIssueRef).
+ * Null for any other ref (a spec file path, another repo's issue).
  */
 export function issueNumberOf(ref: string | null, repoId: string): number | null {
-  const r = (ref ?? "").trim();
-  const m = /^#?(\d+)$/.exec(r) ?? /^([^/\s]+\/[^/#\s]+)#(\d+)$/.exec(r) ?? /^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/issues\/(\d+)\/?$/.exec(r);
-  if (!m) return null;
-  if (m.length === 3 && m[1].toLowerCase() !== repoId.toLowerCase()) return null;
-  return Number(m.at(-1));
+  const issue = parseIssueRef(ref);
+  if (!issue || (issue.repo !== null && issue.repo.toLowerCase() !== repoId.toLowerCase())) return null;
+  return issue.number;
 }
 
 /**

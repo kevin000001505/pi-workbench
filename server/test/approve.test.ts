@@ -165,7 +165,7 @@ test("Approve merges the PR with a merge commit, deletes the branch and the work
   const refused = await approve(id);
   assert.equal(refused.status, 200, JSON.stringify(refused.json));
   assert.equal(refused.json.phase, "pr");
-  assert.match(refused.json.attention, /Required status check "ci" is failing/);
+  assert.equal(refused.json.attention, 'GitHub refused the merge: Required status check "ci" is failing. Fix it on GitHub, then approve again.');
   const held = (await board()).find((c) => c.id === id);
   assert.equal(held.column, "review");
   assert.match(held.attention, /Required status check "ci" is failing/);
@@ -190,7 +190,9 @@ test("Approve merges the PR with a merge commit, deletes the branch and the work
   // The PR merged into the default branch, so its `Closes` lines closed the issues on GitHub.
   assert.deepEqual(gh.closed.filter((c) => /#[78]$/.test(c.ref)).map((c) => c.by), ["merge", "merge"]);
   assert.deepEqual(gh.closed.map((c) => c.ref).sort(), ["kevin/ship#7", "kevin/ship#8"]);
-  assert.equal((await board()).find((c) => c.id === id).column, "done");
+  const doneCard = (await board()).find((c) => c.id === id);
+  assert.equal(doneCard.column, "done");
+  assert.equal(doneCard.pr.state, "merged", "a Done card's badge says merged");
 
   // Approve is only for a card in Review.
   const again = await approve(id);
@@ -408,4 +410,44 @@ test("Review → To do during a merge run stops it and undoes the half-done merg
   assert.equal(again.status, 200, JSON.stringify(again.json));
   assert.match(again.json.activeRun, new RegExp(`^${id}-merge-`));
   assert.notEqual(again.json.activeRun, first);
+});
+
+for (const [word, spec, says] of [
+  ["FAKERESOLVE", 87, /the merge is not committed/],
+  ["ABORTRESOLVE", 97, /HEAD does not contain origin\/main/],
+] as const)
+test(`a merge run that says resolved but ${word === "FAKERESOLVE" ? "leaves the merge half done" : "aborted the merge"} is not pushed: the card stays in Review with the reason`, { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, pr, worktree, branch } = await toReview(spec);
+  const tip = git(bare, "rev-parse", `refs/heads/${branch}`);
+  pushToBase(`${word}: main changed this line`);
+  const r = await approve(id);
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.match(r.json.activeRun, new RegExp(`^${id}-merge-`));
+
+  const failed = await waitFor(async () => (await summary(id)).attention && summary(id), 120_000);
+  assert.equal(failed.phase, "pr");
+  assert.match(failed.attention, /not resolved: the merge run called finish_merge "resolved", but /);
+  assert.match(failed.attention, says);
+  assert.ok(!pr.merged);
+  assert.equal(git(bare, "rev-parse", `refs/heads/${branch}`), tip, "nothing is pushed");
+  assert.ok(!mergeInProgress(worktree));
+  assert.equal(git(worktree, "status", "--porcelain"), "");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), tip);
+});
+
+test("a conflicting PR whose base git cannot merge (no conflicted file) keeps the card in Review with git's reason, and starts no merge run", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, pr, worktree, branch } = await toReview(107);
+  const tip = git(bare, "rev-parse", `refs/heads/${branch}`);
+  // The base adds extra.txt, and the worktree has an untracked extra.txt: git refuses to overwrite it.
+  pushToBase("from main", "extra.txt");
+  fs.writeFileSync(path.join(worktree, "extra.txt"), "local\n");
+  pr.mergeable_state = "dirty";
+  const r = await approve(id);
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.phase, "pr");
+  assert.match(r.json.attention, /could not merge main into the branch: .*untracked working tree files would be overwritten/s);
+  assert.doesNotMatch(r.json.activeRun, /-merge-/);
+  assert.ok(!mergeInProgress(worktree));
+  assert.equal(git(bare, "rev-parse", `refs/heads/${branch}`), tip);
+  delete pr.mergeable_state;
 });

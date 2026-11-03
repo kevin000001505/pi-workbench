@@ -1210,7 +1210,11 @@ export class SessionManager extends EventEmitter {
     }
     const t = nextTicket(tickets);
     if (!t) {
-      this.flag(id, "No ticket can start: every remaining ticket waits on a blocked one.");
+      const remaining = tickets.filter((x) => x.status !== "done");
+      const blocked = remaining.filter((x) => x.status === "blocked").map((x) => `#${x.num}`).join(", ");
+      // Every remaining ticket is blocked itself, or some wait on the blocked ones.
+      const why = remaining.every((x) => x.status === "blocked") ? "every remaining ticket is blocked" : "every remaining ticket is blocked or waits on a blocked one";
+      this.flag(id, `No ticket can start: ${why} (${blocked}).`);
       return;
     }
     const runId = `${id}-t${t.num}-${Date.now().toString(36)}`;
@@ -1378,7 +1382,9 @@ export class SessionManager extends EventEmitter {
         if (!this.delivery) throw new Error("this workbench has no GitHub connection");
         result = await this.delivery.merge(row, repo);
       } catch (err) {
-        this.flag(id, `GitHub refused the merge: ${(err as Error).message}. Fix it on GitHub, then approve again.`);
+        // A GitHubError carries GitHub's own message as `detail`; the flag ends in one period.
+        const why = ((err as { detail?: string }).detail || (err as Error).message).replace(/[.\s]+$/, "");
+        this.flag(id, `GitHub refused the merge: ${why}. Fix it on GitHub, then approve again.`);
         return;
       }
       if ("conflict" in result) await this.mergeConflict(id, result.conflict);
@@ -1428,14 +1434,29 @@ export class SessionManager extends EventEmitter {
     const report = s.finished;
     s.finished = undefined;
     this.resolving.delete(id);
-    if (report?.status === "done") {
+    const row = this.row(id);
+    const unfinished = report?.status === "done" ? await this.unfinishedMerge(row) : null;
+    if (report?.status === "done" && !unfinished) {
       await this.pushResolved(id, report.note);
       return;
     }
-    const row = this.row(id);
     await git(row.worktree, ["merge", "--abort"], await this.gitEnv()).catch(() => {});
-    const why = report ? report.note || "no reason given" : s.lastSettleAborted ? "the run was stopped" : "the run stopped without finishing";
+    const why = unfinished
+      ? `the merge run called finish_merge "resolved", but ${unfinished}`
+      : report
+        ? report.note || "no reason given"
+        : s.lastSettleAborted
+          ? "the run was stopped"
+          : "the run stopped without finishing";
     this.flag(id, `The merge conflict was not resolved: ${why}. Resolve it on the branch, then approve again.`);
+  }
+
+  /** Why the worktree does not hold a finished merge of the base branch, or null when it does. */
+  private async unfinishedMerge(row: SessionRow): Promise<string | null> {
+    const sh = (args: string[]) => git(row.worktree, args).then(() => true, () => false);
+    if (await sh(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) return "the merge is not committed";
+    if (!(await sh(["merge-base", "--is-ancestor", `origin/${row.base_branch}`, "HEAD"]))) return `HEAD does not contain origin/${row.base_branch}`;
+    return null;
   }
 
   /** Push the merge to the PR's branch; the card stays in Review for a second Approve. */

@@ -95,6 +95,9 @@ async function repoView(r: ReturnType<typeof listRepos>[number]) {
 }
 
 /** The repo's unclaimed cards; none when GitHub cannot be read (no token, offline). */
+/** Unclaimed cards (`owner/name#n`) whose move is creating their session now. */
+const claiming = new Set<string>();
+
 async function unclaimedOf(repoId: string, mine: ReturnType<SessionManager["list"]>) {
   const [owner, name] = repoId.split("/");
   const specs = await Promise.resolve()
@@ -199,9 +202,16 @@ const router = new Router()
     const startFrom = body.column === "doing" ? "tickets" : body.column === "todo" ? "spec" : null;
     if (!startFrom) throw new HttpError(409, "An unclaimed card can move only to Doing or To do.");
     const mine = sessions.list().filter((s) => s.repoId === repo.id);
-    if (mine.some((s) => issueNumberOf(s.issueRef, repo.id) === number || issueNumberOf(s.specRef, repo.id) === number))
+    const claim = `${repo.id}#${number}`;
+    if (claiming.has(claim) || mine.some((s) => issueNumberOf(s.issueRef, repo.id) === number || issueNumberOf(s.specRef, repo.id) === number))
       throw new HttpError(409, `A card already works on issue #${number}.`);
-    return sessions.create({ repoId: repo.id, title: "", prompt: "", mode: "pipeline", issueRef: `${repo.id}#${number}`, startFrom });
+    // Held from the check until the session row exists, so a second move of the same card is refused.
+    claiming.add(claim);
+    try {
+      return await sessions.create({ repoId: repo.id, title: "", prompt: "", mode: "pipeline", issueRef: claim, startFrom });
+    } finally {
+      claiming.delete(claim);
+    }
   })
 
   // --- sessions -----------------------------------------------------------------------------

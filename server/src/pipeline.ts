@@ -201,9 +201,9 @@ export function mergePrompt(base: string, reason: string, files: string[]) {
 ${files.map((f) => `- ${f}`).join("\n")}
 
 [pi-workbench pipeline: merge conflict on Approve]
-The merge is in progress in this worktree. Resolve every conflicted hunk, run the checks, and commit the merge to the current branch. Do not push; the workbench pushes.
+The merge is in progress in this worktree. Resolve every conflicted hunk, run the checks, and commit the merge to the current branch. Do not push; the workbench pushes. Do not run \`git merge --abort\`.
 Then call finish_merge with status "resolved" and a short note of how you reconciled each side.
-If you cannot resolve it, call finish_merge with status "failed" and explain why.`;
+Only when a hunk truly needs a human decision (the two sides' intents cannot both be kept, and the merge's goal does not pick one), leave the merge as it is and call finish_merge with status "failed", naming the hunk and why. The workbench, not you, then aborts the merge.`;
 }
 
 /** What a rescue run reports with finish_diagnosis. */

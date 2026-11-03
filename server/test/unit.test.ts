@@ -228,10 +228,15 @@ test("pipeline: ticket validation, frontier order and prompts", async () => {
     { ...t(1, "done"), trackerRef: "#12" },
     { ...t(2, "ready"), trackerRef: "https://github.com/a/b/issues/13" },
     { ...t(3, "done"), trackerRef: ".scratch/x/issues/03.md" },
-  ]);
+    { ...t(4, "done"), trackerRef: "14" },
+    { ...t(5, "done"), trackerRef: "https://github.com/other/tracker/issues/15" },
+  ], "a/b");
   assert.match(section, /- \[x\] #1 T1 \(Closes #12\)/);
   assert.match(section, /- \[ \] #2 T2 \(Closes #13\)/);
   assert.match(section, /- \[x\] #3 T3 \(`\.scratch\/x\/issues\/03\.md`\)/);
+  assert.match(section, /- \[x\] #4 T4 \(Closes #14\)/);
+  // Another repo's issue is named, not closed.
+  assert.match(section, /- \[x\] #5 T5 \(`https:\/\/github\.com\/other\/tracker\/issues\/15`\)/);
 });
 
 test("ticketsFromSubIssues maps open sub-issues to tickets with remapped edges", async () => {
@@ -267,18 +272,44 @@ test("the origin issue's Closes line is deduped against ticket lines by number",
   const { originCloses } = await import("../src/prs.ts");
   const section = (ref: string) => `\n## Tickets\n\n- [x] #1 Ship it (${ref})\n`;
 
-  assert.equal(originCloses("me/app#42", ""), "Closes #42\n");
-  assert.equal(originCloses("me/app#42", section(`.scratch/issues/42.md`)), "Closes #42\n"); // a non-issue ref doesn't close anything
-  assert.equal(originCloses(null, section("Closes #42")), ""); // no origin issue
-  assert.equal(originCloses("me/app", ""), ""); // malformed ref
-  assert.equal(originCloses("me/app#42", section("Closes #42")), ""); // a ticket already closes it
-  assert.equal(originCloses("me/app#1", section("Closes #12")), "Closes #1\n"); // 1 is not 12
+  assert.equal(originCloses("me/app", "me/app#42", ""), "Closes #42\n");
+  assert.equal(originCloses("me/app", "me/app#42", section(`.scratch/issues/42.md`)), "Closes #42\n"); // a non-issue ref doesn't close anything
+  assert.equal(originCloses("me/app", null, section("Closes #42")), ""); // no origin issue
+  assert.equal(originCloses("me/app", "me/app", ""), ""); // malformed ref
+  assert.equal(originCloses("me/app", "me/app#42", section("Closes #42")), ""); // a ticket already closes it
+  assert.equal(originCloses("me/app", "me/app#1", section("Closes #12")), "Closes #1\n"); // 1 is not 12
   // The spec issue closes too: as `#n` or an issues URL, once, and not when a ticket or the origin already does.
-  assert.equal(originCloses(null, "", "#12"), "Closes #12\n");
-  assert.equal(originCloses("me/app#42", "", "https://github.com/me/app/issues/12"), "Closes #42\nCloses #12\n");
-  assert.equal(originCloses("me/app#42", "", "https://github.com/me/app/issues/42"), "Closes #42\n");
-  assert.equal(originCloses(null, section("Closes #12"), "#12"), "");
-  assert.equal(originCloses(null, "", ".scratch/greeting/spec.md"), "");
+  assert.equal(originCloses("me/app", null, "", "#12"), "Closes #12\n");
+  assert.equal(originCloses("me/app", "me/app#42", "", "https://github.com/me/app/issues/12"), "Closes #42\nCloses #12\n");
+  assert.equal(originCloses("me/app", "me/app#42", "", "https://github.com/me/app/issues/42"), "Closes #42\n");
+  assert.equal(originCloses("me/app", null, section("Closes #12"), "#12"), "");
+  assert.equal(originCloses("me/app", null, "", ".scratch/greeting/spec.md"), "");
+  // A ref to another repo's issue closes nothing here: GitHub would read `Closes #12` as this repo's #12.
+  assert.equal(originCloses("me/app", null, "", "other/tracker#12"), "");
+  assert.equal(originCloses("me/app", null, "", "https://github.com/other/tracker/issues/12"), "");
+  assert.equal(originCloses("me/app", "other/tracker#42", ""), "");
+});
+
+test("closedIssues closes only this repo's issues: a spec ref to another repo closes nothing here", async () => {
+  const { closedIssues } = await import("../src/prs.ts");
+  const row = (spec_ref: string | null, issue_ref: string | null = null) => ({ repo_id: "me/app", issue_ref, spec_ref }) as any;
+  const ticket = (trackerRef: string) => ({ num: 1, title: "T", body: "", blockedBy: [], trackerRef, status: "done", note: null, runId: null }) as any;
+  assert.deepEqual(closedIssues(row("me/app#40", "me/app#40"), [ticket("41")]), [41, 40]);
+  assert.deepEqual(closedIssues(row("other/tracker#12"), []), []);
+  assert.deepEqual(closedIssues(row("https://github.com/other/tracker/issues/12"), [ticket("https://github.com/other/tracker/issues/13")]), []);
+});
+
+test("issue refs: parseIssueRef reads every form; a card id maps back to its spec issue's number", async () => {
+  const { parseIssueRef, unclaimedId, unclaimedNumber } = await import("../../shared/board.ts");
+  assert.deepEqual(parseIssueRef("me/app#12"), { repo: "me/app", number: 12 });
+  assert.deepEqual(parseIssueRef("https://github.com/me/app/issues/12/"), { repo: "me/app", number: 12 });
+  assert.deepEqual(parseIssueRef("#12"), { repo: null, number: 12 });
+  assert.deepEqual(parseIssueRef(" 12 "), { repo: null, number: 12 });
+  assert.equal(parseIssueRef(".scratch/greeting/spec.md"), null);
+  assert.equal(parseIssueRef(null), null);
+  assert.equal(unclaimedNumber(unclaimedId(12)), 12);
+  assert.equal(unclaimedNumber("3f2a-session-id"), null);
+  assert.equal(unclaimedNumber("issue:x"), null);
 });
 
 test("requireTrackedRepo resolves tracked repos and rejects the rest", () => {

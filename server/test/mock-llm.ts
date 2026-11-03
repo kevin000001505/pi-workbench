@@ -116,10 +116,12 @@ function textOf(content: unknown): string {
  * - tdd (a ticket): commit a line for the ticket (and `git push`, a gated call, if the ticket says
  *   PUSHME) → finish_ticket (blocked if the ticket says BLOCKME) → done
  * - code-review: commit a fix and `git push` it (a gated call) → finish_review → done
- * - resolving-merge-conflicts: keep both sides of every conflicted hunk in work.txt and commit the
+ * - resolving-merge-conflicts (the base's work.txt keeps every word an earlier test pushed, so the
+ *   newest word is checked first): keep both sides of every conflicted hunk in work.txt and commit the
  *   merge → finish_merge resolved → done; a base side that says GIVEUP is left alone → finish_merge failed,
  *   and one that says NOFINISH ends the run with no finish_merge call; one that says HOLDMERGE asks
- *   the user first (the run waits on a decision), then keeps both sides
+ *   the user first (the run waits on a decision), then keeps both sides; one that says FAKERESOLVE
+ *   calls finish_merge resolved with the merge still half done, and ABORTRESOLVE after git merge --abort
  */
 function pipelineScript(userText: string, step: number, lastResult: string, conversation = ""): Reply | undefined {
   if (userText.includes('<skill name="grill-with-docs"')) {
@@ -170,8 +172,9 @@ function pipelineScript(userText: string, step: number, lastResult: string, conv
   if (userText.includes('<skill name="resolving-merge-conflicts"')) {
     if (step === 0) {
       const keepBoth = "grep -v -e '^<<<<<<<' -e '^=======' -e '^>>>>>>>' work.txt > .resolved && mv .resolved work.txt && git add work.txt && git commit -q --no-edit && echo resolved";
-      return { tool: { name: "bash", args: { command: `if grep -q HOLDMERGE work.txt; then echo "hold on"; elif grep -q NOFINISH work.txt; then echo "wandered off"; elif grep -q GIVEUP work.txt; then echo "cannot reconcile"; else ${keepBoth}; fi` } } };
+      return { tool: { name: "bash", args: { command: `if grep -q ABORTRESOLVE work.txt; then git merge --abort && echo "faked"; elif grep -q FAKERESOLVE work.txt; then echo "faked"; elif grep -q HOLDMERGE work.txt; then echo "hold on"; elif grep -q NOFINISH work.txt; then echo "wandered off"; elif grep -q GIVEUP work.txt; then echo "cannot reconcile"; else ${keepBoth}; fi` } } };
     }
+    if (step === 1 && lastResult.includes("faked")) return { tool: { name: "finish_merge", args: { status: "resolved", note: "all good" } } };
     if (step === 1 && lastResult.includes("hold on")) return { tool: { name: "ask_user", args: { question: "Keep both sides of work.txt?", options: ["Yes", "No"] } } };
     if (step === 1 && lastResult.includes("wandered off")) return { text: "I looked at it." };
     if (step === 1) {

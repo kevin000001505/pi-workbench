@@ -440,6 +440,38 @@ test("a reworked card waits in To do until the new breakdown is recorded; a tick
   assert.equal(await columnOf(s.id), "issues");
 });
 
+test("a resumed card with no ticket to start says which tickets are blocked, and whether others wait on them", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const resumedFlag = async (number: number, subs: any[]) => {
+    gh.seedSubIssues("kevin", "demo", { number, title: `Blocked ${number}`, body: "## Solution\nSomething." }, subs);
+    const s = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: `Blocked ${number}`, issueRef: `kevin/demo#${number}`, mode: "pipeline", startFrom: "tickets" })).json;
+    await waitFor(async () => (await board()).find((c) => c.id === s.id && c.attention));
+    assert.equal((await api("POST", `/api/sessions/${s.id}/move`, { column: "issues" })).status, 200);
+    assert.equal((await api("POST", `/api/sessions/${s.id}/move`, { column: "doing" })).status, 200);
+    return (await waitFor(async () => (await board()).find((c) => c.id === s.id && c.attention))).attention;
+  };
+  // The only remaining ticket is the blocked one itself.
+  assert.equal(await resumedFlag(90, [{ number: 91, title: "Do it", body: "Do it. BLOCKME" }]), "No ticket can start: every remaining ticket is blocked (#1).");
+  // Ticket 2 waits on the blocked ticket 1.
+  assert.equal(
+    await resumedFlag(92, [
+      { number: 93, title: "Do it", body: "Do it. BLOCKME" },
+      { number: 94, title: "Then this", body: "After it.", blockedBy: [93] },
+    ]),
+    "No ticket can start: every remaining ticket is blocked or waits on a blocked one (#1).",
+  );
+});
+
+test("two moves of one unclaimed card at once make one session: the second is refused", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.seedSubIssues("kevin", "demo", { number: 100, title: "Twice", body: "## Solution\nOnce." }, [{ number: 101, title: "Do it", body: "Do it." }]);
+  const move = () => api("POST", "/api/repos/kevin/demo/issues/100/move", { column: "doing" });
+  const both = await Promise.all([move(), move()]);
+  assert.deepEqual(both.map((r) => r.status).sort(), [200, 409], JSON.stringify(both.map((r) => r.json)));
+  const sessions = (await api("GET", "/api/sessions")).json.filter((x: any) => x.issueRef === "kevin/demo#100");
+  assert.equal(sessions.length, 1);
+  // Once the first move made its session, the card is claimed and a later move is refused too.
+  assert.equal((await move()).status, 409);
+});
+
 /** The board events a WebSocket client hears, from now on. */
 async function boardEvents() {
   const ws = new WebSocket(`${base.replace("http", "ws")}/ws`);

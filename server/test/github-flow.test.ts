@@ -323,8 +323,9 @@ test("listTicketSubIssues returns the spec and its open ticket sub-issues, with 
   gh.createBare("kevin", "empty");
   assert.equal((await client.listTicketSubIssues("kevin", "empty", 3)).subIssues.length, 0);
   await assert.rejects(client.listTicketSubIssues("kevin", "ticketed", 99), (e) => e instanceof GitHubError && e.status === 404);
-  // ticketsFromIssueRef parses the owner/name#123 form and rejects the rest.
+  // ticketsFromIssueRef reads the owner/name#123 form and the issue URL, and rejects a ref with no repo.
   assert.equal((await client.ticketsFromIssueRef("kevin/ticketed#7")).spec.number, 7);
+  assert.equal((await client.ticketsFromIssueRef("https://github.com/kevin/ticketed/issues/7")).spec.number, 7);
   await assert.rejects(client.ticketsFromIssueRef("ticketed#7"), (e) => e instanceof GitHubError && e.status === 400);
   await assert.rejects(client.ticketsFromIssueRef("#7"), (e) => e instanceof GitHubError && e.status === 400);
   // A bad token keeps the REST client's error shape on GraphQL calls too.

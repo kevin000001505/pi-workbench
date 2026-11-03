@@ -1,4 +1,4 @@
-import type { SpecIssue } from "../../shared/board.ts";
+import { parseIssueRef, type SpecIssue } from "../../shared/board.ts";
 import { config } from "./config.ts";
 
 export type GhUser = { login: string; id: number; name: string | null };
@@ -25,9 +25,12 @@ export type GhTicketSeed = { spec: { number: number; title: string; body: string
 
 export class GitHubError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** GitHub's own message, without the method, path and status; the message when there is none. */
+  detail: string;
+  constructor(status: number, message: string, detail = message) {
     super(message);
     this.status = status;
+    this.detail = detail;
   }
 }
 
@@ -57,7 +60,7 @@ export class GitHub {
         const j = (await res.json()) as { message?: string; errors?: { message?: string }[] };
         msg = [j.message, ...(j.errors ?? []).map((e) => e.message)].filter(Boolean).join(": ");
       } catch {}
-      throw new GitHubError(res.status, `GitHub ${method} ${url.replace(config.githubApi, "")}: ${res.status} ${msg}`);
+      throw new GitHubError(res.status, `GitHub ${method} ${url.replace(config.githubApi, "")}: ${res.status} ${msg}`, msg);
     }
     return (res.status === 204 ? undefined : await res.json()) as T;
   }
@@ -183,11 +186,12 @@ export class GitHub {
     );
   }
 
-  /** Parse `owner/name#123` and fetch its spec plus ticket sub-issues. */
+  /** Parse `owner/name#123` (or the issue's URL) and fetch its spec plus ticket sub-issues. */
   async ticketsFromIssueRef(ref: string) {
-    const m = /^([^/]+)\/([^/]+)#(\d+)$/.exec(ref.trim());
-    if (!m) throw new GitHubError(400, `Bad issue reference ${ref}; expected owner/name#123`);
-    return this.listTicketSubIssues(m[1], m[2], Number(m[3]));
+    const issue = parseIssueRef(ref);
+    if (!issue?.repo) throw new GitHubError(400, `Bad issue reference ${ref}; expected owner/name#123`);
+    const [owner, name] = issue.repo.split("/");
+    return this.listTicketSubIssues(owner, name, issue.number);
   }
 
   createRepo(input: { name: string; description?: string; private: boolean; org?: string }) {
