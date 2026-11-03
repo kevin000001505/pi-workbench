@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Card } from "../../../shared/board.ts";
-import { COLUMNS, refLabel } from "../../../shared/board.ts";
+import { COLUMNS, isPlainUnclaimedCard, parseIssueRef, refLabel, unclaimedNumber } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { PendingCard } from "../session/PendingCard.tsx";
 import { phaseLabel } from "../session/PipelinePanel.tsx";
@@ -8,6 +8,7 @@ import { useStore } from "../store.tsx";
 import { isResolvedNote, type Ticket } from "../types.ts";
 import { Markdown, Spinner } from "../ui.tsx";
 
+/** The TICKET_STATE labels for a card's tickets. */
 const TICKET_STATE: Record<Ticket["status"], string> = { ready: "Ready", running: "Running", done: "Done", blocked: "Blocked" };
 
 /**
@@ -18,7 +19,28 @@ const TICKET_STATE: Record<Ticket["status"], string> = { ready: "Ready", running
 export function CardDetail({ card, onClose }: { card: Card; onClose: () => void }) {
   const { sessions, toast } = useStore();
   const s = sessions[card.id];
+  const plain = isPlainUnclaimedCard(card);
   const [busy, setBusy] = useState(false);
+
+  // A plain unclaimed card has no session: read its issue body from the API it was read from.
+  const [issueBody, setIssueBody] = useState<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (!plain) return;
+    const ref = parseIssueRef(card.specRef);
+    if (!ref?.repo) {
+      setIssueBody(null);
+      return;
+    }
+    const [owner, name] = ref.repo.split("/");
+    let live = true;
+    api.get<{ body: string | null }>(`/api/github/issues/${owner}/${name}/${ref.number}`).then(
+      (i) => live && setIssueBody(i.body),
+      () => live && setIssueBody(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [plain, card.specRef]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -90,9 +112,12 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
         </header>
 
         <div className="kz-detail-links">
-          <a className="kz-btn" href={`#/session/${card.id}`}>
-            Open the full transcript
-          </a>
+          {!plain && <a className="kz-btn" href={`#/session/${card.id}`}>Open the full transcript</a>}
+          {plain && (
+            <a className="kz-btn" href={card.specRef ?? undefined} target="_blank" rel="noopener">
+              Open on GitHub
+            </a>
+          )}
           {card.pr && (
             <a className={`kz-tag kz-pr ${card.pr.state ? `pr-${card.pr.state}` : ""}`} href={prUrl ?? undefined} target="_blank" rel="noopener">
               <span className="dot" />
@@ -105,7 +130,7 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
               {busy ? <Spinner small /> : null} Approve
             </button>
           )}
-          {card.column !== "done" && (
+          {!plain && card.column !== "done" && (
             <button className="kz-btn danger" disabled={busy} onClick={abandon} title="Stop the runs, close the PR, delete the branch, the worktree and the card; the issues stay open">
               Abandon
             </button>
@@ -128,7 +153,20 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
           </section>
         )}
 
-        {!s ? (
+        {plain ? (
+          <section className="kz-detail-section">
+            <h3>Issue {unclaimedNumber(card.id)}</h3>
+            {issueBody === undefined ? (
+              <p className="kz-detail-muted">
+                <Spinner small /> Loading the issue…
+              </p>
+            ) : issueBody ? (
+              <Markdown text={issueBody} />
+            ) : (
+              <p className="kz-detail-muted">The issue has no body.</p>
+            )}
+          </section>
+        ) : !s ? (
           <p className="kz-detail-muted">
             <Spinner small /> Loading the session…
           </p>

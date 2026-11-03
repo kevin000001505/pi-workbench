@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type Card, type Column, COLUMNS, DONE_PAGE, unclaimedNumber } from "../../../shared/board.ts";
+import { type Card, type Column, COLUMNS, DONE_PAGE, isPlainUnclaimedCard, unclaimedNumber } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import { approveQuestion, CardDetail } from "./CardDetail.tsx";
@@ -85,11 +85,20 @@ function Icon({ name }: { name: keyof typeof ICONS }) {
 function BoardCard({ card, activity, onDrag, onOpen }: { card: Card; activity: string; onDrag: (card: Card | null) => void; onOpen: () => void }) {
   const issue = unclaimedNumber(card.id);
   const unclaimed = issue !== null;
+  // A plain unclaimed card sits in To do; a spec unclaimed card sits in Issues.
+  const plain = isPlainUnclaimedCard(card);
   const prState = card.pr?.state ?? null;
-  const line = card.attention ?? (unclaimed ? `Spec issue #${issue}: drag it to Doing to solve its tickets, or to To do to rework it` : activity);
+  const line =
+    card.attention ??
+    (unclaimed
+      ? plain
+        ? `Issue #${issue} has no tickets yet: it needs grilling. Drag it when starting work on it is available.`
+        : `Spec issue #${issue}: drag it to Doing to solve its tickets, or to To do to rework it`
+      : activity);
   return (
     // A click opens the card detail; a modified click still opens the session in a new tab.
-    // An unclaimed card has no session yet: a click opens its spec issue on GitHub.
+    // A spec unclaimed card has no session yet: a click opens its spec issue on GitHub.
+    // A plain unclaimed card opens its issue in the card detail; a modified click opens GitHub.
     <a
       className="kz-card"
       href={unclaimed ? (card.specRef ?? undefined) : `#/session/${card.id}`}
@@ -103,7 +112,7 @@ function BoardCard({ card, activity, onDrag, onOpen }: { card: Card; activity: s
       }}
       onDragEnd={() => onDrag(null)}
       onClick={(e) => {
-        if (unclaimed || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        if ((unclaimed && !plain) || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
         e.preventDefault();
         onOpen();
       }}
@@ -227,8 +236,10 @@ export function Board({ repoId }: { repoId?: string }) {
     return m;
   }, [cards, filter]);
 
-  // An unclaimed card has no session, so no card detail.
-  const open = openId ? (cards ?? []).find((c) => c.id === openId && unclaimedNumber(c.id) === null) : undefined;
+  // A spec unclaimed card has no session, so no card detail; a plain unclaimed card gets one.
+  const open = openId
+    ? (cards ?? []).find((c) => c.id === openId && (unclaimedNumber(c.id) === null || isPlainUnclaimedCard(c)))
+    : undefined;
   const closeDetail = useCallback(() => setOpenId(null), []);
 
   if (repos && repos.length === 0) {
@@ -355,7 +366,8 @@ export function Board({ repoId }: { repoId?: string }) {
           onPick={(id) => {
             setSearching(false);
             const picked = (cards ?? []).find((c) => c.id === id);
-            if (picked && unclaimedNumber(picked.id) !== null) window.open(picked.specRef ?? undefined, "_blank", "noopener");
+            // A spec unclaimed card opens its issue on GitHub; a plain one opens its card detail.
+            if (picked && unclaimedNumber(picked.id) !== null && picked.column === "issues") window.open(picked.specRef ?? undefined, "_blank", "noopener");
             else setOpenId(id);
           }}
         />
