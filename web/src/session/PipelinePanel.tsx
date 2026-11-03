@@ -96,6 +96,13 @@ function TicketRow({ t, all, viewing, onView }: { t: Ticket; all: Ticket[]; view
   );
 }
 
+/**
+ * The server's note after a resolved merge conflict (SessionManager.pushResolved): it asks for a
+ * second Approve and is not an error, so the board and this panel show it in the neutral style.
+ */
+export const isResolvedNote = (text: string | null | undefined) =>
+  !!text && text.startsWith("The merge conflict with ") && text.includes(" is resolved and pushed");
+
 /** Where a pipeline session stands: phase steps, the attention banner, and the ticket list. */
 export function PipelinePanel({ s, viewRun, onView }: { s: SessionSummary; viewRun: string; onView: (runId: string) => void }) {
   const { toast } = useStore();
@@ -143,7 +150,8 @@ export function PipelinePanel({ s, viewRun, onView }: { s: SessionSummary; viewR
             {open ? "Hide" : "Show"} plan
           </button>
         )}
-        {s.phase !== "done" && s.phase !== "pr" && s.phase !== "ready" && (
+        {/* Stop pauses the card to Issues, so it shows only once there are tickets to come back to. */}
+        {(s.phase === "implement" || s.phase === "review" || s.phase === "retro") && (
           <button className="btn btn-ghost btn-sm danger" disabled={busy} onClick={() => act("stop")}>
             Stop pipeline
           </button>
@@ -151,8 +159,8 @@ export function PipelinePanel({ s, viewRun, onView }: { s: SessionSummary; viewR
       </div>
 
       {s.attention && (
-        <div className="attention">
-          <span>⚠ {s.attention}</span>
+        <div className={`attention ${isResolvedNote(s.attention) ? "attention-ok" : ""}`}>
+          <span>{isResolvedNote(s.attention) ? "✓" : "⚠"} {s.attention}</span>
           {(s.phase === "implement" || s.phase === "review") && (
             <div className="row gap">
               <button className="btn btn-sm" disabled={busy} onClick={() => act("retry")}>
