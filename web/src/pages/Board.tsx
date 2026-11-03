@@ -174,20 +174,6 @@ function BoardCard({
               Solve
             </button>
           )}
-          {plain && (
-            <button
-              className="kz-btn"
-              disabled={busy}
-              title="Break the issue into ticket sub-issues with to-tickets, then approve the breakdown"
-              onClick={(e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                onMove("todo");
-              }}
-            >
-              Split
-            </button>
-          )}
         </span>
       )}
       {card.pr && (

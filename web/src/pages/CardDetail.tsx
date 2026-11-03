@@ -74,12 +74,12 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
   };
 
   // A plain card's move creates its session: the unclaimed card goes, and this detail closes with it.
-  const movePlain = async (column: "doing" | "todo") => {
+  const movePlain = async () => {
     setBusy(true);
     const ref = parseIssueRef(card.specRef);
     try {
       if (!ref?.repo) throw new Error("The card has no issue link to move");
-      await api.post(`/api/repos/${ref.repo}/issues/${ref.number}/move`, { column });
+      await api.post(`/api/repos/${ref.repo}/issues/${ref.number}/move`, { column: "doing" });
       onClose();
     } catch (e) {
       toast((e as Error).message, "error");
@@ -134,13 +134,8 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
             </a>
           )}
           {plain && (
-            <button className="kz-btn primary" disabled={busy} onClick={() => movePlain("doing")} title="Make the issue the card's only ticket and start work: skips grill, spec and tickets">
+            <button className="kz-btn primary" disabled={busy} onClick={() => movePlain()} title="Make the issue the card's only ticket and start work: skips grill, spec and tickets">
               {busy ? <Spinner small /> : null} Solve
-            </button>
-          )}
-          {plain && (
-            <button className="kz-btn" disabled={busy} onClick={() => movePlain("todo")} title="Break the issue into ticket sub-issues with to-tickets, then approve the breakdown">
-              {busy ? <Spinner small /> : null} Split
             </button>
           )}
           {card.pr && (

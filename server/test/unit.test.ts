@@ -470,7 +470,7 @@ test("the split prompt breaks the issue into sub-issues with blocking edges, and
 
 test("the glossary records the board's columns and card actions", () => {
   const glossary = fs.readFileSync(new URL("../../GLOSSARY.md", import.meta.url), "utf8");
-  for (const term of ["To do", "Unclaimed card", "Solve", "Split"]) {
+  for (const term of ["To do", "Unclaimed card", "Solve"]) {
     assert.match(glossary, new RegExp(`\\*\\*${term}\\*\\*:`), `glossary defines ${term}`);
   }
   assert.match(glossary, /\*\*Issues\*\* \(column\):/);

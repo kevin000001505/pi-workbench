@@ -97,10 +97,6 @@ A card for an open issue that no session claims yet. A plain issue (no open sub-
 To work a plain issue through a session that skips grill, spec and tickets: the issue becomes the card's only ticket, and the PR's merge closes the issue.
 _Avoid_: solve all (that is for a spec card's tickets), fix (a fix is one possible outcome; solving covers the whole flow)
 
-**Split**:
-Breaking a plain issue into ticket sub-issues with `to-tickets`, so it becomes a spec issue that waits for Solve all.
-_Avoid_: rework (rework re-grills an existing spec; Split plans a plain issue for the first time)
-
 **Doing**:
 The column for a feature whose tickets are being implemented.
 
