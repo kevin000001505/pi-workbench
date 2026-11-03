@@ -1286,9 +1286,8 @@ export class SessionManager extends EventEmitter {
     if (row.mode !== "pipeline") throw Object.assign(new Error("Not a pipeline session"), { status: 409 });
     const current = this.tickets(id).find((t) => t.status === "running" || t.status === "blocked");
     if (action === "stop") {
-      // Stop pauses the card in Issues; Solve all continues it.
-      await this.abort(id).catch(() => {});
-      this.update(id, { phase: "ready", attention: null });
+      // Stop pauses the card in Issues, the same as a move there; Solve all continues it.
+      await this.pause(id);
     } else if (row.phase === "review") {
       if (action === "retry") await this.startReview(id);
       else await this.finishPipeline(id, null);

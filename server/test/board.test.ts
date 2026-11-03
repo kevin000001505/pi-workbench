@@ -336,6 +336,18 @@ test("a move back to Issues stops the run; a move to Doing resumes it with the d
     return x.phase === "review" ? x.pending.find((p: any) => p.kind === "permission") : undefined;
   });
   assert.ok(perm2);
+  // The pipeline panel's Stop pauses the review the same way: its permission goes with the run.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/pipeline`, { action: "stop" })).status, 200);
+  await waitFor(async () => (await summary(s.id)).status === "stopped");
+  await new Promise((r) => setTimeout(r, 500));
+  const stoppedByPanel = await summary(s.id);
+  assert.equal(stoppedByPanel.phase, "ready");
+  assert.deepEqual(stoppedByPanel.pending, [], "Stop drops the review run's permission");
+  assert.equal((await move("doing")).status, 200);
+  await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.phase === "review" && x.pending.some((p: any) => p.kind === "permission");
+  });
   // QA → To do stops the review and plans again.
   assert.equal((await move("todo")).json.phase, "grill");
   assert.equal(await columnOf(s.id), "todo");
