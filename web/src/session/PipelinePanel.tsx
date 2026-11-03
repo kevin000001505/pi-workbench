@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
-import type { Phase, SessionSummary, Ticket } from "../types.ts";
+import { isResolvedNote, type Phase, type SessionSummary, type Ticket } from "../types.ts";
 import { Markdown, Spinner } from "../ui.tsx";
 
 const STEPS: { phase: Phase; label: string }[] = [
@@ -95,13 +95,6 @@ function TicketRow({ t, all, viewing, onView }: { t: Ticket; all: Ticket[]; view
     </div>
   );
 }
-
-/**
- * The server's note after a resolved merge conflict (SessionManager.pushResolved): it asks for a
- * second Approve and is not an error, so the board and this panel show it in the neutral style.
- */
-export const isResolvedNote = (text: string | null | undefined) =>
-  !!text && text.startsWith("The merge conflict with ") && text.includes(" is resolved and pushed");
 
 /** Where a pipeline session stands: phase steps, the attention banner, and the ticket list. */
 export function PipelinePanel({ s, viewRun, onView }: { s: SessionSummary; viewRun: string; onView: (runId: string) => void }) {

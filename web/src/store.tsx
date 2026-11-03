@@ -1,6 +1,6 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { applyEvent, emptyTranscript, type RpcEvent, type Transcript } from "../../shared/transcript.ts";
-import { type SessionSummary, waitingOn } from "./types.ts";
+import { isResolvedNote, type SessionSummary, waitingOn } from "./types.ts";
 
 type Toast = { id: number; text: string; level: "info" | "warning" | "error" };
 
@@ -99,7 +99,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const prev = lastState.current.get(s.id);
     lastState.current.set(s.id, key);
     if (prev !== undefined && prev !== key) {
-      if (s.attention) notify(s, "Pipeline needs you", s.attention, `${s.id}-attention`);
+      if (s.attention) notify(s, isResolvedNote(s.attention) ? "Conflict resolved" : "Pipeline needs you", s.attention, `${s.id}-attention`);
       else if (s.phase === "pr" && s.mode === "pipeline" && !prev.endsWith("|pr")) notify(s, "PR opened", `PR #${s.prNumber ?? ""} is open. Review it on the board.`, `${s.id}-pr`);
     }
     setSessions((prev) => ({ ...prev, [s.id]: s }));

@@ -120,7 +120,7 @@ function textOf(content: unknown): string {
  *   newest word is checked first): keep both sides of every conflicted hunk in work.txt and commit the
  *   merge → finish_merge resolved → done; a base side that says GIVEUP is left alone → finish_merge failed,
  *   and one that says NOFINISH ends the run with no finish_merge call; one that says HOLDMERGE asks
- *   the user first (the run waits on a decision), then keeps both sides; one that says FAKERESOLVE
+ *   the user first and leaves the run waiting on that decision; one that says FAKERESOLVE
  *   calls finish_merge resolved with the merge still half done, and ABORTRESOLVE after git merge --abort
  */
 function pipelineScript(userText: string, step: number, lastResult: string, conversation = ""): Reply | undefined {

@@ -3,7 +3,7 @@ import type { Route } from "./App.tsx";
 import { api } from "./api.ts";
 import { lastBoardRepo } from "./pages/Board.tsx";
 import { useStore } from "./store.tsx";
-import { type Repo, type SessionSummary, waitingOn } from "./types.ts";
+import { isResolvedNote, type Repo, type SessionSummary, waitingOn } from "./types.ts";
 import { phaseLabel } from "./session/PipelinePanel.tsx";
 import { StatusDot } from "./ui.tsx";
 
@@ -20,7 +20,9 @@ function SessionLink({ s, active }: { s: SessionSummary; active: boolean }) {
               ? `Permission: ${pending[0].tool}`
               : "Decision needed"
             : s.attention
-              ? "Pipeline needs you"
+              ? isResolvedNote(s.attention)
+                ? "Ready to approve again"
+                : "Pipeline needs you"
               : s.activity || phaseLabel(s) || (s.prNumber ? `PR #${s.prNumber}` : s.branch)}
         </span>
       </span>

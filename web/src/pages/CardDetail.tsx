@@ -3,9 +3,9 @@ import type { Card } from "../../../shared/board.ts";
 import { COLUMNS } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { PendingCard } from "../session/PendingCard.tsx";
-import { isResolvedNote, phaseLabel, refLabel } from "../session/PipelinePanel.tsx";
+import { phaseLabel, refLabel } from "../session/PipelinePanel.tsx";
 import { useStore } from "../store.tsx";
-import type { Ticket } from "../types.ts";
+import { isResolvedNote, type Ticket } from "../types.ts";
 import { Markdown, Spinner } from "../ui.tsx";
 
 const TICKET_STATE: Record<Ticket["status"], string> = { ready: "Ready", running: "Running", done: "Done", blocked: "Blocked" };

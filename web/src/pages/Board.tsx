@@ -3,9 +3,8 @@ import { type Card, type Column, COLUMNS, DONE_PAGE, unclaimedNumber } from "../
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import { approveQuestion, CardDetail } from "./CardDetail.tsx";
-import { isResolvedNote } from "../session/PipelinePanel.tsx";
 import { matches, NewCard, Search, typingIn, wordsOf } from "./BoardDialogs.tsx";
-import type { Repo } from "../types.ts";
+import { isResolvedNote, type Repo } from "../types.ts";
 import "../board.css";
 
 /** The repo whose board opened last; the start page opens it again. */

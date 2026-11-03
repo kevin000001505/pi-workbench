@@ -182,3 +182,10 @@ export type ProbeResult = {
   models: string[];
   checks: { name: string; url: string; ok: boolean; status?: number; contentType?: string; excerpt?: string; hint?: string; ms: number }[];
 };
+
+/**
+ * The server's note after a resolved merge conflict (SessionManager.pushResolved): it asks for a
+ * second Approve and is not an error, so the board and this panel show it in the neutral style.
+ */
+export const isResolvedNote = (text: string | null | undefined) =>
+  !!text && text.startsWith("The merge conflict with ") && text.includes(" is resolved and pushed");
