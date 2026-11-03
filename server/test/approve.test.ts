@@ -30,7 +30,7 @@ process.env.PI_BIN = piBin;
 process.env.PI_EXTENSION = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "pi-extension", "workbench.ts");
 
 // Skills the pipeline invokes; pi expands /skill:name from these.
-for (const name of ["grill-with-docs", "to-spec", "to-tickets", "tdd", "code-review", "setup-matt-pocock-skills"]) {
+for (const name of ["grill-with-docs", "to-spec", "to-tickets", "tdd", "code-review", "resolving-merge-conflicts", "setup-matt-pocock-skills"]) {
   fs.mkdirSync(path.join(process.env.SKILLS_DIR, name), { recursive: true });
   fs.writeFileSync(path.join(process.env.SKILLS_DIR, name, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} test skill\n---\n${name} body\n`);
 }
@@ -137,6 +137,22 @@ async function toReview(spec: number, baseBranch?: string) {
   return { id: s.id as string, pr, worktree: path.join(process.env.DATA_DIR!, "worktrees", s.id), branch: (await summary(s.id)).branch as string };
 }
 
+/**
+ * Someone else changes the base branch on GitHub: a commit appends `line` to `file`. Every card's
+ * ticket and review runs append to work.txt too, so a line there conflicts with the card's PR.
+ * Returns the commit.
+ */
+function pushToBase(line: string, file = "work.txt", baseBranch = "main") {
+  const clone = fs.mkdtempSync(path.join(tmp, "other-"));
+  execFileSync("git", ["clone", "-q", "-b", baseBranch, bare, clone]);
+  fs.appendFileSync(path.join(clone, file), `${line}\n`);
+  const sh = (...args: string[]) => execFileSync("git", ["-c", "user.name=other", "-c", "user.email=other@x", ...args], { cwd: clone }).toString().trim();
+  sh("add", file);
+  sh("commit", "-qm", `Change ${file} on the base branch`);
+  sh("push", "-q", "origin", baseBranch);
+  return sh("rev-parse", "HEAD");
+}
+
 const approve = (id: string) => api("POST", `/api/sessions/${id}/approve`, {});
 
 test("Approve merges the PR with a merge commit, deletes the branch and the worktree, and the merge closes the issues", { skip: !hasPi && "pi CLI not found" }, async () => {
@@ -196,13 +212,16 @@ test("Review → Done is Approve; on a non-default base Approve closes the issue
   assert.equal((await board()).find((c) => c.id === id).column, "done");
 });
 
-test("a merge conflict keeps the card in Review with the conflict as its attention; a PR merged by hand still delivers", { skip: !hasPi && "pi CLI not found" }, async () => {
+test("a PR that GitHub calls conflicting but git merges cleanly gets the merge pushed and stays in Review; a PR merged by hand still delivers", { skip: !hasPi && "pi CLI not found" }, async () => {
   const { id, pr, worktree, branch } = await toReview(27);
+  // GitHub says the PR conflicts, but git merges the base's new commit cleanly: it is pushed at once.
+  const theirs = pushToBase("A readme line", "README.md");
   pr.mergeable_state = "dirty";
   const r = await approve(id);
   assert.equal(r.status, 200, JSON.stringify(r.json));
   assert.equal(r.json.phase, "pr");
-  assert.match(r.json.attention, /conflict/i);
+  assert.match(r.json.attention, /conflict with main is resolved and pushed.*approve again/i);
+  execFileSync("git", ["merge-base", "--is-ancestor", theirs, `refs/heads/${branch}`], { cwd: bare });
   assert.ok(!pr.merged);
   assert.ok(hasRef(`refs/heads/${branch}`));
   assert.ok(fs.existsSync(worktree));
@@ -253,4 +272,72 @@ test("Approve refuses a card outside Review, and a request from another site", {
     body: "{}",
   });
   assert.equal(crossSite.status, 403);
+});
+
+test("Approve on a conflicting PR resolves the conflict in a merge run; after finish_merge the branch is pushed and a second Approve merges", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, pr, worktree, branch } = await toReview(37);
+  const theirs = pushToBase("main was here");
+  const r = await approve(id);
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.phase, "pr");
+  // The merge run is on screen as soon as Approve answers.
+  assert.match(r.json.activeRun, new RegExp(`^${id}-merge-[a-z0-9]+$`));
+  assert.ok(r.json.runs.some((x: any) => x.id === r.json.activeRun));
+  assert.ok(!pr.merged);
+  // A second Approve while the conflict is being resolved is refused.
+  assert.equal((await approve(id)).status, 409);
+
+  const resolved = await waitFor(async () => (await summary(id)).attention && summary(id), 120_000);
+  assert.equal(resolved.phase, "pr");
+  assert.match(resolved.attention, /conflict.*resolved.*approve again/i);
+  assert.equal((await board()).find((c) => c.id === id).column, "review");
+  // The resolution is pushed: the branch on GitHub has the base's commit, both sides' lines, and no markers.
+  execFileSync("git", ["merge-base", "--is-ancestor", theirs, `refs/heads/${branch}`], { cwd: bare });
+  const merged = execFileSync("git", ["show", `refs/heads/${branch}:work.txt`], { cwd: bare }).toString();
+  assert.match(merged, /main was here/);
+  assert.match(merged, /reviewed/);
+  assert.doesNotMatch(merged, /<<<<<<<|=======|>>>>>>>/);
+
+  const done = await approve(id);
+  assert.equal(done.status, 200, JSON.stringify(done.json));
+  assert.equal(done.json.phase, "done");
+  assert.equal(pr.merged, true);
+  assert.ok(!fs.existsSync(worktree));
+});
+
+test("a conflict resolve whose finish_merge fails keeps the card in Review with the run's reason", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, pr, worktree, branch } = await toReview(47);
+  const tip = execFileSync("git", ["rev-parse", `refs/heads/${branch}`], { cwd: bare }).toString().trim();
+  pushToBase("GIVEUP: main rewrote this line");
+  const r = await approve(id);
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.match(r.json.activeRun, new RegExp(`^${id}-merge-`));
+
+  const failed = await waitFor(async () => (await summary(id)).attention && summary(id), 120_000);
+  assert.equal(failed.phase, "pr");
+  assert.match(failed.attention, /Both sides rewrote the last line of work\.txt/);
+  assert.equal((await board()).find((c) => c.id === id).column, "review");
+  assert.ok(!pr.merged);
+  // Nothing is pushed, and the worktree is back on the branch's own tip with no merge half done.
+  assert.equal(execFileSync("git", ["rev-parse", `refs/heads/${branch}`], { cwd: bare }).toString().trim(), tip);
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: worktree }).toString().trim(), "");
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktree }).toString().trim(), tip);
+});
+
+test("a merge run that ends without finish_merge keeps the card in Review, and Approve can start it again", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, pr, branch } = await toReview(57);
+  const tip = execFileSync("git", ["rev-parse", `refs/heads/${branch}`], { cwd: bare }).toString().trim();
+  pushToBase("NOFINISH: main changed this line");
+  const first = (await approve(id)).json.activeRun;
+  const stopped = await waitFor(async () => (await summary(id)).attention && summary(id), 120_000);
+  assert.equal(stopped.phase, "pr");
+  assert.match(stopped.attention, /not resolved: the run stopped without finishing/);
+  assert.equal(execFileSync("git", ["rev-parse", `refs/heads/${branch}`], { cwd: bare }).toString().trim(), tip);
+  assert.ok(!pr.merged);
+
+  const again = await approve(id);
+  assert.equal(again.status, 200, JSON.stringify(again.json));
+  assert.match(again.json.activeRun, new RegExp(`^${id}-merge-`));
+  assert.notEqual(again.json.activeRun, first);
+  await waitFor(async () => (await summary(id)).attention, 120_000);
 });

@@ -13,8 +13,8 @@ export function startMockGitHub(root: string, login = "kevin") {
   const issues: any[] = []; // repo-scoped: { owner, name, ...issue }; the issues feed carries pull-request entries too
   const comments: any[] = []; // { owner, name, issueNumber, ...comment }
   const subIssueSeeds: Record<string, any> = {};
-  // Every PR head's check runs; a test edits it. Set a pull's `mergeable_state` to "dirty" for a conflict,
-  // or its `merge_refusal` to a message for a merge that branch protection refuses.
+  // Every PR head's check runs; a test edits it. A pull whose head conflicts with its base is "dirty", as on
+  // GitHub; set its `mergeable_state` to force a state, or its `merge_refusal` to a message for a merge that branch protection refuses.
   const checkRuns: { name: string; status: string; conclusion: string | null }[] = [
     { name: "ci", status: "completed", conclusion: "success" },
     { name: "lint", status: "in_progress", conclusion: null },
@@ -22,6 +22,21 @@ export function startMockGitHub(root: string, login = "kevin") {
   // Every issue a merge or an issue PATCH closed, in order: `{ ref: "owner/name#n", by: "merge" | "api" }`.
   const closed: { ref: string; by: "merge" | "api" }[] = [];
   const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
+  /**
+   * A pull's mergeable state: its `mergeable_state` switch when a test set one, else what git says
+   * about merging its head into its base (a real conflict is "dirty").
+   */
+  const mergeableState = (owner: string, name: string, pr: any): string => {
+    if (pr.mergeable_state) return pr.mergeable_state;
+    if (pr.merged) return "clean";
+    try {
+      sh(path.join(root, owner, `${name}.git`), "merge-tree", "--write-tree", `refs/heads/${pr.base}`, `refs/heads/${pr.head}`);
+      return "clean";
+    } catch (err) {
+      // merge-tree exits 1 on a conflict; any other failure (a ref is gone) is no conflict.
+      return (err as { status?: number }).status === 1 ? "dirty" : "clean";
+    }
+  };
 
   const createBare = (owner: string, name: string) => {
     const bare = path.join(root, owner, `${name}.git`);
@@ -210,7 +225,7 @@ export function startMockGitHub(root: string, login = "kevin") {
       if (!pr) return send(404, { message: "Not Found" });
       if (pr.merged) return send(405, { message: "Pull Request is not mergeable" });
       if (pr.merge_refusal) return send(405, { message: pr.merge_refusal });
-      if (pr.mergeable_state === "dirty") return send(405, { message: "Pull Request is not mergeable" });
+      if (mergeableState(m[1], m[2], pr) === "dirty") return send(405, { message: "Pull Request is not mergeable" });
       const bare = path.join(root, m[1], `${m[2]}.git`);
       const git = (...args: string[]) => sh(bare, "-c", "user.name=gh", "-c", "user.email=gh@x", ...args).toString().trim();
       const baseSha = git("rev-parse", `refs/heads/${pr.base}`);
@@ -244,10 +259,10 @@ export function startMockGitHub(root: string, login = "kevin") {
       if (body.state) pr.state = body.state;
       return send(200, { number: pr.number, state: pr.state ?? "open", html_url: pr.html_url });
     }
-    if ((m = /^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(p))) {
-      const pr = pulls[Number(m[1]) - 1];
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)$/.exec(p))) {
+      const pr = pulls[Number(m[3]) - 1];
       return pr
-        ? send(200, { state: pr.merged ? "closed" : (pr.state ?? "open"), merged: !!pr.merged, draft: !!pr.draft, mergeable_state: pr.mergeable_state ?? "clean", html_url: pr.html_url, head: { sha: "abc" }, comments: 0, review_comments: 1 })
+        ? send(200, { state: pr.merged ? "closed" : (pr.state ?? "open"), merged: !!pr.merged, draft: !!pr.draft, mergeable_state: mergeableState(m[1], m[2], pr), html_url: pr.html_url, head: { sha: "abc" }, comments: 0, review_comments: 1 })
         : send(404, { message: "Not Found" });
     }
     if (/\/commits\/[^/]+\/check-runs$/.test(p)) {

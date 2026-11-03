@@ -60,7 +60,7 @@ COPY server/src/ ./server/src/
 COPY pi-extension/ ./pi-extension/
 COPY --from=web /app/web/dist ./web/dist
 COPY --from=skills /skills /opt/workbench/skills
-# Workbench-bundled skills (asd-ste100), merged into the same dir pi scans.
+# Workbench-bundled skills (asd-ste100, resolving-merge-conflicts), merged into the same dir pi scans.
 COPY skills/ /opt/workbench/skills/
 COPY --from=typesafe-skill /optional-skills /opt/workbench/optional-skills
 

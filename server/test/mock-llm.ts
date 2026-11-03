@@ -115,6 +115,9 @@ function textOf(content: unknown): string {
  * - tdd (a ticket): commit a line for the ticket (and `git push`, a gated call, if the ticket says
  *   PUSHME) → finish_ticket (blocked if the ticket says BLOCKME) → done
  * - code-review: commit a fix and `git push` it (a gated call) → finish_review → done
+ * - resolving-merge-conflicts: keep both sides of every conflicted hunk in work.txt and commit the
+ *   merge → finish_merge resolved → done; a base side that says GIVEUP is left alone → finish_merge failed,
+ *   and one that says NOFINISH ends the run with no finish_merge call
  */
 function pipelineScript(userText: string, step: number, lastResult: string, conversation = ""): Reply | undefined {
   if (userText.includes('<skill name="grill-with-docs"')) {
@@ -157,6 +160,19 @@ function pipelineScript(userText: string, step: number, lastResult: string, conv
     if (step === 0) return { tool: { name: "bash", args: { command: 'echo reviewed >> work.txt && git add -A && git commit -qm "Fix review findings" && git push -q origin HEAD && echo fixed' } } };
     if (step === 1) return { tool: { name: "finish_review", args: { note: "Fixed one naming issue" } } };
     return { text: "Review done." };
+  }
+  if (userText.includes('<skill name="resolving-merge-conflicts"')) {
+    if (step === 0) {
+      const keepBoth = "grep -v -e '^<<<<<<<' -e '^=======' -e '^>>>>>>>' work.txt > .resolved && mv .resolved work.txt && git add work.txt && git commit -q --no-edit && echo resolved";
+      return { tool: { name: "bash", args: { command: `if grep -q NOFINISH work.txt; then echo "wandered off"; elif grep -q GIVEUP work.txt; then echo "cannot reconcile"; else ${keepBoth}; fi` } } };
+    }
+    if (step === 1 && lastResult.includes("wandered off")) return { text: "I looked at it." };
+    if (step === 1) {
+      return lastResult.includes("cannot reconcile")
+        ? { tool: { name: "finish_merge", args: { status: "failed", note: "Both sides rewrote the last line of work.txt, and only a human can pick one" } } }
+        : { tool: { name: "finish_merge", args: { status: "resolved", note: "kept both sides' lines in work.txt" } } };
+    }
+    return { text: "Merge finished." };
   }
   if (userText.includes('<skill name="tdd"')) {
     const num = /Ticket #(\d+)/.exec(userText)?.[1] ?? "?";
