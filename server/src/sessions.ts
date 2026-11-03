@@ -1356,22 +1356,31 @@ export class SessionManager extends EventEmitter {
    * next review to push to. The phase changes first, so the stopped run's settle moves nothing.
    */
   private async pause(id: string) {
+    const merging = this.onMergeRun(id);
     this.update(id, { phase: "ready", attention: null });
     await this.stop(id);
-    await this.dropRun(id);
+    await this.dropRun(id, merging);
+  }
+
+  /** Whether the run on screen is the merge run: it works, or the card still shows it after a restart. */
+  private onMergeRun(id: string) {
+    const row = this.row(id);
+    return this.resolving.has(id) || (!!row.merge_run && row.merge_run === this.runOf(row));
   }
 
   /**
    * A backward move stopped the live run. The stop rule's clock goes with it (the next run gets a
    * fresh watch), and a half-done merge is undone, so Approve can start again. The worktree says
    * whether a merge is half done: after a restart no merge run is known, but its MERGE_HEAD stays.
+   * When the stopped run was the merge run (`merging`), a merge commit it made is dropped as well.
    */
-  private async dropRun(id: string) {
+  private async dropRun(id: string, merging: boolean) {
     this.unwatch(this.state(id));
     this.resolving.delete(id);
-    const { worktree } = this.row(id);
-    if (await git(worktree, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).then(() => true, () => false))
-      await git(worktree, ["merge", "--abort"], await this.gitEnv()).catch(() => {});
+    const row = this.row(id);
+    if (merging) await this.undoMerge(row);
+    else if (await git(row.worktree, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).then(() => true, () => false))
+      await git(row.worktree, ["merge", "--abort"], await this.gitEnv()).catch(() => {});
   }
 
   /**
@@ -1381,9 +1390,10 @@ export class SessionManager extends EventEmitter {
    * clears the attention.
    */
   private async rework(id: string) {
+    const merging = this.onMergeRun(id);
     this.update(id, { phase: "grill", grill_summary: null, spec: null, rework_tickets: 1 });
     await this.switchRun(id, id, false);
-    await this.dropRun(id);
+    await this.dropRun(id, merging);
     // A ticket the stopped run left `running` is not worked on while the card is in To do.
     for (const t of this.tickets(id)) if (t.status === "running") this.updateTicket(id, t.num, { status: "ready" });
     await this.send(id, reworkPrompt(this.row(id).spec_ref));

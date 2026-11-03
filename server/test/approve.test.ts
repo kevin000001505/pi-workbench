@@ -411,3 +411,20 @@ test("a conflicting PR whose base git cannot merge (no conflicted file) keeps th
   delete pr.mergeable_state;
 });
 
+// Last: the mock reads COMMITHOLD before any other word, and it stays in main's work.txt.
+for (const [column, spec] of [["issues", 167], ["todo", 177]] as const)
+test(`Review → ${column === "issues" ? "Issues" : "To do"} after a merge run committed its resolve but did not call finish_merge drops that merge commit`, { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, worktree, branch } = await toReview(spec);
+  const tip = git(bare, "rev-parse", `refs/heads/${branch}`);
+  pushToBase("COMMITHOLD: main changed this line");
+  assert.equal((await approve(id)).status, 200);
+  await waitFor(async () => (await summary(id)).pending.some((p: any) => p.kind === "decision"), 120_000);
+  assert.ok(!mergeInProgress(worktree), "the merge run committed the merge");
+  assert.notEqual(git(worktree, "rev-parse", "HEAD"), tip);
+
+  const moved = await move(id, column);
+  assert.equal(moved.status, 200, JSON.stringify(moved.json));
+  assert.equal(git(worktree, "rev-parse", "HEAD"), tip);
+  assert.equal(git(worktree, "status", "--porcelain"), "");
+  assert.equal(git(bare, "rev-parse", `refs/heads/${branch}`), tip, "nothing is pushed");
+});
