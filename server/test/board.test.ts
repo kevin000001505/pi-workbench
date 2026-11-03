@@ -493,6 +493,19 @@ test("two moves of one unclaimed card at once make one session: the second is re
   assert.equal((await move()).status, 409);
 });
 
+test("a new session on an issue a card already works on is refused, from the session form as from a move", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.seedSubIssues("kevin", "demo", { number: 110, title: "Claimed", body: "## Solution\nOnce." }, [{ number: 111, title: "Do it", body: "Do it." }]);
+  const create = () => api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Claimed", issueRef: "kevin/demo#110", mode: "pipeline", startFrom: "tickets" });
+  const both = await Promise.all([create(), create()]);
+  assert.deepEqual(both.map((r) => r.status).sort(), [200, 409], JSON.stringify(both.map((r) => r.json)));
+  assert.equal((await api("GET", "/api/sessions")).json.filter((x: any) => x.issueRef === "kevin/demo#110").length, 1);
+  // Claimed now: a later session for it, in another ref form, and a move of its card, are refused too.
+  assert.equal((await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Again", prompt: "work on it", issueRef: "https://github.com/kevin/demo/issues/110" })).status, 409);
+  assert.equal((await api("POST", "/api/repos/kevin/demo/issues/110/move", { column: "doing" })).status, 409);
+  const mine = (await api("GET", "/api/sessions")).json.find((x: any) => x.issueRef === "kevin/demo#110");
+  assert.equal((await api("POST", `/api/sessions/${mine.id}/stop`, {})).status, 200);
+});
+
 /** The board events a WebSocket client hears, from now on. */
 async function boardEvents() {
   const ws = new WebSocket(`${base.replace("http", "ws")}/ws`);

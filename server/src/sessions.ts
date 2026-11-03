@@ -41,7 +41,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { type Column, COLUMNS, columnOf } from "../../shared/board.ts";
+import { type Column, COLUMNS, columnOf, issueNumberOf } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
   configureAutoApprove,
@@ -100,6 +100,9 @@ const autoApproveMode = (v: unknown): AutoApproveMode => {
 export type UiResponse = { value?: string; confirmed?: boolean; cancelled?: boolean };
 
 export type Run = { id: string; label: string };
+
+/** What POST /api/sessions (and an unclaimed card's move) asks SessionManager.create for. */
+export type CreateInput = { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: string };
 
 export type SessionSummary = {
   id: string;
@@ -245,6 +248,8 @@ export class SessionManager extends EventEmitter {
   private approving = new Set<string>();
   /** Sessions whose merge run resolves a conflict now; Approve waits for it to finish. */
   private resolving = new Set<string>();
+  /** Issues (`owner/name#n`) whose new session is being created now. */
+  private claiming = new Set<string>();
 
   constructor(db: Db, secrets: SecretStore, gitEnv: () => Promise<GitEnv>, refreshSsh?: () => void, fetchTicketSeed?: (ref: string) => Promise<TicketSeed>, rescueProxy?: RescueProxy, delivery?: Delivery) {
     super();
@@ -418,9 +423,28 @@ export class SessionManager extends EventEmitter {
     s.loaded = true;
   }
 
-  async create(input: { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: string }) {
+  /**
+   * A new session. One whose issue ref names an issue of its repo claims it: a second session for
+   * an issue that a card works on already (by its issue or spec ref) is refused with 409.
+   */
+  async create(input: CreateInput) {
     const repo = getRepo(this.db, input.repoId);
     if (!repo) throw Object.assign(new Error(`Unknown repo ${input.repoId}`), { status: 404 });
+    const number = issueNumberOf(input.issueRef?.trim() || null, repo.id);
+    if (number === null) return this.createSession(input, repo);
+    const claim = `${repo.id.toLowerCase()}#${number}`;
+    const claimed = this.list().some((s) => s.repoId === repo.id && (issueNumberOf(s.issueRef, repo.id) === number || issueNumberOf(s.specRef, repo.id) === number));
+    if (this.claiming.has(claim) || claimed) throw Object.assign(new Error(`A card already works on issue #${number}.`), { status: 409 });
+    // Held from the check until the session row exists, so a second create for the issue is refused.
+    this.claiming.add(claim);
+    try {
+      return await this.createSession(input, repo);
+    } finally {
+      this.claiming.delete(claim);
+    }
+  }
+
+  private async createSession(input: CreateInput, repo: RepoRow) {
     const autoApprove = autoApproveMode(input.autoApprove);
     // Absent or null means no, as null means inherit for autoApprove.
     if (input.typesafeSkill != null && typeof input.typesafeSkill !== "boolean") {
