@@ -330,6 +330,33 @@ test("unclaimed cards: plain and ticketed spec issues both sit in Issues; a sub-
   assert.deepEqual(boardCards([], cards).map((c) => c.id), ["issue:1", "issue:5"]);
 });
 
+test("a direct session is a card in Doing: with no PR, and even while it sets up", async () => {
+  const { cardOf } = await import("../../shared/board.ts");
+  const src = (mode: string, phase: string, extra: Record<string, unknown> = {}) =>
+    ({ id: "s1", title: "T", mode, phase, attention: null, prNumber: null, prUrl: null, specRef: null, tickets: [], ...extra }) as any;
+  assert.deepEqual(cardOf(src("direct", "direct")), {
+    id: "s1",
+    title: "T",
+    column: "doing",
+    tickets: { done: 0, total: 0 },
+    attention: null,
+    pr: null,
+    specRef: null,
+  });
+  assert.equal(cardOf(src("direct", "setup"))?.column, "doing", "a direct session in setup is in Doing, not To do");
+  // A PR on a direct session keeps the card in Doing, with its badge.
+  const pr = cardOf(src("direct", "direct", { prNumber: 7, prUrl: "https://github.com/me/app/pulls/7" }));
+  assert.equal(pr?.column, "doing");
+  assert.deepEqual(pr?.pr, { number: 7, url: "https://github.com/me/app/pulls/7", state: null });
+  // Pipeline sessions keep their phase's column.
+  assert.equal(cardOf(src("pipeline", "setup"))?.column, "todo");
+  assert.equal(cardOf(src("pipeline", "ready"))?.column, "issues");
+  assert.equal(cardOf(src("pipeline", "implement"))?.column, "doing");
+  assert.equal(cardOf(src("pipeline", "review"))?.column, "qa");
+  assert.equal(cardOf(src("pipeline", "pr"))?.column, "review");
+  assert.equal(cardOf(src("pipeline", "done"))?.column, "done");
+});
+
 test("isPlainUnclaimedCard follows the tickets count, not the column", async () => {
   const { isPlainUnclaimedCard } = await import("../../shared/board.ts");
   const card = (id: string, total: number) => ({ id, column: "issues" as const, tickets: { done: 0, total } });

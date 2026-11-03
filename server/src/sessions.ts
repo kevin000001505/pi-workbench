@@ -528,8 +528,8 @@ export class SessionManager extends EventEmitter {
       await this.send(id, input.prompt);
     }
     this.emitSummary(id);
-    // A pipeline session is a new card on its repo's board.
-    if (mode === "pipeline") this.emit("board", repo.id);
+    // A new session is a new card on its repo's board (a direct session is a card in Doing).
+    this.emit("board", repo.id);
     return this.summary(id);
   }
 

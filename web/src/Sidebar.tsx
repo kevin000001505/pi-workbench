@@ -42,7 +42,7 @@ export function Sidebar({ route, onClose }: { route: Route; onClose: () => void 
     api.get<Repo[]>("/api/repos").then(setRepos, () => {});
   }, [route.page]);
   const boardRepo = route.page === "board" ? (route.repoId ?? lastBoardRepo() ?? repos[0]?.id) : null;
-  const cardCount = (repoId: string) => all.filter((s) => s.repoId === repoId && s.mode === "pipeline").length;
+  const cardCount = (repoId: string) => all.filter((s) => s.repoId === repoId).length;
   const direct = all.filter((s) => s.mode === "direct").length;
 
   return (

@@ -79,7 +79,7 @@ The kanban view of the workbench's features, with one column per stage of the pi
 _Avoid_: kanban (the style, not the thing), dashboard
 
 **Card**:
-One feature on the board: a plain issue (solved or split), or a spec issue with its open tickets, and the one session and one PR that deliver it.
+One feature on the board: a pipeline session, a direct session, or an unclaimed card (a plain issue or a spec issue with its open tickets), and the PR that delivers it.
 _Avoid_: task (kanzo's word), ticket (a ticket is one part of a card)
 
 **To do**:
