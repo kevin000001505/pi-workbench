@@ -100,6 +100,20 @@
 .kz-tag.pr-open .dot { background: #2f9e44; }
 .kz-tag.pr-checks .dot { background: #e8a317; }
 .kz-tag.pr-conflict { color: var(--kz-danger); }
+/* A merged PR (a Done card): purple, as GitHub shows it. */
+.kz-tag.pr-merged .dot { background: #8250df; }
+/* The note after a resolved merge conflict asks for a second Approve; it is not an error. */
+.kz-detail-attention.info { background: var(--kz-hover); color: var(--kz-text); }
+/* A refused move or a failed load: over the board, so the layout does not shift. */
+.kz-board { position: relative; }
+.kz-error {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 30;
+  max-width: min(640px, calc(100vw - 32px)); display: flex; align-items: flex-start; gap: 10px;
+  background: var(--kz-bg); color: var(--kz-danger); border: 1px solid var(--kz-border); border-radius: 12px;
+  padding: 8px 10px 8px 14px; box-shadow: 0 8px 24px rgba(0, 0, 0, .15); overflow-wrap: anywhere;
+}
+.kz-error button { flex: none; border: 0; background: none; color: var(--kz-muted); padding: 0 4px; }
+.kz-error button:hover { color: var(--kz-text); }
 .kz-empty {
   margin: auto; text-align: center; color: var(--kz-muted); max-width: 380px; padding: 40px 20px;
 }

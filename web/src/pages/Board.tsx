@@ -9,6 +9,7 @@ const unclaimedIssue = (card: Card) => {
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import { approveQuestion, CardDetail } from "./CardDetail.tsx";
+import { isResolvedNote } from "../session/PipelinePanel.tsx";
 import { matches, NewCard, Search, typingIn, wordsOf } from "./BoardDialogs.tsx";
 import type { Repo } from "../types.ts";
 import "../board.css";
@@ -91,6 +92,8 @@ function Icon({ name }: { name: keyof typeof ICONS }) {
 function BoardCard({ card, activity, onDrag, onOpen }: { card: Card; activity: string; onDrag: (card: Card | null) => void; onOpen: () => void }) {
   const issue = unclaimedIssue(card);
   const unclaimed = issue !== null;
+  // A string, not PrState: the badge styles every state the server sends, "merged" included.
+  const prState: string | null = card.pr?.state ?? null;
   const line = card.attention ?? (unclaimed ? `Spec issue #${issue}: drag it to Doing to solve its tickets, or to To do to rework it` : activity);
   return (
     // A click opens the card detail; a modified click still opens the session in a new tab.
@@ -121,13 +124,13 @@ function BoardCard({ card, activity, onDrag, onOpen }: { card: Card; activity: s
           </span>
         )}
       </div>
-      {line && <span className={`desc ${card.attention ? "attention" : ""}`}>{line}</span>}
+      {line && <span className={`desc ${card.attention && !isResolvedNote(card.attention) ? "attention" : ""}`}>{line}</span>}
       {card.pr && (
         <span className="tags">
-          <span className={`kz-tag ${card.pr.state ? `pr-${card.pr.state}` : ""}`} title={card.pr.url ?? undefined}>
+          <span className={`kz-tag ${prState ? `pr-${prState}` : ""}`} title={card.pr.url ?? undefined}>
             <span className="dot" />
             PR #{card.pr.number}
-            {card.pr.state ? ` · ${card.pr.state}` : ""}
+            {prState ? ` · ${prState}` : ""}
           </span>
         </span>
       )}
@@ -255,8 +258,8 @@ export function Board({ repoId }: { repoId?: string }) {
       <header className="kz-header">
         <div className="info">
           <h1>{repo?.name ?? "Board"}</h1>
-          {cards && <span className="sub">{`${cards.length} card${cards.length === 1 ? "" : "s"}`}</span>}
-          {error && <span className="sub">{error}</span>}
+          {/* Every card, the Done cards behind "Show more" included, as the Done column counts them. */}
+          {cards && <span className="sub">{`${cards.length + doneHidden} card${cards.length + doneHidden === 1 ? "" : "s"}`}</span>}
           {repo && (
             <a className="repo-link" href={`https://github.com/${repo.id}`} target="_blank" rel="noopener" title={`Open ${repo.id} on GitHub`}>
               <Icon name="github" />
@@ -292,6 +295,15 @@ export function Board({ repoId }: { repoId?: string }) {
           </div>
         )}
       </header>
+      {/* Over the board, not in the header, so a long refusal does not push the columns down. */}
+      {error && (
+        <div className="kz-error" role="alert">
+          <span>{error}</span>
+          <button onClick={() => setError(null)} aria-label="Dismiss">
+            ✕
+          </button>
+        </div>
+      )}
       <div className="kz-columns">
         {COLUMNS.map((col) => {
           const list = byColumn.get(col.id) ?? [];
