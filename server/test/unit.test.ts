@@ -242,10 +242,10 @@ test("pipeline: ticket validation, frontier order and prompts", async () => {
 test("ticketsFromSubIssues maps open sub-issues to tickets with remapped edges", async () => {
   const { ticketsFromSubIssues, validateTickets } = await import("../src/pipeline.ts");
   const out = ticketsFromSubIssues([
-    { number: 40, title: "C", body: "c", blockedBy: [37, 38] },
-    { number: 37, title: "A", body: "a", blockedBy: [] },
-    { number: 38, title: "B", body: "b", blockedBy: [37] },
-    { number: 41, title: "D", body: "  ", blockedBy: [99] }, // 99 is not a sub-issue; the body is empty
+    { number: 40, title: "C", body: "c", url: "u40", blockedBy: [37, 38] },
+    { number: 37, title: "A", body: "a", url: "u37", blockedBy: [] },
+    { number: 38, title: "B", body: "b", url: "u38", blockedBy: [37] },
+    { number: 41, title: "D", body: "  ", url: "u41", blockedBy: [99] }, // 99 is not a sub-issue; the body is empty
   ]);
   assert.deepEqual(out, [
     { number: 1, title: "A", body: "a", blockedBy: [], trackerRef: "37" },
@@ -260,8 +260,8 @@ test("ticketsFromSubIssues maps open sub-issues to tickets with remapped edges",
     () =>
       validateTickets(
         ticketsFromSubIssues([
-          { number: 1, title: "A", body: "a", blockedBy: [2] },
-          { number: 2, title: "B", body: "b", blockedBy: [1] },
+          { number: 1, title: "A", body: "a", url: "u1", blockedBy: [2] },
+          { number: 2, title: "B", body: "b", url: "u2", blockedBy: [1] },
         ]),
       ),
     /cycle/,

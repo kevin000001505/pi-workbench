@@ -105,7 +105,7 @@ export type UiResponse = { value?: string; confirmed?: boolean; cancelled?: bool
 export type Run = { id: string; label: string };
 
 /** What POST /api/sessions (and an unclaimed card's move) asks SessionManager.create for. */
-export type CreateInput = { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: StartFrom };
+export type CreateInput = { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: StartFrom; soloTicket?: number };
 
 export type SessionSummary = {
   id: string;
@@ -137,6 +137,8 @@ export type SessionSummary = {
   doneAt: number | null;
   /** The GitHub issue this session solves, e.g. `owner/name#123`; null for plain sessions. */
   issueRef: string | null;
+  /** The ticket Solve one ticket runs now; null for a card running every ticket (Solve all) or none. */
+  soloTicket: number | null;
   /** The session's own auto-approve setting, and whether auto-approve is in effect for it now. */
   autoApprove: AutoApproveMode;
   autoApproveActive: boolean;
@@ -355,6 +357,7 @@ export class SessionManager extends EventEmitter {
       reviewNote: row.review_note,
       doneAt: row.done_at,
       issueRef: row.issue_ref,
+      soloTicket: row.solo_ticket ?? null,
       autoApprove: autoApproveMode(row.auto_approve),
       autoApproveActive: this.autoApproveActive(row),
       typesafeSkill: row.typesafe_skill === 1,
@@ -507,10 +510,10 @@ export class SessionManager extends EventEmitter {
     const heldPhase = held ? (plan ? plan.phase : mode === "pipeline" ? "grill" : "direct") : null;
     this.db
       .prepare(
-        `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt, mode, phase, active_run, issue_ref, auto_approve, typesafe_skill, spec, spec_ref, held_phase)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt, mode, phase, active_run, issue_ref, auto_approve, typesafe_skill, spec, spec_ref, held_phase, solo_ticket)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup ? held : null, mode, phase, id, issueRef, autoApprove === "inherit" ? null : autoApprove, typesafe ? 1 : 0, plan?.spec ? (seed?.spec.body ?? null) : null, startFrom ? (seed?.spec.htmlUrl ?? null) : null, needsSetup ? heldPhase : null);
+      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup ? held : null, mode, phase, id, issueRef, autoApprove === "inherit" ? null : autoApprove, typesafe ? 1 : 0, plan?.spec ? (seed?.spec.body ?? null) : null, startFrom ? (seed?.spec.htmlUrl ?? null) : null, needsSetup ? heldPhase : null, input.soloTicket ?? null);
     const s = this.state(id);
     s.loaded = true;
     await this.start(id);
@@ -1241,9 +1244,60 @@ export class SessionManager extends EventEmitter {
     await this.send(id, reviewPrompt(row.base_branch, row.spec, row.spec_ref, this.tickets(id)));
   }
 
-  /** Start the next unblocked ticket in a fresh run, or move on to the review. */
-  private async runNext(id: string) {
+  /**
+   * Solve one ticket: run only that ticket in the card's session, then pause the card in Issues
+   * when it is done (`runNext` reads the solo column). Only a card in `ready` (Issues, no run
+   * going) is accepted, with a ticket that is not done or blocked and has every blocker done;
+   * a ticket a stopped run left `running` counts as ready and starts a fresh run, as Solve all does.
+   */
+  async solveTicket(id: string, num: number): Promise<SessionSummary> {
+    const row = this.row(id);
+    if (row.mode !== "pipeline") throw Object.assign(new Error("Not a pipeline session"), { status: 409 });
+    if (row.phase !== "ready") {
+      const why = ["implement", "review", "retro", "pr"].includes(row.phase)
+        ? "The card runs now"
+        : row.phase === "done"
+          ? "The card is done"
+          : "The card is still being planned";
+      throw Object.assign(new Error(why), { status: 409 });
+    }
     const tickets = this.tickets(id);
+    const t = tickets.find((x) => x.num === num);
+    if (!t) throw Object.assign(new Error(`No ticket #${num}`), { status: 409 });
+    if (t.status === "done") throw Object.assign(new Error(`Ticket #${num} is done`), { status: 409 });
+    if (t.status === "blocked") throw Object.assign(new Error(`Ticket #${num} is blocked`), { status: 409 });
+    const done = new Set(tickets.filter((x) => x.status === "done").map((x) => x.num));
+    const open = t.blockedBy.filter((b) => !done.has(b));
+    if (open.length) throw Object.assign(new Error(`Ticket #${num} is blocked by ${open.map((b) => `#${b}`).join(", ")}`), { status: 409 });
+    if (t.status === "running") this.updateTicket(id, num, { status: "ready" });
+    this.update(id, { solo_ticket: num, phase: "implement", attention: null });
+    await this.runTicket(id, t);
+    return this.summary(id);
+  }
+
+  /**
+   * Start the next unblocked ticket in a fresh run, or move on to the review. With a solo
+   * ticket set, the card pauses in Issues when that ticket is done, instead of going on; every
+   * ticket done goes on to the review, as Solve all does. A retry re-runs the solo ticket, not
+   * the lowest ready one, while the column is set.
+   */
+  private async runNext(id: string) {
+    const row = this.row(id);
+    const tickets = this.tickets(id);
+    if (row.solo_ticket !== null) {
+      const solo = tickets.find((t) => t.num === row.solo_ticket);
+      if (!solo || solo.status === "done") {
+        this.update(id, { solo_ticket: null });
+        if (allDone(tickets)) {
+          await this.startReview(id);
+          return;
+        }
+        this.update(id, { phase: "ready", attention: null });
+        return;
+      }
+      await this.runTicket(id, solo);
+      return;
+    }
     if (allDone(tickets)) {
       await this.startReview(id);
       return;
@@ -1257,6 +1311,11 @@ export class SessionManager extends EventEmitter {
       this.flag(id, `No ticket can start: ${why} (${blocked}).`);
       return;
     }
+    await this.runTicket(id, t);
+  }
+
+  /** A fresh run for one ticket, as the pipeline starts it. */
+  private async runTicket(id: string, t: Ticket) {
     const runId = `${id}-t${t.num}-${Date.now().toString(36)}`;
     // The commit the ticket's first run started from: a rescue's diff starts there.
     const startCommit = this.db.prepare("SELECT start_commit FROM tickets WHERE session_id = ? AND num = ?").get(id, t.num) as { start_commit: string | null };
@@ -1373,7 +1432,8 @@ export class SessionManager extends EventEmitter {
    */
   private async pause(id: string) {
     const merging = this.onMergeRun(id);
-    this.update(id, { phase: "ready", attention: null });
+    // A backward move or the pipeline's Stop clears the solo ticket: a later Solve all runs everything.
+    this.update(id, { phase: "ready", attention: null, solo_ticket: null });
     await this.stop(id);
     await this.dropRun(id, merging);
   }
@@ -1411,7 +1471,7 @@ export class SessionManager extends EventEmitter {
    */
   private async rework(id: string) {
     const merging = this.onMergeRun(id);
-    this.update(id, { phase: "grill", grill_summary: null, spec: null, rework_tickets: 1 });
+    this.update(id, { phase: "grill", grill_summary: null, spec: null, rework_tickets: 1, solo_ticket: null });
     await this.switchRun(id, id, false);
     await this.dropRun(id, merging);
     // A ticket the stopped run left `running` is not worked on while the card is in To do.
@@ -1421,9 +1481,9 @@ export class SessionManager extends EventEmitter {
 
   /** Solve all: the paused session implements its tickets, one fresh run each. */
   private async solveAll(id: string) {
-    // A ticket a stopped run left `running` starts again.
+    // A ticket a stopped run left `running` starts again. The solo ticket goes: every ticket runs.
     for (const t of this.tickets(id)) if (t.status === "running") this.updateTicket(id, t.num, { status: "ready" });
-    this.update(id, { phase: "implement" });
+    this.update(id, { phase: "implement", solo_ticket: null });
     await this.runNext(id);
   }
 

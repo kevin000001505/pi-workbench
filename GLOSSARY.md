@@ -20,6 +20,14 @@ _Avoid_: sub-issue
 The move of a card from Issues to Doing (for an unclaimed card, it creates the session): one pipeline session reads every open ticket sub-issue with its blocking edges from GitHub, skips grill/spec/tickets, implements the tickets one fresh run at a time in dependency order, and opens a PR whose merge closes the spec issue and every ticket issue.
 _Avoid_: solve all issues (that is the Start session flow, one session per issue)
 
+**Solve one ticket**:
+The Solve button on a ticket row of a spec card's detail: the card's session runs only that ticket, in a fresh run, and when the ticket is done the card pauses back in Issues (for example 1/3 done). When the last ticket is done, the card goes on to the review and the PR. A Solve on a sub-issue row of an unclaimed spec card's detail creates the spec's session and runs only that sub-issue, as its solo ticket.
+_Avoid_: Solve (that is for a plain issue), Solve all (that is the board card's button; it is the move that is **Solve all tickets**)
+
+**Solo ticket**:
+The one ticket a card runs on a Solve one ticket, kept in the session while it is set: when the ticket is done the card pauses back in Issues instead of going on to the next ticket. Solve all, a backward move, and Stop clear it.
+_Avoid_: single ticket, one ticket, solo run
+
 **SSH host**:
 A remote machine registered in the workbench's SSH config, addressed by an alias you can say ("Media"); the agent reaches it with `ssh <alias>` and works code on it from there.
 _Avoid_: server (that's the workbench's own server), VM (the transport is plain ssh; the target need not be a VM), machine (too generic; could mean the box the workbench runs on)
@@ -132,6 +140,7 @@ _Avoid_: stop (a stop pauses the card; the card can resume), delete, cancel
 - A **Card** from a pipeline session moves through the columns as its phase changes; the user's drag outranks the pipeline
 - A **Card** from a direct session sits in **Doing** always; every drag of it is refused
 - Dragging a **Card** from **Issues** to **Doing** starts **Solve** (a plain issue) or **Solve all** (a spec issue or a ready session); dragging it from **Review** to **Done** is **Approve**; any other forward drag is refused
+- A **Solve one ticket** run on a spec card pauses the card in **Issues** when its ticket is done; **Solve all**, a backward drag, and Stop clear the pause, and **Solve all** runs every remaining ticket
 - Dragging a plain **Card** in **Issues** to **To do** is **Split**: the issue is cut into ticket sub-issues before any work starts
 - Dragging a **Card** back to **Issues** stops its run; dragging it to **Doing** again resumes the same session, and finished tickets stay finished
 - Dragging a **Card** back to **To do** stops its run and opens the grill again, so the spec and tickets can change

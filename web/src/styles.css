@@ -600,6 +600,44 @@ select.input {
   font-size: 13px;
   color: var(--muted);
 }
+/* The Sessions page's sections (Cards, and the direct sessions): a heading, then the list. */
+.page > section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.card-list-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  color: var(--text);
+  text-decoration: none;
+  transition:
+    border-color 0.15s,
+    transform 0.15s;
+}
+.card-list-row:hover {
+  border-color: var(--line-2);
+  transform: translateY(-1px);
+  text-decoration: none;
+}
+/* The title fills the row and truncates; the run label truncates too, so long ticket titles do not break the row. */
+.card-list-row h3 {
+  flex: 1;
+  min-width: 0;
+}
+.card-list-row .row.gap span.mono {
+  min-width: 0;
+}
 .empty {
   text-align: center;
   padding: 60px 20px;

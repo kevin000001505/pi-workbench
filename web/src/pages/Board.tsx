@@ -115,8 +115,7 @@ function BoardCard({
       : activity);
   return (
     // A click opens the card detail; a modified click still opens the session in a new tab.
-    // A spec unclaimed card has no session yet: a click opens its spec issue on GitHub.
-    // A plain unclaimed card opens its issue in the card detail; a modified click opens GitHub.
+    // An unclaimed card (plain or spec) opens its issue on GitHub with a modified click.
     <a
       className="kz-card"
       href={unclaimed ? (card.specRef ?? undefined) : `#/session/${card.id}`}
@@ -130,7 +129,7 @@ function BoardCard({
       }}
       onDragEnd={() => onDrag(null)}
       onClick={(e) => {
-        if ((unclaimed && !plain) || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
         e.preventDefault();
         onOpen();
       }}
@@ -289,10 +288,7 @@ export function Board({ repoId }: { repoId?: string }) {
     return m;
   }, [cards, filter]);
 
-  // A spec unclaimed card has no session, so no card detail; a plain unclaimed card gets one.
-  const open = openId
-    ? (cards ?? []).find((c) => c.id === openId && (unclaimedNumber(c.id) === null || isPlainUnclaimedCard(c)))
-    : undefined;
+  const open = openId ? (cards ?? []).find((c) => c.id === openId) : undefined;
   const closeDetail = useCallback(() => setOpenId(null), []);
 
   if (repos && repos.length === 0) {
@@ -426,10 +422,7 @@ export function Board({ repoId }: { repoId?: string }) {
           onClose={() => setSearching(false)}
           onPick={(id) => {
             setSearching(false);
-            const picked = (cards ?? []).find((c) => c.id === id);
-            // A spec unclaimed card opens its issue on GitHub; a plain one opens its card detail.
-            if (picked && unclaimedNumber(picked.id) !== null && !isPlainUnclaimedCard(picked)) window.open(picked.specRef ?? undefined, "_blank", "noopener");
-            else setOpenId(id);
+            setOpenId(id);
           }}
         />
       )}

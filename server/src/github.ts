@@ -142,13 +142,13 @@ export class GitHub {
       url: string;
       parent: { number: number } | null;
       subIssues: {
-        nodes: { number: number; title: string; body: string | null; state: string; blockedBy: { nodes: { number: number; state: string }[] } }[];
+        nodes: { number: number; title: string; body: string | null; state: string; url: string; blockedBy: { nodes: { number: number; state: string }[] } }[];
       };
     };
     const q = `query($owner: String!, $name: String!, $number: Int!) {
       repository(owner: $owner, name: $name) { issue(number: $number) {
         number title body url parent { number }
-        subIssues(first: 100) { nodes { number title body state blockedBy(first: 100) { nodes { number state } } } }
+        subIssues(first: 100) { nodes { number title body state url blockedBy(first: 100) { nodes { number state } } } }
       } }
     }`;
     return this.gq<{ repository: { issue: GqIssue | null } }>(q, { owner, name, number }).then((d) => {
@@ -162,6 +162,7 @@ export class GitHub {
           number: n.number,
           title: n.title,
           body: n.body,
+          url: n.url,
           blockedBy: n.blockedBy.nodes.filter((b) => openNumbers.has(b.number)).map((b) => b.number),
         })),
       };

@@ -243,6 +243,7 @@ export function startMockGitHub(root: string, login = "kevin") {
                   title: s.title,
                   body: s.body,
                   state: s.state ?? "OPEN",
+                  url: `https://github.com/${variables.owner}/${variables.name}/issues/${s.number}`,
                   blockedBy: { nodes: (s.blockedBy ?? []).map((n: number) => ({ number: n, state: "OPEN" })) },
                 })),
               },

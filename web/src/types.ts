@@ -79,6 +79,8 @@ export type SessionSummary = {
   reviewNote: string | null;
   doneAt: number | null;
   issueRef: string | null;
+  /** The ticket Solve one ticket runs now; null for a card running every ticket (Solve all) or none. */
+  soloTicket: number | null;
   /** The session's own auto-approve setting, and whether auto-approve is in effect for it now. */
   autoApprove: AutoApproveMode;
   autoApproveActive: boolean;
@@ -130,7 +132,13 @@ export type GhIssueWithComments = GhIssueDetail & { comments: GhIssueComment[] }
 /** A spec issue and its open ticket sub-issues, from the /tickets endpoint of the detail route. */
 export type GhTicketSeed = {
   spec: { number: number; title: string; body: string | null; htmlUrl: string };
-  subIssues: { number: number; title: string; body: string | null; blockedBy: number[] }[];
+  subIssues: { number: number; title: string; body: string | null; url: string; blockedBy: number[] }[];
+};
+
+/** The spec and its open ticket sub-issues, from GET /api/repos/:owner/:name/issues/:number/tickets. */
+export type UnclaimedSpecTickets = {
+  spec: { number: number; title: string; url: string };
+  subIssues: { number: number; title: string; url: string; blockedBy: number[] }[];
 };
 
 export type Skill = { name: string; description: string; source: "global" | "repo"; manualOnly: boolean };

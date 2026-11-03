@@ -90,6 +90,19 @@ const board = async (repo = "kevin/demo") => {
 };
 const columnOf = async (id: string) => (await board()).find((c) => c.id === id)?.column;
 
+/** The column a session card sits in on a repo's board, for a repo other than the demo's. */
+const columnOfCard = (repoId: string) => async (id: string) => (await board(repoId)).find((c) => c.id === id)?.column;
+
+/**
+ * The ticket run starts the mock model got for one ticket: requests whose last message is that
+ * ticket's start prompt. The mock repeats the whole history in every request of a run, so a later
+ * step of the run does not match, and a run that started once counts once.
+ */
+const ticketRunStarts = (num: number) => mock.requests.filter((r) => {
+  const last = (r.messages ?? []).at(-1);
+  return last?.role === "user" && JSON.stringify(last).includes(`Ticket #${num}: `);
+}).length;
+
 after(async () => {
   await mock.close();
   await gh.close();
@@ -851,6 +864,431 @@ test("a card's spec issue, in any ref form to-spec gives, is claimed: no unclaim
   }
   // #83 is in another repo's ref, so this repo's #83 stays unclaimed; the plain issues show too.
   assert.deepEqual(await unclaimed(), ["issue:1", "issue:2", "issue:3", "issue:83"]);
+});
+
+test("Solve is refused: an open blocker (409, named), a card not in ready (409), and a done or blocked ticket", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "solo2");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/solo2" })).status, 200);
+  const col = columnOfCard("kevin/solo2");
+
+  // A card still being planned (To do) is refused.
+  const planned = (await api("POST", "/api/sessions", { repoId: "kevin/solo2", title: "Planned", prompt: "add a plan" })).json;
+  assert.equal(planned.phase, "setup");
+  assert.equal(await col(planned.id), "todo");
+  const plannedRefused = await api("POST", `/api/sessions/${planned.id}/tickets/1/solve`, {});
+  assert.equal(plannedRefused.status, 409, JSON.stringify(plannedRefused.json));
+
+  // A full pipeline card: grill → spec → tickets → ready, with the mock's three tickets
+  // (1: PUSHME, 2: blocked by 1, 3: BLOCKME and blocked by 1).
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/solo2", title: "Refused", prompt: "add a refusal" })).json;
+  await answerNext(s.id, /shared understanding/);
+  await waitFor(async () => (await summary(s.id)).phase === "spec");
+  await answerNext(s.id, /seam/);
+  await waitFor(async () => (await summary(s.id)).phase === "tickets");
+  await answerNext(s.id, /Approve/);
+  await waitFor(async () => (await summary(s.id)).phase === "ready");
+  assert.equal(await col(s.id), "issues");
+
+  // A ticket with an open blocker is refused, and the blocker is named.
+  const refused = await api("POST", `/api/sessions/${s.id}/tickets/2/solve`, {});
+  assert.equal(refused.status, 409, JSON.stringify(refused.json));
+  assert.match(refused.json.error, /blocked by #1/);
+
+  // While ticket 1 runs, the card is not in ready: Solve is refused.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/tickets/1/solve`, {})).status, 200);
+  const perm = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  const refusedNow = await api("POST", `/api/sessions/${s.id}/tickets/2/solve`, {});
+  assert.equal(refusedNow.status, 409, JSON.stringify(refusedNow.json));
+  assert.match(refusedNow.json.error, /runs now/);
+  assert.equal((await api("POST", `/api/sessions/${s.id}/respond`, { requestId: perm.id, value: perm.options[0] })).status, 200);
+  await waitFor(async () => (await summary(s.id)).phase === "ready");
+  // A done ticket is refused.
+  const doneRefused = await api("POST", `/api/sessions/${s.id}/tickets/1/solve`, {});
+  assert.equal(doneRefused.status, 409, JSON.stringify(doneRefused.json));
+  assert.match(doneRefused.json.error, /is done/);
+  // Ticket 3 blocks: the card flags in Doing, and Solve of it is refused there too.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/tickets/3/solve`, {})).status, 200);
+  await waitFor(async () => (await summary(s.id)).attention);
+  assert.equal(await col(s.id), "doing");
+  const blockedRefused = await api("POST", `/api/sessions/${s.id}/tickets/3/solve`, {});
+  assert.equal(blockedRefused.status, 409, JSON.stringify(blockedRefused.json));
+  // A blocked ticket on a card in Issues is refused for being blocked.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/move`, { column: "issues" })).status, 200);
+  await waitFor(async () => (await summary(s.id)).phase === "ready");
+  const blockedRefused2 = await api("POST", `/api/sessions/${s.id}/tickets/3/solve`, {});
+  assert.equal(blockedRefused2.status, 409, JSON.stringify(blockedRefused2.json));
+  assert.match(blockedRefused2.json.error, /is blocked$/);
+  // An unknown ticket number is refused too.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/tickets/9/solve`, {})).status, 409);
+  await api("POST", `/api/sessions/${planned.id}/stop`, {});
+  await api("POST", `/api/sessions/${s.id}/stop`, {});
+});
+
+test("Solve one ticket on a ready card runs only that ticket, then pauses the card in Issues", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "solo1");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/solo1" })).status, 200);
+  const col = columnOfCard("kevin/solo1");
+  gh.seedSubIssues("kevin", "solo1", { number: 1, title: "Solo one", body: "## Solution\nones.txt says One." }, [
+    { number: 2, title: "Write ones.txt", body: "Create ones.txt containing One. PUSHME" },
+    { number: 3, title: "Test ones.txt", body: "Test it.", blockedBy: [2] },
+    { number: 4, title: "Push ones.txt", body: "Push it.", blockedBy: [3] },
+  ]);
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/solo1", title: "Solo one", issueRef: "kevin/solo1#1", mode: "pipeline", startFrom: "tickets" })).json;
+  // Setup runs in To do, then the first ticket runs in Doing; its `git push` waits on a permission.
+  const perm = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  assert.equal(await col(s.id), "doing");
+  // A move back to Issues stops the run: ticket 1 is left `running`, tickets 2 and 3 wait.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/move`, { column: "issues" })).status, 200);
+  await waitFor(async () => (await summary(s.id)).status === "stopped");
+  const paused = await summary(s.id);
+  assert.equal(paused.phase, "ready");
+  assert.deepEqual(paused.tickets.map((t: any) => t.status), ["running", "ready", "ready"]);
+  const firstRun = paused.tickets[0].runId;
+  const t1Runs = ticketRunStarts(1);
+  const t2Runs = ticketRunStarts(2);
+  const t3Runs = ticketRunStarts(3);
+
+  // Solve ticket 1: the card goes to Doing and the ticket a stopped run left `running` gets a fresh run.
+  const solve = await api("POST", `/api/sessions/${s.id}/tickets/1/solve`, {});
+  assert.equal(solve.status, 200, JSON.stringify(solve.json));
+  assert.equal(solve.json.phase, "implement");
+  assert.equal(await col(s.id), "doing");
+  const running = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.tickets[0].status === "running" && x.activeRun === x.tickets[0].runId ? x : undefined;
+  });
+  assert.notEqual(running.tickets[0].runId, firstRun, "a fresh run for the stopped ticket");
+  // Only ticket 1 runs: tickets 2 and 3 do not start.
+  const perm2 = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  assert.equal((await api("POST", `/api/sessions/${s.id}/respond`, { requestId: perm2.id, value: perm2.options[0] })).status, 200);
+  // When ticket 1 is done, the card pauses in Issues: 1 of 3 done, no attention, the solo ticket cleared.
+  const back = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.phase === "ready" ? x : undefined;
+  });
+  assert.equal(await col(s.id), "issues");
+  assert.equal(back.soloTicket, null);
+  assert.equal(back.attention, null);
+  assert.deepEqual(back.tickets.map((t: any) => t.status), ["done", "ready", "ready"]);
+  assert.equal(ticketRunStarts(1), t1Runs + 1, "the solved ticket ran once more");
+  assert.equal(ticketRunStarts(2), t2Runs, "ticket 2 did not start");
+  assert.equal(ticketRunStarts(3), t3Runs, "ticket 3 did not start");
+  await api("POST", `/api/sessions/${s.id}/stop`, {});
+});
+
+test("Solve all after a solved ticket runs only the other tickets, then review and PR", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "solo3");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/solo3" })).status, 200);
+  const col = columnOfCard("kevin/solo3");
+  gh.seedSubIssues("kevin", "solo3", { number: 1, title: "Solo three", body: "## Solution\nthree.txt says Three." }, [
+    { number: 2, title: "Write three.txt", body: "Create three.txt containing Three. PUSHME" },
+    { number: 3, title: "Test three.txt", body: "Test it.", blockedBy: [2] },
+    { number: 4, title: "More three.txt", body: "More.", blockedBy: [2] },
+  ]);
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/solo3", title: "Solo three", issueRef: "kevin/solo3#1", mode: "pipeline", startFrom: "tickets" })).json;
+  const perm = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  assert.equal((await api("POST", `/api/sessions/${s.id}/move`, { column: "issues" })).status, 200);
+  await waitFor(async () => (await summary(s.id)).status === "stopped");
+  // Solve the first ticket on the paused card; it runs to done and the card pauses in Issues.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/tickets/1/solve`, {})).status, 200);
+  const perm2 = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  await api("POST", `/api/sessions/${s.id}/respond`, { requestId: perm2.id, value: perm2.options[0] });
+  await waitFor(async () => (await summary(s.id)).phase === "ready");
+  assert.equal(await col(s.id), "issues");
+  const t1Runs = ticketRunStarts(1);
+  const t2Runs = ticketRunStarts(2);
+  const t3Runs = ticketRunStarts(3);
+
+  // Solve all (a move to Doing) runs the other tickets; ticket 1 does not run again.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/move`, { column: "doing" })).status, 200);
+  const review = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.phase === "review" && x.pending.some((p: any) => p.kind === "permission") ? x : undefined;
+  });
+  assert.deepEqual(review.tickets.map((t: any) => t.status), ["done", "done", "done"]);
+  assert.equal(ticketRunStarts(1), t1Runs, "the solved ticket never ran again");
+  assert.ok(ticketRunStarts(2) > t2Runs, "ticket 2 ran");
+  assert.ok(ticketRunStarts(3) > t3Runs, "ticket 3 ran");
+  // The review's `git push` waits on a permission; the PR opens after it.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/respond`, { requestId: review.pending.find((p: any) => p.kind === "permission").id, value: "Allow" })).status, 200);
+  await waitFor(async () => (await summary(s.id)).phase === "pr");
+  assert.equal(await col(s.id), "review");
+  assert.equal((await summary(s.id)).prNumber, gh.pulls.at(-1).number);
+  await api("POST", `/api/sessions/${s.id}/stop`, {});
+});
+
+test("Solve of the last open ticket goes on to review and PR without another call", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "solo4");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/solo4" })).status, 200);
+  const col = columnOfCard("kevin/solo4");
+  gh.seedSubIssues("kevin", "solo4", { number: 1, title: "Solo last", body: "## Solution\nlast.txt says Last." }, [
+    { number: 2, title: "Write last.txt", body: "Create last.txt containing Last. PUSHME" },
+    { number: 3, title: "Check last.txt", body: "Check it." },
+  ]);
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/solo4", title: "Solo last", issueRef: "kevin/solo4#1", mode: "pipeline", startFrom: "tickets" })).json;
+  const perm = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  assert.equal((await api("POST", `/api/sessions/${s.id}/move`, { column: "issues" })).status, 200);
+  await waitFor(async () => (await summary(s.id)).status === "stopped");
+  // Solve the first ticket; the card pauses in Issues with 1 of 2 done.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/tickets/1/solve`, {})).status, 200);
+  const perm2 = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  await api("POST", `/api/sessions/${s.id}/respond`, { requestId: perm2.id, value: perm2.options[0] });
+  await waitFor(async () => (await summary(s.id)).phase === "ready");
+  assert.equal((await summary(s.id)).tickets[0].status, "done");
+  // Solve the last open ticket: when it is done, the card goes on to review and PR on its own.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/tickets/2/solve`, {})).status, 200);
+  const review = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.phase === "review" ? x.pending.find((p: any) => p.kind === "permission") : undefined;
+  });
+  const reviewSum = await summary(s.id);
+  assert.deepEqual(reviewSum.tickets.map((t: any) => t.status), ["done", "done"]);
+  assert.ok(review, "the review's git push waits");
+  await api("POST", `/api/sessions/${s.id}/respond`, { requestId: review.id, value: "Allow" });
+  await waitFor(async () => (await summary(s.id)).phase === "pr");
+  assert.equal(await col(s.id), "review");
+  assert.ok((await summary(s.id)).prNumber);
+  await api("POST", `/api/sessions/${s.id}/stop`, {});
+});
+
+test("a solo ticket that ends blocked flags the card; Mark done pauses it in Issues", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "solo5");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/solo5" })).status, 200);
+  const col = columnOfCard("kevin/solo5");
+  gh.seedSubIssues("kevin", "solo5", { number: 1, title: "Solo blocked", body: "## Solution\nblocked.txt says Blocked." }, [
+    { number: 2, title: "Write blocked.txt", body: "Create blocked.txt containing Blocked. PUSHME" },
+    { number: 3, title: "Do it", body: "Do it. BLOCKME" },
+    { number: 4, title: "Then this", body: "After it.", blockedBy: [2] },
+  ]);
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/solo5", title: "Solo blocked", issueRef: "kevin/solo5#1", mode: "pipeline", startFrom: "tickets" })).json;
+  const perm = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  assert.equal((await api("POST", `/api/sessions/${s.id}/move`, { column: "issues" })).status, 200);
+  await waitFor(async () => (await summary(s.id)).status === "stopped");
+  // Solve the first ticket; it runs to done and the card pauses in Issues.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/tickets/1/solve`, {})).status, 200);
+  const perm2 = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  await api("POST", `/api/sessions/${s.id}/respond`, { requestId: perm2.id, value: perm2.options[0] });
+  await waitFor(async () => (await summary(s.id)).phase === "ready");
+  // The solo ticket ends blocked: the card flags in Doing, as a normal blocked ticket does.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/tickets/2/solve`, {})).status, 200);
+  const flagged = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.attention ? x : undefined;
+  });
+  assert.equal(await col(s.id), "doing");
+  assert.match(flagged.attention, /Ticket #2 is blocked/);
+  assert.equal(flagged.soloTicket, 2, "the solo ticket stays set while its card is flagged");
+  // Mark done pauses the card in Issues, instead of going on to the next ticket.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/pipeline`, { action: "skip" })).status, 200);
+  const paused = await summary(s.id);
+  assert.equal(await col(s.id), "issues");
+  assert.equal(paused.phase, "ready");
+  assert.equal(paused.attention, null);
+  assert.equal(paused.soloTicket, null);
+  assert.deepEqual(paused.tickets.map((t: any) => t.status), ["done", "done", "ready"]);
+  // Solve the third ticket; when it is done every ticket is done and the card goes on to review and PR.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/tickets/3/solve`, {})).status, 200);
+  const review = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.phase === "review" && x.pending.some((p: any) => p.kind === "permission") ? x : undefined;
+  });
+  assert.equal((await api("POST", `/api/sessions/${s.id}/respond`, { requestId: review.pending.find((p: any) => p.kind === "permission").id, value: "Allow" })).status, 200);
+  await waitFor(async () => (await summary(s.id)).phase === "pr");
+  assert.ok((await summary(s.id)).prNumber);
+  await api("POST", `/api/sessions/${s.id}/stop`, {});
+});
+
+test("Retry re-runs the solo ticket, not the lowest ready ticket, then pauses the card in Issues", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "solo6");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/solo6" })).status, 200);
+  const col = columnOfCard("kevin/solo6");
+  gh.seedSubIssues("kevin", "solo6", { number: 1, title: "Solo retry", body: "## Solution\nretry.txt says Retry." }, [
+    { number: 2, title: "Write retry.txt", body: "Create retry.txt containing Retry. PUSHME" },
+    { number: 3, title: "Check retry.txt", body: "Check it. BLOCKME" },
+  ]);
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/solo6", title: "Solo retry", issueRef: "kevin/solo6#1", mode: "pipeline", startFrom: "tickets" })).json;
+  const perm = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  assert.equal((await api("POST", `/api/sessions/${s.id}/move`, { column: "issues" })).status, 200);
+  await waitFor(async () => (await summary(s.id)).status === "stopped");
+  const interrupted = await summary(s.id);
+  const t1Run = interrupted.tickets[0].runId;
+  const t1Runs = ticketRunStarts(1);
+  const t2Runs = ticketRunStarts(2);
+  // Solve the second ticket (the solo); it ends blocked, so the card flags for a Retry.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/tickets/2/solve`, {})).status, 200);
+  const flagged = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.attention ? x : undefined;
+  });
+  assert.match(flagged.attention, /Ticket #2 is blocked/);
+  assert.equal(flagged.soloTicket, 2);
+  // Retry re-runs the solo ticket, not the lower ticket the stopped move left running; it blocks again.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/pipeline`, { action: "retry" })).status, 200);
+  const rerun = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.tickets[1].status === "running" && x.activeRun === x.tickets[1].runId ? x : undefined;
+  });
+  assert.notEqual(rerun.tickets[1].runId, flagged.tickets[1].runId, "a fresh run for the solo ticket");
+  assert.equal(rerun.tickets[0].runId, t1Run, "the lower ticket's run is untouched");
+  assert.equal(ticketRunStarts(1), t1Runs, "the lower ticket did not run");
+  assert.equal(ticketRunStarts(2), t2Runs + 1, "the solo ticket ran once more");
+  const flaggedAgain = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.attention ? x : undefined;
+  });
+  assert.match(flaggedAgain.attention, /Ticket #2 is blocked/);
+  // Mark done then pauses the card in Issues, instead of going on to another ticket.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/pipeline`, { action: "skip" })).status, 200);
+  const paused = await summary(s.id);
+  assert.equal(await col(s.id), "issues");
+  assert.equal(paused.phase, "ready");
+  assert.equal(paused.attention, null);
+  assert.equal(paused.soloTicket, null);
+  assert.deepEqual(paused.tickets.map((t: any) => t.status), ["ready", "done"]);
+  await api("POST", `/api/sessions/${s.id}/stop`, {});
+});
+
+test("Stop during a solo ticket clears it: a later Solve all runs every remaining ticket", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "solo7");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/solo7" })).status, 200);
+  const col = columnOfCard("kevin/solo7");
+  gh.seedSubIssues("kevin", "solo7", { number: 1, title: "Solo stop", body: "## Solution\nstop.txt says Stop." }, [
+    { number: 2, title: "Write stop.txt", body: "Create stop.txt containing Stop. PUSHME" },
+    { number: 3, title: "Test stop.txt", body: "Test it." },
+    { number: 4, title: "More stop.txt", body: "More." },
+  ]);
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/solo7", title: "Solo stop", issueRef: "kevin/solo7#1", mode: "pipeline", startFrom: "tickets" })).json;
+  const perm = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  assert.equal((await api("POST", `/api/sessions/${s.id}/move`, { column: "issues" })).status, 200);
+  await waitFor(async () => (await summary(s.id)).status === "stopped");
+  const t1Runs = ticketRunStarts(1);
+  const t2Runs = ticketRunStarts(2);
+  const t3Runs = ticketRunStarts(3);
+  // Solve the first ticket, then stop the card while it runs.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/tickets/1/solve`, {})).status, 200);
+  const perm2 = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  assert.equal((await api("POST", `/api/sessions/${s.id}/pipeline`, { action: "stop" })).status, 200);
+  await waitFor(async () => (await summary(s.id)).status === "stopped");
+  const stopped = await summary(s.id);
+  assert.equal(stopped.phase, "ready");
+  assert.equal(stopped.soloTicket, null, "Stop clears the solo ticket");
+  assert.equal(stopped.attention, null);
+  assert.deepEqual(stopped.tickets.map((t: any) => t.status), ["running", "ready", "ready"]);
+
+  // A later Solve all runs every remaining ticket, including the stopped one, then review and PR.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/move`, { column: "doing" })).status, 200);
+  const perm3 = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  await api("POST", `/api/sessions/${s.id}/respond`, { requestId: perm3.id, value: perm3.options[0] });
+  const review = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.phase === "review" && x.pending.some((p: any) => p.kind === "permission") ? x : undefined;
+  });
+  assert.deepEqual(review.tickets.map((t: any) => t.status), ["done", "done", "done"]);
+  assert.ok(ticketRunStarts(1) > t1Runs, "the stopped ticket ran again");
+  assert.ok(ticketRunStarts(2) > t2Runs, "ticket 2 ran");
+  assert.ok(ticketRunStarts(3) > t3Runs, "ticket 3 ran");
+  assert.equal((await api("POST", `/api/sessions/${s.id}/respond`, { requestId: review.pending.find((p: any) => p.kind === "permission").id, value: "Allow" })).status, 200);
+  await waitFor(async () => (await summary(s.id)).phase === "pr");
+  assert.equal(await col(s.id), "review");
+  await api("POST", `/api/sessions/${s.id}/stop`, {});
+});
+
+test("a spec's open ticket sub-issues come from the read route: number, title, URL, and their open blockers; a closed or foreign blocker is dropped", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "tickets1");
+  assert.equal((await api("PUT", "/api/secrets", { scope: "global", name: "GITHUB_TOKEN", value: "ghp_test" })).status, 200);
+  assert.equal((await api("PUT", "/api/settings/model", { baseUrl: mock.url })).status, 200);
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/tickets1" })).status, 200);
+  gh.seedSubIssues("kevin", "tickets1", { number: 10, title: "Read me", body: "## Solution\nr.txt says R." }, [
+    { number: 11, title: "Write r.txt", body: "Create r.txt." },
+    { number: 12, title: "Then test r.txt", body: "Test it.", blockedBy: [11] },
+    { number: 13, title: "Solved already", body: "Done.", state: "CLOSED" },
+    { number: 14, title: "Blocks from outside", body: "x", blockedBy: [99] },
+  ]);
+  const r = await api("GET", "/api/repos/kevin/tickets1/issues/10/tickets");
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.deepEqual(r.json, {
+    spec: { number: 10, title: "Read me", url: "https://github.com/kevin/tickets1/issues/10" },
+    subIssues: [
+      { number: 11, title: "Write r.txt", url: "https://github.com/kevin/tickets1/issues/11", blockedBy: [] },
+      { number: 12, title: "Then test r.txt", url: "https://github.com/kevin/tickets1/issues/12", blockedBy: [11] },
+      // #13 is closed: it is not listed. #14's blocker 99 is not an open sub-issue of the spec, so it is dropped.
+      { number: 14, title: "Blocks from outside", url: "https://github.com/kevin/tickets1/issues/14", blockedBy: [] },
+    ],
+  });
+  // An unknown spec number: the GitHub module's 404 comes through.
+  assert.equal((await api("GET", "/api/repos/kevin/tickets1/issues/99/tickets")).status, 404);
+});
+
+test("a sub-issue's Solve on an unclaimed spec card creates one session, runs only that ticket, and pauses in Issues; a blocked or foreign sub-issue is refused (409)", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "unsolo");
+  assert.equal((await api("PUT", "/api/secrets", { scope: "global", name: "GITHUB_TOKEN", value: "ghp_test" })).status, 200);
+  assert.equal((await api("PUT", "/api/settings/model", { baseUrl: mock.url })).status, 200);
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/unsolo" })).status, 200);
+  const col = columnOfCard("kevin/unsolo");
+  gh.seedSubIssues("kevin", "unsolo", { number: 20, title: "Unclaimed solo", body: "## Solution\nu.txt says U." }, [
+    { number: 21, title: "Write u.txt", body: "Create u.txt containing U. PUSHME" },
+    { number: 22, title: "Test u.txt", body: "Test it.", blockedBy: [21] },
+    { number: 23, title: "More u.txt", body: "More." },
+    { number: 24, title: "Solved already", body: "Done.", state: "CLOSED" },
+  ]);
+  assert.ok((await board("kevin/unsolo")).some((c) => c.id === "issue:20"), "the unclaimed card shows");
+  const solve = (sub: number) => api("POST", `/api/repos/kevin/unsolo/issues/20/tickets/${sub}/solve`, {});
+
+  // A sub-issue with an open blocker is refused (409) and names the blocker.
+  const refused = await solve(22);
+  assert.equal(refused.status, 409, JSON.stringify(refused.json));
+  assert.match(refused.json.error, /#21/);
+  // A number that is not an open sub-issue of the spec is refused too: the spec itself, a foreign one, and a closed one.
+  assert.equal((await solve(20)).status, 409);
+  assert.equal((await solve(99)).status, 409);
+  assert.equal((await solve(24)).status, 409);
+  // A :number that is itself a sub-issue is refused too: its spec's card owns it, as the move route does.
+  const subAsSpec = await api("POST", "/api/repos/kevin/unsolo/issues/21/tickets/22/solve", {});
+  assert.equal(subAsSpec.status, 409, JSON.stringify(subAsSpec.json));
+  assert.match(subAsSpec.json.error, /sub-issue/);
+  // The unclaimed card is untouched by the refused Solves.
+  assert.ok((await board("kevin/unsolo")).some((c) => c.id === "issue:20"));
+
+  // The baselines come first: earlier tests used the same local ticket numbers, and the mock
+  // repeats the whole history in every request of a run.
+  const t1Runs = ticketRunStarts(1);
+  const t2Runs = ticketRunStarts(2);
+  const t3Runs = ticketRunStarts(3);
+
+  // The un-setup repo runs setup first (To do), then the solo ticket runs.
+  const s = (await solve(21)).json;
+  assert.equal(s.repoId, "kevin/unsolo");
+  assert.equal(s.title, "Unclaimed solo");
+  assert.equal(s.issueRef, "kevin/unsolo#20");
+  assert.equal(s.phase, "setup");
+  assert.equal(s.soloTicket, 1, "the sub-issue's local number");
+  assert.deepEqual(s.tickets.map((t: any) => t.title), ["Write u.txt", "Test u.txt", "More u.txt"], "the closed sub-issue is not a ticket");
+  assert.equal(await col(s.id), "todo", "setup runs in To do first");
+  assert.ok(!(await board("kevin/unsolo")).some((c) => c.id === "issue:20"), "the unclaimed card is gone");
+
+  await waitFor(async () => (await summary(s.id)).phase === "implement");
+  assert.equal(await col(s.id), "doing");
+  const running = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.tickets[0].status === "running" ? x : undefined;
+  });
+  assert.equal(running.activeRun, running.tickets[0].runId);
+
+  // Its `git push` waits on a permission; only when it is answered has the ticket's run reached the model.
+  const perm = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  assert.ok(ticketRunStarts(1) > t1Runs, "the solo ticket ran");
+  assert.equal(ticketRunStarts(2), t2Runs, "ticket 2 did not start");
+  assert.equal(ticketRunStarts(3), t3Runs, "ticket 3 did not start");
+  await api("POST", `/api/sessions/${s.id}/respond`, { requestId: perm.id, value: perm.options[0] });
+  const back = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.phase === "ready" ? x : undefined;
+  });
+  assert.equal(await col(s.id), "issues");
+  assert.equal(back.soloTicket, null);
+  assert.equal(back.attention, null);
+  assert.deepEqual(back.tickets.map((t: any) => t.status), ["done", "ready", "ready"], "1 of 3 done");
+  await api("POST", `/api/sessions/${s.id}/stop`, {});
 });
 
 test("a Done card and a direct session do not claim their issue: the unclaimed card shows, and a new pipeline session may take it", { skip: !hasPi && "pi CLI not found" }, async () => {

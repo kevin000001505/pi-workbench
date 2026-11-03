@@ -18,6 +18,7 @@ import { assertUserScope, GLOBAL_SCOPE, SecretStore, userSecrets } from "./secre
 import { startRescueProxy } from "./rescue-proxy.ts";
 import { SessionManager } from "./sessions.ts";
 import { applySsh, saveSshHosts, sshView, testSshHost } from "./ssh.ts";
+import { ticketsFromSubIssues } from "./pipeline.ts";
 import {
   getApprovalSettings,
   getModelSettings,
@@ -145,6 +146,16 @@ const router = new Router()
     // The spec issue and its open ticket sub-issues; the UI shows the "Solve all tickets" button from this.
     return github().listTicketSubIssues(repo.owner, repo.name, Number(params.number));
   })
+  // An unclaimed spec card's ticket list: the spec issue and its open ticket sub-issues, with the
+  // sub-issue numbers that block each. A read only; the card detail renders from it.
+  .on("GET", "/api/repos/:owner/:name/issues/:number/tickets", async ({ params }) => {
+    const repo = requireTrackedRepo(db, `${params.owner}/${params.name}`);
+    const seed = await github().listTicketSubIssues(repo.owner, repo.name, Number(params.number));
+    return {
+      spec: { number: seed.spec.number, title: seed.spec.title, url: seed.spec.htmlUrl },
+      subIssues: seed.subIssues.map((s) => ({ number: s.number, title: s.title, url: s.url, blockedBy: s.blockedBy })),
+    };
+  })
   .on("POST", "/api/repos", async ({ body }) => {
     const [owner, name] = String(body.id ?? "").split("/");
     assertRepoName(owner ?? "", name ?? "");
@@ -206,6 +217,27 @@ const router = new Router()
     // create() refuses a second session for an issue a card works on already (409).
     return sessions.create({ repoId: repo.id, title: "", prompt: "", mode: "pipeline", issueRef: `${repo.id}#${number}`, startFrom });
   })
+  // Solve one ticket of an unclaimed spec card: creates the spec's session as the tickets start
+  // does, with the solo ticket set to the sub-issue's local number, so only that ticket runs
+  // and the card pauses in Issues when it is done. A blocked or foreign sub-issue is refused.
+  .on("POST", "/api/repos/:owner/:name/issues/:number/tickets/:sub/solve", async ({ params }) => {
+    const repo = requireTrackedRepo(db, `${params.owner}/${params.name}`);
+    const number = Number(params.number);
+    const sub = Number(params.sub);
+    if (!Number.isInteger(sub) || sub < 1) throw new HttpError(400, "The sub-issue number must be a whole number");
+    const seed = await github().listTicketSubIssues(repo.owner, repo.name, number);
+    // A sub-issue has no card: its spec's card owns it. A stale tab can still post its number.
+    if (seed.spec.hasParent) throw new HttpError(409, `Issue #${number} is a sub-issue of another issue; its spec's card owns it.`);
+    const subSeed = seed.subIssues.find((s) => s.number === sub);
+    if (!subSeed) throw new HttpError(409, `Issue #${sub} is not an open sub-issue of #${number}`);
+    // A blocker outside the open set is dropped, as ticketsFromSubIssues does: an open blocker
+    // inside the spec is the only one that keeps this sub-issue from being solved.
+    if (subSeed.blockedBy.length) throw new HttpError(409, `Issue #${sub} waits on ${subSeed.blockedBy.map((b) => `#${b}`).join(", ")}`);
+    // The local number of :sub, 1..N in sub-issue number order, as the session's tickets are numbered.
+    const local = ticketsFromSubIssues(seed.subIssues).find((t) => t.trackerRef === String(sub))!.number;
+    // create() refuses a second session for an issue a card works on already (409).
+    return sessions.create({ repoId: repo.id, title: "", prompt: "", mode: "pipeline", issueRef: `${repo.id}#${number}`, startFrom: "tickets", soloTicket: local });
+  })
 
   // --- sessions -----------------------------------------------------------------------------
   .on("GET", "/api/sessions", () => sessions.list())
@@ -263,6 +295,12 @@ const router = new Router()
     if (!["retry", "skip", "stop"].includes(body.action)) throw new HttpError(400, "action must be retry, skip or stop");
     await sessions.pipelineAction(params.id, body.action);
     return sessions.summary(params.id);
+  })
+  // Solve one ticket: the card's session runs only that ticket, then waits in Issues again.
+  .on("POST", "/api/sessions/:id/tickets/:num/solve", ({ params }) => {
+    const num = Number(params.num);
+    if (!Number.isInteger(num) || num < 1) throw new HttpError(400, "The ticket number must be a whole number");
+    return sessions.solveTicket(params.id, num);
   })
   .on("POST", "/api/sessions/:id/move", async ({ params, body }) => {
     await sessions.move(params.id, body.column);
