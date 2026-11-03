@@ -470,11 +470,16 @@ test("the split prompt breaks the issue into sub-issues with blocking edges, and
 
 test("the glossary records the board's columns and card actions", () => {
   const glossary = fs.readFileSync(new URL("../../GLOSSARY.md", import.meta.url), "utf8");
-  for (const term of ["To do", "Unclaimed card", "Solve"]) {
+  for (const term of ["To do", "Unclaimed card", "Solve", "Split"]) {
     assert.match(glossary, new RegExp(`\\*\\*${term}\\*\\*:`), `glossary defines ${term}`);
   }
   assert.match(glossary, /\*\*Issues\*\* \(column\):/);
   assert.match(glossary, /\*\*Card\*\*:/);
+  assert.match(
+    glossary,
+    /\*\*Split\*\*:\nBreaking a plain issue into ticket sub-issues with `to-tickets`, so it becomes a spec issue that waits for Solve all\./,
+    "Split is a term entry, not only the drag-relationship mention",
+  );
 });
 
 test("glossary and ADR 0003 record the stop-rule, rescue and retro vocabulary", () => {
