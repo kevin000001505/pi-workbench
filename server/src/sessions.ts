@@ -1446,7 +1446,7 @@ export class SessionManager extends EventEmitter {
       }
       // Switch to the merge run before anyone hears about it.
       const runId = `${id}-merge-${Date.now().toString(36)}`;
-      this.update(id, { merge_run: runId, attention: null });
+      this.update(id, { merge_run: runId, merge_files: JSON.stringify(files), attention: null });
       this.resolving.add(id);
       await this.switchRun(id, runId, true);
       this.emit("event", id, { type: "wb_notify", message: `${reason}. A merge run resolves it now.`, level: "info" });
@@ -1483,15 +1483,16 @@ export class SessionManager extends EventEmitter {
 
   /**
    * Why the worktree does not hold a finished merge of the base branch, or null when it does. A
-   * file that differs from the base and still has a conflict-marker line is not finished either.
+   * file git reported as conflicted that still has a `<<<<<<< ` or `>>>>>>> ` line is not finished
+   * either (a lone `=======` can be a Markdown heading's underline).
    */
   private async unfinishedMerge(row: SessionRow): Promise<string | null> {
     const sh = (args: string[]) => git(row.worktree, args).then(() => true, () => false);
     if (await sh(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) return "the merge is not committed";
     if (!(await sh(["merge-base", "--is-ancestor", `origin/${row.base_branch}`, "HEAD"]))) return `HEAD does not contain origin/${row.base_branch}`;
-    const changed = (await git(row.worktree, ["diff", "--name-only", "-z", `origin/${row.base_branch}`, "HEAD"])).split("\0").filter(Boolean);
-    if (!changed.length) return null;
-    const marked = await git(row.worktree, ["grep", "-l", "-z", "-E", "^(<<<<<<<|>>>>>>>)( |$)|^=======$", "HEAD", "--", ...changed]).then(
+    const conflicted: string[] = JSON.parse(row.merge_files ?? "[]");
+    if (!conflicted.length) return null;
+    const marked = await git(row.worktree, ["grep", "-l", "-z", "-E", "^(<<<<<<<|>>>>>>>) ", "HEAD", "--", ...conflicted]).then(
       (out) => out.split("\0").filter(Boolean).map((f) => f.replace(/^HEAD:/, "")),
       () => [] as string[],
     );
