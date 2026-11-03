@@ -75,6 +75,9 @@ export type SessionSummary = {
   grillSummary: string | null;
   spec: string | null;
   specRef: string | null;
+  /** finish_review's note from the last review run. */
+  reviewNote: string | null;
+  doneAt: number | null;
   issueRef: string | null;
   /** The session's own auto-approve setting, and whether auto-approve is in effect for it now. */
   autoApprove: AutoApproveMode;
@@ -90,7 +93,7 @@ export type SessionSummary = {
 /** A session's auto-approve: follow the global switch in Settings, or override it. */
 export type AutoApproveMode = "inherit" | "on" | "off";
 
-export type Phase = "setup" | "grill" | "spec" | "tickets" | "implement" | "review" | "retro" | "done" | "direct";
+export type Phase = "setup" | "grill" | "spec" | "tickets" | "ready" | "implement" | "review" | "retro" | "pr" | "done" | "direct";
 
 export type Ticket = {
   num: number;
@@ -179,3 +182,10 @@ export type ProbeResult = {
   models: string[];
   checks: { name: string; url: string; ok: boolean; status?: number; contentType?: string; excerpt?: string; hint?: string; ms: number }[];
 };
+
+/**
+ * The server's note after a resolved merge conflict (SessionManager.pushResolved): it asks for a
+ * second Approve and is not an error, so the board and this panel show it in the neutral style.
+ */
+export const isResolvedNote = (text: string | null | undefined) =>
+  !!text && text.startsWith("The merge conflict with ") && text.includes(" is resolved and pushed");

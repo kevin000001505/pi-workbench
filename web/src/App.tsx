@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { Home } from "./pages/Home.tsx";
-import { Issues } from "./pages/Issues.tsx";
+import { Board } from "./pages/Board.tsx";
 import { NewSession } from "./pages/NewSession.tsx";
 import { Repos } from "./pages/Repos.tsx";
 import { Secrets } from "./pages/Secrets.tsx";
+import { Sessions } from "./pages/Sessions.tsx";
 import { Settings } from "./pages/Settings.tsx";
 import { Ssh } from "./pages/Ssh.tsx";
 import { SessionView } from "./session/SessionView.tsx";
@@ -11,7 +11,8 @@ import { Sidebar } from "./Sidebar.tsx";
 import { useStore } from "./store.tsx";
 
 export type Route =
-  | { page: "home" }
+  | { page: "board"; repoId?: string }
+  | { page: "sessions" }
   | { page: "session"; id: string }
   | {
       page: "new";
@@ -25,17 +26,18 @@ export type Route =
   | { page: "repos" }
   | { page: "secrets" }
   | { page: "ssh" }
-  | { page: "settings" }
-  | { page: "issues"; repoId?: string; number?: number };
+  | { page: "settings" };
 
 function parse(hash: string): Route {
   const [path, query] = hash.replace(/^#/, "").split("?");
   const params = new URLSearchParams(query ?? "");
   const parts = path.split("/").filter(Boolean);
-  const [page, a, b] = parts;
+  const [page, a] = parts;
   switch (page) {
     case "session":
-      return a ? { page: "session", id: a } : { page: "home" };
+      return a ? { page: "session", id: a } : { page: "sessions" };
+    case "board":
+      return { page: "board", repoId: a ? decodeURIComponent(a) : undefined };
     case "new":
       return {
         page: "new",
@@ -45,19 +47,14 @@ function parse(hash: string): Route {
         prefillPrompt: params.get("prompt") ?? undefined,
         prefillBase: params.get("base") ?? undefined,
       };
-    case "issues":
-      return {
-        page: "issues",
-        repoId: a ? decodeURIComponent(a) : undefined,
-        number: b && /^\d+$/.test(b) ? Number(b) : undefined,
-      };
+    case "sessions":
     case "repos":
     case "secrets":
     case "ssh":
     case "settings":
       return { page };
     default:
-      return { page: "home" };
+      return { page: "board" };
   }
 }
 
@@ -88,7 +85,8 @@ export function App() {
         ☰
       </button>
       <main className="main">
-        {route.page === "home" && <Home />}
+        {route.page === "board" && <Board key={route.repoId ?? ""} repoId={route.repoId} />}
+        {route.page === "sessions" && <Sessions />}
         {route.page === "session" && <SessionView key={route.id} id={route.id} />}
         {route.page === "new" && (
           <NewSession
@@ -104,7 +102,6 @@ export function App() {
         {route.page === "secrets" && <Secrets />}
         {route.page === "ssh" && <Ssh />}
         {route.page === "settings" && <Settings />}
-        {route.page === "issues" && <Issues repoId={route.repoId} number={route.number} />}
       </main>
       <div className="toasts" role="status">
         {toasts.map((t) => (

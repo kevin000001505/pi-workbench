@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
-import type { Phase, SessionSummary, Ticket } from "../types.ts";
+import { isResolvedNote, type Phase, type SessionSummary, type Ticket } from "../types.ts";
 import { Markdown, Spinner } from "../ui.tsx";
 
 const STEPS: { phase: Phase; label: string }[] = [
@@ -9,6 +9,7 @@ const STEPS: { phase: Phase; label: string }[] = [
   { phase: "grill", label: "Grill" },
   { phase: "spec", label: "Spec" },
   { phase: "tickets", label: "Tickets" },
+  { phase: "ready", label: "Ready" },
   { phase: "implement", label: "Implement" },
   { phase: "review", label: "Review" },
   { phase: "retro", label: "Retro" },
@@ -28,10 +29,14 @@ export const phaseLabel = (s: SessionSummary) => {
       return "Writing the spec";
     case "tickets":
       return "Writing tickets";
+    case "ready":
+      return `${s.tickets.length} tickets ready · waits for Solve all`;
     case "implement":
       return running ? `Ticket ${running.num} · ${done}/${s.tickets.length} done` : `${done}/${s.tickets.length} tickets done`;
     case "review":
       return `Reviewing all ${s.tickets.length} tickets`;
+    case "pr":
+      return s.prNumber ? `PR #${s.prNumber} open` : "PR open";
     case "retro":
       return "Retro of the rescued tickets";
     case "done":
@@ -42,7 +47,7 @@ export const phaseLabel = (s: SessionSummary) => {
 };
 
 /** "#12" for GitHub issues, the file name for local ticket files. */
-const refLabel = (ref: string) => {
+export const refLabel = (ref: string) => {
   const issue = /^https?:\/\/.*\/issues\/(\d+)$/.exec(ref) ?? /^#?(\d+)$/.exec(ref);
   return issue ? `#${issue[1]}` : ref.split("/").pop() || ref;
 };
@@ -138,7 +143,8 @@ export function PipelinePanel({ s, viewRun, onView }: { s: SessionSummary; viewR
             {open ? "Hide" : "Show"} plan
           </button>
         )}
-        {s.phase !== "done" && (
+        {/* Stop pauses the card to Issues, so it shows only once there are tickets to come back to. */}
+        {(s.phase === "implement" || s.phase === "review" || s.phase === "retro") && (
           <button className="btn btn-ghost btn-sm danger" disabled={busy} onClick={() => act("stop")}>
             Stop pipeline
           </button>
@@ -146,8 +152,8 @@ export function PipelinePanel({ s, viewRun, onView }: { s: SessionSummary; viewR
       </div>
 
       {s.attention && (
-        <div className="attention">
-          <span>⚠ {s.attention}</span>
+        <div className={`attention ${isResolvedNote(s.attention) ? "attention-ok" : ""}`}>
+          <span>{isResolvedNote(s.attention) ? "✓" : "⚠"} {s.attention}</span>
           {(s.phase === "implement" || s.phase === "review") && (
             <div className="row gap">
               <button className="btn btn-sm" disabled={busy} onClick={() => act("retry")}>

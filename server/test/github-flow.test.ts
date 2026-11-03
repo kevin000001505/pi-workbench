@@ -242,6 +242,57 @@ test("a session that solves an issue opens a PR whose body closes it; ticket clo
   assert.doesNotMatch(plain.body, /Closes/);
 });
 
+test("the delivery pushes the branch and opens the PR with the Closes lines, and reuses that PR on the next push", async () => {
+  const { openDb } = await import("../src/db.ts");
+  const { config } = await import("../src/config.ts");
+  const { GitHub } = await import("../src/github.ts");
+  const { addRepo, createWorktree } = await import("../src/repos.ts");
+  const { githubDelivery } = await import("../src/delivery.ts");
+  const db = openDb(config.dbFile);
+  const client = new GitHub("ghp_test");
+  const created = await client.createRepo({ name: "deliver-app", private: true });
+  const repo = await addRepo(db, { owner: created.owner.login, name: created.name, defaultBranch: created.default_branch, private: true }, env);
+  const worktree = await createWorktree(repo, "d1", "pi/deliver-d1", "main", env);
+  db.prepare(
+    "INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, issue_ref) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)",
+  ).run("d1", repo.id, "Deliver it", "pi/deliver-d1", "main", worktree, `${repo.id}#3`);
+  const row = () => db.prepare("SELECT * FROM sessions WHERE id = ?").get("d1") as any;
+  const commit = (file: string) => {
+    fs.writeFileSync(path.join(worktree, file), "x\n");
+    execFileSync("git", ["add", "."], { cwd: worktree });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", `Add ${file}`], { cwd: worktree });
+  };
+  const remoteLog = () => execFileSync("git", ["log", "--format=%s", "pi/deliver-d1"], { cwd: path.join(remotes, "kevin", "deliver-app.git"), encoding: "utf8" }).trim().split("\n");
+  const delivery = githubDelivery({
+    github: () => client,
+    gitEnv: async () => env,
+    model: () => ({ baseUrl: "http://127.0.0.1:9/v1", modelId: "m", contextWindow: 1, maxTokens: 1, reasoning: false, thinkingFormat: "" }),
+    llmKey: () => undefined,
+  });
+  const tickets = [{ num: 1, title: "Ship it", body: "", blockedBy: [], trackerRef: "#4", status: "done" as const, note: null, runId: null }];
+
+  // Nothing to deliver yet: the open fails with the reason.
+  await assert.rejects(delivery.openPr(row(), repo, tickets), /No commits/);
+
+  commit("a.txt");
+  const pr = await delivery.openPr(row(), repo, tickets);
+  const opened = gh.pulls[gh.pulls.length - 1];
+  assert.equal(pr.number, opened.number);
+  assert.equal(pr.url, opened.html_url);
+  assert.equal(opened.head, "pi/deliver-d1");
+  assert.match(opened.body, /Closes #4/);
+  assert.match(opened.body, /Closes #3\n$/);
+  assert.deepEqual(remoteLog()[0], "Add a.txt");
+
+  // The session has that PR: a later delivery pushes the branch to it and opens no second PR.
+  db.prepare("UPDATE sessions SET pr_number = ?, pr_url = ? WHERE id = 'd1'").run(pr.number, pr.url);
+  commit("b.txt");
+  const count = gh.pulls.length;
+  assert.deepEqual(await delivery.openPr(row(), repo, tickets), pr);
+  assert.equal(gh.pulls.length, count);
+  assert.deepEqual(remoteLog()[0], "Add b.txt");
+});
+
 test("listTicketSubIssues returns the spec and its open ticket sub-issues, with their edges", async () => {
   const { GitHub, GitHubError } = await import("../src/github.ts");
   const client = new GitHub("ghp_test");
@@ -272,8 +323,9 @@ test("listTicketSubIssues returns the spec and its open ticket sub-issues, with 
   gh.createBare("kevin", "empty");
   assert.equal((await client.listTicketSubIssues("kevin", "empty", 3)).subIssues.length, 0);
   await assert.rejects(client.listTicketSubIssues("kevin", "ticketed", 99), (e) => e instanceof GitHubError && e.status === 404);
-  // ticketsFromIssueRef parses the owner/name#123 form and rejects the rest.
+  // ticketsFromIssueRef reads the owner/name#123 form and the issue URL, and rejects a ref with no repo.
   assert.equal((await client.ticketsFromIssueRef("kevin/ticketed#7")).spec.number, 7);
+  assert.equal((await client.ticketsFromIssueRef("https://github.com/kevin/ticketed/issues/7")).spec.number, 7);
   await assert.rejects(client.ticketsFromIssueRef("ticketed#7"), (e) => e instanceof GitHubError && e.status === 400);
   await assert.rejects(client.ticketsFromIssueRef("#7"), (e) => e instanceof GitHubError && e.status === 400);
   // A bad token keeps the REST client's error shape on GraphQL calls too.

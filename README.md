@@ -13,6 +13,7 @@ A self-hosted web UI for the [pi coding agent](https://github.com/earendil-works
 
 ## What you get
 
+- **A board per repo.** The start page is the selected repo's **Board**: one card per pipeline session in the columns To do, Issues, Doing, QA, Review and Done. A card shows its title, its ticket progress, and why it needs you. The sidebar lists the tracked repos and opens each one's board; the last one opens again next time. Direct-mode sessions are listed on the **Sessions** page.
 - **Plan, then build, as the default.** A new session runs a pipeline (see [The pipeline](#the-pipeline)): `grill-with-docs` → `to-spec` → `to-tickets` → test-first build of each ticket → one code review. Pick **Direct** on the New session form to skip it for small fixes.
 - **Live sessions.** Every session streams text, thinking, and tool calls as they happen. Sessions keep running when you close the tab, and several can run in parallel, each in its own git worktree and branch.
 - **Permissions.** Before a risky tool call runs, the session waits for **Allow / Allow for this session / Deny**. Risky calls include `git push`, `gh`, `rm -r`, `sudo`, `curl`/`wget`, `ssh`, package installs, destructive git commands, and writes outside the worktree. You can edit the rules under Settings.
@@ -21,7 +22,7 @@ A self-hosted web UI for the [pi coding agent](https://github.com/earendil-works
 - **Skills.** Matt Pocock's engineering and productivity skills are built into the image, plus the workbench's own `asd-ste100` (Simplified Technical English) and any `.agents/skills` or `.pi/skills` in the repo. Every explanation the agent writes for you follows `asd-ste100`. Type `/` in the prompt box, or click **✦ Skills**, to pick one.
 - **Setup on every repo.** A repo's first session runs `/setup-matt-pocock-skills` before your task. Its questions come to you as decision cards, it commits the result on the session branch, and then your task goes out.
 - **GitHub.** **Create repo** makes a new GitHub repo and clones it. **Create PR**: the model drafts a title and body from the diff, you edit them, then the server pushes the branch and opens the PR. After that, the session header shows the PR's state and CI.
-- **Solve issues.** The **Issues** page lists the open issues of a tracked repo — search by keyword, filter by label — and opens any issue with its discussion (the body and comments, rendered as markdown). **Start session** opens the New session form pre-filled with the issue's title and body; one session solves one issue, its PR body carries a `Closes #n` line, and merging the PR closes the issue. An issue that owns **ticket sub-issues** (the tickets a spec was split into) gets a **Solve all tickets** button instead: one session reads every open ticket sub-issue with its blocking edges from GitHub, skips grill/spec/tickets, builds the tickets one fresh run at a time in dependency order, reviews the branch, and its PR closes the spec issue and every ticket issue at once.
+- **Solve issues.** A spec issue on GitHub that has open **ticket sub-issues** (the tickets a spec was split into) and that no card works on yet shows as an **unclaimed card** in the board's Issues column. Drag it to **Doing** to solve all its tickets: one session reads every open ticket sub-issue with its blocking edges from GitHub, skips grill/spec/tickets, builds the tickets one fresh run at a time in dependency order, reviews the branch, and its PR closes the spec issue and every ticket issue at once. Drag it to **To do** to plan it again: the grill reworks that spec issue and its tickets in place.
 - **Secrets.** Environment variables for sessions, global or per repo. They are encrypted at rest (AES-256-GCM) and write-only from the browser.
 - **SSH keys.** Paste a machine's private key on the SSH page. It is stored encrypted like any other secret (never shown again) and materialized in the agent's home as `~/.ssh/<name>` — a 0600 file in a 0700 directory — so the agent can `ssh` to your machines.
 - **Model settings.** Base URL, model ID (listed from the endpoint's `/v1/models`), context window, and output limit. The default is `Qwen3.8-27B-radiance` with 256K (262144) tokens. **Test** makes the same chat call a session makes and reports the URL, status, and likely cause when it fails (wrong service, missing `/v1`, unknown model, missing key, unreachable host).
@@ -36,6 +37,7 @@ New sessions follow the flow these skills are designed for: align on requirement
 | Grill | `/skill:grill-with-docs` on your idea. It questions you (database choice, edge cases, terms) and writes the glossary and ADRs as it goes | you confirm a shared understanding; the agent commits the docs and calls `save_grill_summary` |
 | Spec | `/skill:to-spec` in the same conversation: turns what you agreed into a spec | you approve its test seams; it publishes the spec and calls `save_spec` |
 | Tickets | `/skill:to-tickets` on the spec | you approve the breakdown; it publishes the tickets and calls `record_tickets` |
+| Ready | nothing: the session pauses, and its card waits in Issues | Solve all starts the tickets |
 | Implement | one fresh run per ticket with `/skill:tdd`, in dependency order | the agent commits and calls `finish_ticket`; the next ticket starts |
 | Review | one fresh `/skill:code-review` run over the whole branch, fixing what it finds | the agent commits the fixes and calls `finish_review` |
 | Done | messages become plain follow-ups on the same branch | you press **Create PR** |
@@ -162,3 +164,7 @@ cd web && npm run build
 ```
 
 `npm run build` typechecks and builds the UI.
+
+## License and credits
+
+pi workbench is licensed under the [GNU Affero General Public License v3.0](LICENSE). The Board's markup and CSS are ported from [kanzo](https://github.com/emanuele-em/kanzo) by emanuele-em (AGPL-3.0).

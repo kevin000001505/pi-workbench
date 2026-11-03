@@ -109,13 +109,21 @@ function textOf(content: unknown): string {
 /**
  * The pipeline's phases, scripted by step (assistant replies since the last user message):
  * - grill-with-docs: ask to confirm → save_grill_summary → done
- * - to-spec: ask about seams → write the spec file → save_spec → done
- * - to-tickets: ask to approve → write .scratch files → record_tickets (3 tickets) → done
+ * - to-spec: ask about seams → write the spec file → save_spec → done (trackerRef: the task's
+ *   `SPEC_REF=<ref>`, or the spec file)
+ * - to-tickets: ask to approve → write .scratch files → record_tickets (3 tickets) → done; a
+ *   "Change it" answer ends the run with a question instead
  * - tdd (a ticket): commit a line for the ticket (and `git push`, a gated call, if the ticket says
  *   PUSHME) → finish_ticket (blocked if the ticket says BLOCKME) → done
  * - code-review: commit a fix and `git push` it (a gated call) → finish_review → done
+ * - resolving-merge-conflicts (the base's work.txt keeps every word an earlier test pushed, so the
+ *   newest word is checked first): keep both sides of every conflicted hunk in work.txt and commit the
+ *   merge → finish_merge resolved → done; a base side that says GIVEUP is left alone → finish_merge failed,
+ *   and one that says NOFINISH ends the run with no finish_merge call; one that says HOLDMERGE asks
+ *   the user first and leaves the run waiting on that decision; one that says FAKERESOLVE
+ *   calls finish_merge resolved with the merge still half done, and ABORTRESOLVE after git merge --abort
  */
-function pipelineScript(userText: string, step: number, lastResult: string): Reply | undefined {
+function pipelineScript(userText: string, step: number, lastResult: string, conversation = ""): Reply | undefined {
   if (userText.includes('<skill name="grill-with-docs"')) {
     if (step === 0) return { tool: { name: "ask_user", args: { question: "We build a greeting file plus tests. Have we reached a shared understanding?", options: ["Yes, that's the plan", "Not yet"] } } };
     if (step === 1 && /Yes/.test(lastResult)) return { tool: { name: "save_grill_summary", args: { summary: "Build hello.txt saying Hello, with a test. No UI." } } };
@@ -125,11 +133,17 @@ function pipelineScript(userText: string, step: number, lastResult: string): Rep
   if (userText.includes('<skill name="to-spec"')) {
     if (step === 0) return { tool: { name: "ask_user", args: { question: "Test at the file level, through one seam: the hello.txt contents. OK?", options: ["Yes", "No"] } } };
     if (step === 1) return { tool: { name: "bash", args: { command: "mkdir -p .scratch/greeting && echo spec > .scratch/greeting/spec.md && echo published" } } };
-    if (step === 2) return { tool: { name: "save_spec", args: { spec: "## Problem Statement\nNo greeting.\n## Solution\nhello.txt says Hello.", trackerRef: ".scratch/greeting/spec.md" } } };
+    if (step === 2) {
+      // A task that says `SPEC_REF=<ref>` publishes its spec there (an issue ref, as to-spec gives on GitHub);
+      // one that says `GHSPEC <url>` publishes it as that GitHub issue.
+      const ref = /SPEC_REF=(\S+)/.exec(conversation)?.[1] ?? /GHSPEC (\S+)/.exec(conversation)?.[1];
+      return { tool: { name: "save_spec", args: { spec: "## Problem Statement\nNo greeting.\n## Solution\nhello.txt says Hello.", trackerRef: ref ?? ".scratch/greeting/spec.md" } } };
+    }
     return { text: "Spec published." };
   }
   if (userText.includes('<skill name="to-tickets"')) {
     if (step === 0) return { tool: { name: "ask_user", args: { question: "Approve: 1. Write hello.txt; 2. Add a test (blocked by 1); 3. Add docs (blocked by 1)?", options: ["Approve", "Change it"] } } };
+    if (step === 1 && /Change it/.test(lastResult)) return { text: "What should change in the breakdown?" };
     if (step === 1) return { tool: { name: "bash", args: { command: "mkdir -p .scratch/greeting/issues && for n in 01 02 03; do echo ticket > .scratch/greeting/issues/$n.md; done && echo published" } } };
     if (step === 2) {
       return {
@@ -154,6 +168,21 @@ function pipelineScript(userText: string, step: number, lastResult: string): Rep
     if (step === 0) return { tool: { name: "bash", args: { command: 'echo reviewed >> work.txt && git add -A && git commit -qm "Fix review findings" && git push -q origin HEAD && echo fixed' } } };
     if (step === 1) return { tool: { name: "finish_review", args: { note: "Fixed one naming issue" } } };
     return { text: "Review done." };
+  }
+  if (userText.includes('<skill name="resolving-merge-conflicts"')) {
+    if (step === 0) {
+      const keepBoth = "grep -v -e '^<<<<<<<' -e '^=======' -e '^>>>>>>>' work.txt > .resolved && mv .resolved work.txt && git add work.txt && git commit -q --no-edit && echo resolved";
+      return { tool: { name: "bash", args: { command: `if grep -q ABORTRESOLVE work.txt; then git merge --abort && echo "faked"; elif grep -q FAKERESOLVE work.txt; then echo "faked"; elif grep -q HOLDMERGE work.txt; then echo "hold on"; elif grep -q NOFINISH work.txt; then echo "wandered off"; elif grep -q GIVEUP work.txt; then echo "cannot reconcile"; else ${keepBoth}; fi` } } };
+    }
+    if (step === 1 && lastResult.includes("faked")) return { tool: { name: "finish_merge", args: { status: "resolved", note: "all good" } } };
+    if (step === 1 && lastResult.includes("hold on")) return { tool: { name: "ask_user", args: { question: "Keep both sides of work.txt?", options: ["Yes", "No"] } } };
+    if (step === 1 && lastResult.includes("wandered off")) return { text: "I looked at it." };
+    if (step === 1) {
+      return lastResult.includes("cannot reconcile")
+        ? { tool: { name: "finish_merge", args: { status: "failed", note: "Both sides rewrote the last line of work.txt, and only a human can pick one" } } }
+        : { tool: { name: "finish_merge", args: { status: "resolved", note: "kept both sides' lines in work.txt" } } };
+    }
+    return { text: "Merge finished." };
   }
   if (userText.includes('<skill name="diagnosing-bugs"')) return rescueScript(userText, step);
   if (userText.includes('<skill name="retro"')) return retroScript(userText, step);
@@ -241,11 +270,13 @@ function rescueScript(userText: string, step: number): Reply {
  * - RETRO_SILENT: a text reply, no finish_retro
  * - RETRO_LOOP: the same read forever (the stop rule)
  * - RETRO_DIRTY: writes notes.txt, then reports
+ * - RETRO_HOLD: asks the user first (the run waits on a decision), then reports
  * - otherwise: one read, then finish_retro with a proposal
  */
 function retroScript(userText: string, step: number): Reply {
   if (userText.includes("RETRO_SILENT")) return { text: "Nothing to add." };
   if (userText.includes("RETRO_LOOP")) return { tool: { name: "bash", args: { command: "git log --oneline -3" } } };
+  if (step === 0 && userText.includes("RETRO_HOLD")) return { tool: { name: "ask_user", args: { question: "Is the retro scope right?", options: ["Yes", "No"] } } };
   if (step === 0) return { tool: { name: "bash", args: { command: userText.includes("RETRO_DIRTY") ? "echo retro >> notes.txt" : "git log --oneline -3" } } };
   if (step === 1) return { tool: { name: "finish_retro", args: { report: "Raise the repeat limit to 4 in Settings → Pipeline: the test loop was a real loop." } } };
   return { text: "Retro done." };
@@ -257,7 +288,8 @@ function script(messages: { role: string; content: unknown }[]): Reply {
   const lastUser = messages[lastUserIdx];
   const userText = textOf(lastUser?.content);
   const step = messages.slice(lastUserIdx + 1).filter((m) => m.role === "assistant").length;
-  const piped = pipelineScript(userText, step, last?.role === "tool" ? textOf(last.content) : "");
+  const conversation = messages.filter((m) => m.role === "user").map((m) => textOf(m.content)).join("\n");
+  const piped = pipelineScript(userText, step, last?.role === "tool" ? textOf(last.content) : "", conversation);
   if (piped) return piped;
   if (last?.role === "tool") {
     const result = textOf(last.content).split("\n")[0].slice(0, 80);

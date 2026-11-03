@@ -1,3 +1,4 @@
+import { parseIssueRef, type SpecIssue } from "../../shared/board.ts";
 import { config } from "./config.ts";
 
 export type GhUser = { login: string; id: number; name: string | null };
@@ -24,9 +25,12 @@ export type GhTicketSeed = { spec: { number: number; title: string; body: string
 
 export class GitHubError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** GitHub's own message, without the method, path and status; the message when there is none. */
+  detail: string;
+  constructor(status: number, message: string, detail = message) {
     super(message);
     this.status = status;
+    this.detail = detail;
   }
 }
 
@@ -56,7 +60,7 @@ export class GitHub {
         const j = (await res.json()) as { message?: string; errors?: { message?: string }[] };
         msg = [j.message, ...(j.errors ?? []).map((e) => e.message)].filter(Boolean).join(": ");
       } catch {}
-      throw new GitHubError(res.status, `GitHub ${method} ${url.replace(config.githubApi, "")}: ${res.status} ${msg}`);
+      throw new GitHubError(res.status, `GitHub ${method} ${url.replace(config.githubApi, "")}: ${res.status} ${msg}`, msg);
     }
     return (res.status === 204 ? undefined : await res.json()) as T;
   }
@@ -161,11 +165,33 @@ export class GitHub {
     });
   }
 
-  /** Parse `owner/name#123` and fetch its spec plus ticket sub-issues. */
+  /**
+   * The repo's spec issues for the board's unclaimed cards: open issues with open sub-issues, from
+   * one GraphQL call over the open issues and their sub-issue counts. Cap: the 100 most recently
+   * updated open issues.
+   */
+  listSpecIssues(owner: string, name: string): Promise<SpecIssue[]> {
+    type GqIssue = { number: number; title: string; url: string; subIssuesSummary: { total: number; completed: number } | null };
+    const q = `query($owner: String!, $name: String!) {
+      repository(owner: $owner, name: $name) {
+        issues(first: 100, states: OPEN, orderBy: { field: UPDATED_AT, direction: DESC }) {
+          nodes { number title url subIssuesSummary { total completed } }
+        }
+      }
+    }`;
+    return this.gq<{ repository: { issues: { nodes: GqIssue[] } } | null }>(q, { owner, name }).then((d) =>
+      (d.repository?.issues.nodes ?? [])
+        .map((i) => ({ number: i.number, title: i.title, url: i.url, openTickets: (i.subIssuesSummary?.total ?? 0) - (i.subIssuesSummary?.completed ?? 0) }))
+        .filter((i) => i.openTickets > 0),
+    );
+  }
+
+  /** Parse `owner/name#123` (or the issue's URL) and fetch its spec plus ticket sub-issues. */
   async ticketsFromIssueRef(ref: string) {
-    const m = /^([^/]+)\/([^/]+)#(\d+)$/.exec(ref.trim());
-    if (!m) throw new GitHubError(400, `Bad issue reference ${ref}; expected owner/name#123`);
-    return this.listTicketSubIssues(m[1], m[2], Number(m[3]));
+    const issue = parseIssueRef(ref);
+    if (!issue?.repo) throw new GitHubError(400, `Bad issue reference ${ref}; expected owner/name#123`);
+    const [owner, name] = issue.repo.split("/");
+    return this.listTicketSubIssues(owner, name, issue.number);
   }
 
   createRepo(input: { name: string; description?: string; private: boolean; org?: string }) {
@@ -210,6 +236,25 @@ export class GitHub {
     return this.req<Raw[]>("GET", `/repos/${owner}/${name}/issues/${number}/comments?per_page=100`).then((all) =>
       all.slice(0, 100).map((c) => ({ id: c.id, author: c.user.login, body: c.body, createdAt: c.created_at })),
     );
+  }
+
+  /** Merge a PR with a merge commit. GitHub refuses (405) a conflict, red required checks and branch protection. */
+  mergePull(owner: string, name: string, number: number) {
+    return this.req<{ sha: string; merged: boolean; message: string }>("PUT", `/repos/${owner}/${name}/pulls/${number}/merge`, { merge_method: "merge" });
+  }
+
+  /** Close a PR without merging it. */
+  closePull(owner: string, name: string, number: number) {
+    return this.req<{ number: number; state: string }>("PATCH", `/repos/${owner}/${name}/pulls/${number}`, { state: "closed" });
+  }
+
+  /** Delete a branch on GitHub. */
+  deleteBranch(owner: string, name: string, branch: string) {
+    return this.req<void>("DELETE", `/repos/${owner}/${name}/git/refs/heads/${branch.split("/").map(encodeURIComponent).join("/")}`);
+  }
+
+  closeIssue(owner: string, name: string, number: number) {
+    return this.req<{ number: number }>("PATCH", `/repos/${owner}/${name}/issues/${number}`, { state: "closed" });
   }
 
   async pullStatus(owner: string, name: string, number: number) {

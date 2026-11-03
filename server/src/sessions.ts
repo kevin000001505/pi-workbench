@@ -15,12 +15,16 @@ import {
 import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
 import type { Db, RepoRow, SessionRow, TicketRow } from "./db.ts";
 import { git, type GitEnv } from "./git.ts";
+import type { Delivery, MergeResult } from "./delivery.ts";
+import { closedIssues } from "./prs.ts";
 import {
   allDone,
   type Diagnosis,
   fixPrompt,
   grillPrompt,
+  reworkPrompt,
   implementPrompt,
+  mergePrompt,
   RESCUES_PER_SPEC,
   rescuePrompt,
   retroPrompt,
@@ -37,6 +41,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
+import { type Column, COLUMNS, columnOf } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
   configureAutoApprove,
@@ -121,6 +126,9 @@ export type SessionSummary = {
   grillSummary: string | null;
   spec: string | null;
   specRef: string | null;
+  reviewNote: string | null;
+  /** When the card last reached Done. */
+  doneAt: number | null;
   /** The GitHub issue this session solves, e.g. `owner/name#123`; null for plain sessions. */
   issueRef: string | null;
   /** The session's own auto-approve setting, and whether auto-approve is in effect for it now. */
@@ -149,7 +157,7 @@ type Live = {
   setupRunning: boolean;
   /** Arguments of pipeline tool calls in flight, by toolCallId. */
   toolArgs: Map<string, { name: string; args: any }>;
-  /** finish_ticket's (or finish_review's) report for the current run, applied when the run settles. */
+  /** finish_ticket's (or finish_review's, or finish_merge's) report for the current run, applied when the run settles. */
   finished?: { status: "done" | "blocked"; note: string };
   lastSettleAborted: boolean;
   /** finish_diagnosis's report for the current rescue run, applied when the run settles. */
@@ -211,7 +219,7 @@ async function worktreeState(dir: string) {
 /**
  * Owns every session: its row, its worktree and, while it runs, its `pi --mode rpc` process.
  *
- * A pipeline session moves setup → grill → spec → tickets → implement → review → done. Setup,
+ * A pipeline session moves setup → grill → spec → tickets → ready → implement → review → done. Setup,
  * grill, spec and tickets share the session's main conversation; each ticket and the final review
  * get a fresh pi run (their own pi session id) in the same worktree. `active_run` says which
  * conversation is live and on screen.
@@ -229,10 +237,16 @@ export class SessionManager extends EventEmitter {
   private fetchTicketSeed?: (ref: string) => Promise<TicketSeed>;
   /** The localhost proxy rescue and retro runs call the Reviewer model through (ADR 0003). */
   private rescueProxy?: RescueProxy;
+  /** Delivers a reviewed card to GitHub (opens its PR); the server wires it from the token and model settings. */
+  private delivery?: Delivery;
   private live = new Map<string, Live>();
   private summaryTimers = new Map<string, NodeJS.Timeout>();
+  /** Sessions whose Approve is in flight, so a second click does not merge twice. */
+  private approving = new Set<string>();
+  /** Sessions whose merge run resolves a conflict now; Approve waits for it to finish. */
+  private resolving = new Set<string>();
 
-  constructor(db: Db, secrets: SecretStore, gitEnv: () => Promise<GitEnv>, refreshSsh?: () => void, fetchTicketSeed?: (ref: string) => Promise<TicketSeed>, rescueProxy?: RescueProxy) {
+  constructor(db: Db, secrets: SecretStore, gitEnv: () => Promise<GitEnv>, refreshSsh?: () => void, fetchTicketSeed?: (ref: string) => Promise<TicketSeed>, rescueProxy?: RescueProxy, delivery?: Delivery) {
     super();
     this.db = db;
     this.secrets = secrets;
@@ -240,6 +254,7 @@ export class SessionManager extends EventEmitter {
     this.refreshSsh = refreshSsh;
     this.fetchTicketSeed = fetchTicketSeed;
     this.rescueProxy = rescueProxy;
+    this.delivery = delivery;
   }
 
   private row(id: string): SessionRow {
@@ -249,6 +264,8 @@ export class SessionManager extends EventEmitter {
   }
 
   private update(id: string, fields: Partial<SessionRow>) {
+    // Every way into Done stamps when it happened, for the board's Done history.
+    if (fields.phase === "done" && fields.done_at === undefined) fields = { ...fields, done_at: Date.now() };
     const keys = Object.keys(fields);
     this.db.prepare(`UPDATE sessions SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`).run(
       ...keys.map((k) => (fields as any)[k]),
@@ -327,6 +344,8 @@ export class SessionManager extends EventEmitter {
       grillSummary: row.grill_summary,
       spec: row.spec,
       specRef: row.spec_ref,
+      reviewNote: row.review_note,
+      doneAt: row.done_at,
       issueRef: row.issue_ref,
       autoApprove: autoApproveMode(row.auto_approve),
       autoApproveActive: this.autoApproveActive(row),
@@ -342,6 +361,7 @@ export class SessionManager extends EventEmitter {
           ...(t.fixRunId ? [{ id: t.fixRunId, label: `#${t.num} fix` }] : []),
         ]),
         ...(row.review_run ? [{ id: row.review_run, label: "Review" }] : []),
+        ...(row.merge_run ? [{ id: row.merge_run, label: "Merge" }] : []),
         ...(row.retro_run ? [{ id: row.retro_run, label: "retro" }] : []),
       ],
     };
@@ -411,9 +431,10 @@ export class SessionManager extends EventEmitter {
       throw Object.assign(new Error(`The TypeSafe skill is not installed (expected at ${typesafeSkillDir()})`), { status: 400 });
     }
     const mode = input.mode === "direct" ? "direct" : "pipeline";
-    // The Issues page's "Solve all tickets" button: the spec and its ticket sub-issues already
-    // exist on GitHub, so the session skips grill/spec/tickets and starts at implement.
-    const startFrom = input.startFrom === "tickets" ? "tickets" : undefined;
+    // An unclaimed card's moves: the spec and its ticket sub-issues already exist on GitHub.
+    // `tickets` (to Doing) skips grill/spec/tickets and starts at implement; `spec` (to To do)
+    // grills in rework mode on that spec issue, so it updates the spec and tickets in place.
+    const startFrom = input.startFrom === "tickets" || input.startFrom === "spec" ? input.startFrom : undefined;
     if (startFrom && input.mode === "direct")
       throw Object.assign(new Error("Solving tickets needs a pipeline session"), { status: 400 });
     const task = (input.prompt ?? "").trim();
@@ -423,18 +444,20 @@ export class SessionManager extends EventEmitter {
       if (!issueRef) throw Object.assign(new Error("Solving tickets needs the spec issue (issueRef)"), { status: 400 });
       if (!this.fetchTicketSeed) throw Object.assign(new Error("This workbench has no GitHub connection to read tickets from"), { status: 400 });
     }
+    // The spec issue's title, body and URL, and its ticket sub-issues, for startFrom sessions.
+    let seed: TicketSeed | undefined;
+    if (startFrom) {
+      seed = await this.fetchTicketSeed!(issueRef!);
+      if (seed.subIssues.length === 0) throw Object.assign(new Error(`Issue ${issueRef} has no open ticket sub-issues`), { status: 404 });
+    }
     const id = crypto.randomUUID();
-    const title = input.title.trim() || task.split("\n")[0].slice(0, 60) || "New session";
+    const title = input.title.trim() || task.split("\n")[0].slice(0, 60) || seed?.spec.title.slice(0, 120) || "New session";
     const base = input.baseBranch?.trim() || repo.default_branch;
     const branch = `pi/${slugify(title)}-${id.slice(0, 6)}`;
     const worktree = await createWorktree(repo, id, branch, base, await this.gitEnv());
     const now = Date.now();
     const needsSetup = worktreeNeedsSetup(worktree);
-    // The spec issue's title and body, and the ticket rows, for startFrom sessions.
-    let seed: TicketSeed | undefined;
-    if (startFrom) {
-      seed = await this.fetchTicketSeed!(issueRef!);
-      if (seed.subIssues.length === 0) throw Object.assign(new Error(`Issue ${issueRef} has no open ticket sub-issues`), { status: 404 });
+    if (startFrom === "tickets" && seed) {
       let ticketInputs;
       try {
         ticketInputs = validateTickets(ticketsFromSubIssues(seed.subIssues));
@@ -446,28 +469,34 @@ export class SessionManager extends EventEmitter {
       );
       for (const t of ticketInputs) insert.run(id, t.number, t.title, t.body, JSON.stringify(t.blockedBy), t.trackerRef ?? null);
     }
-    const phase: Phase = needsSetup ? "setup" : startFrom ? "implement" : mode === "pipeline" ? "grill" : "direct";
+    const phase: Phase = needsSetup ? "setup" : startFrom === "tickets" ? "implement" : mode === "pipeline" ? "grill" : "direct";
+    // The grill's first prompt; a setup run holds it until setup is done.
+    const held = startFrom === "spec" ? reworkPrompt(seed!.spec.htmlUrl) : task ? input.prompt : null;
     this.db
       .prepare(
         `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt, mode, phase, active_run, issue_ref, auto_approve, typesafe_skill, spec, spec_ref)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup && task ? input.prompt : null, mode, phase, id, issueRef, autoApprove === "inherit" ? null : autoApprove, typesafe ? 1 : 0, seed?.spec.body ?? null, seed?.spec.htmlUrl ?? null);
+      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup ? held : null, mode, phase, id, issueRef, autoApprove === "inherit" ? null : autoApprove, typesafe ? 1 : 0, startFrom === "tickets" ? (seed?.spec.body ?? null) : null, seed?.spec.htmlUrl ?? null);
     const s = this.state(id);
     s.loaded = true;
     await this.start(id);
     if (needsSetup) {
       s.setupRunning = true;
       await this.send(id, SETUP_PROMPT);
-    } else if (startFrom) {
+    } else if (startFrom === "tickets") {
       // grill/spec/tickets are skipped: the first ticket run starts now.
       await this.runNext(id);
+    } else if (startFrom === "spec") {
+      await this.send(id, held!);
     } else if (mode === "pipeline") {
       await this.send(id, grillPrompt(input.prompt));
     } else if (task) {
       await this.send(id, input.prompt);
     }
     this.emitSummary(id);
+    // A pipeline session is a new card on its repo's board.
+    if (mode === "pipeline") this.emit("board", repo.id);
     return this.summary(id);
   }
 
@@ -522,7 +551,9 @@ export class SessionManager extends EventEmitter {
     }
     const ticket = this.tickets(id).find((t) => [t.runId, t.rescueRunId, t.fixRunId].includes(runId));
     const kind = ticket?.rescueRunId === runId ? " rescue" : ticket?.fixRunId === runId ? " fix" : "";
-    const label = ticket ? ` · #${ticket.num}${kind}` : runId === row.review_run ? " · review" : runId === row.retro_run ? " · retro" : "";
+    const label = ticket
+      ? ` · #${ticket.num}${kind}`
+      : runId === row.review_run ? " · review" : runId === row.retro_run ? " · retro" : runId === row.merge_run ? " · merge" : "";
     s.error = null;
     s.stderr = [];
     const proc = new RpcProcess(
@@ -652,6 +683,7 @@ export class SessionManager extends EventEmitter {
         "INSERT INTO tickets (session_id, num, title, body, blocked_by, tracker_ref, status) VALUES (?, ?, ?, ?, ?, ?, 'ready')",
       );
       for (const t of tickets) insert.run(id, t.number, t.title, t.body, JSON.stringify(t.blockedBy), t.trackerRef ?? null);
+      this.update(id, { rework_tickets: 0 });
     } else if (name === "finish_ticket" && row.phase === "implement" && (args.status === "done" || args.status === "blocked")) {
       s.finished = { status: args.status, note: String(args.note ?? "").trim() };
     } else if (name === "finish_diagnosis" && row.phase === "implement") {
@@ -660,6 +692,8 @@ export class SessionManager extends EventEmitter {
       s.retroReport = args.report.trim();
     } else if (name === "finish_review" && row.phase === "review") {
       s.finished = { status: "done", note: String(args.note ?? "").trim() };
+    } else if (name === "finish_merge" && row.phase === "pr" && row.merge_run === this.runOf(row) && (args.status === "resolved" || args.status === "failed")) {
+      s.finished = { status: args.status === "resolved" ? "done" : "blocked", note: String(args.note ?? "").trim() };
     }
     this.emitSummary(id, true);
   }
@@ -912,7 +946,8 @@ export class SessionManager extends EventEmitter {
     if (row.mode === "pipeline" && !discard) {
       this.update(id, { phase: "grill" });
       this.emitSummary(id);
-      await this.send(id, grillPrompt(row.held_prompt), "followUp");
+      // A session on an existing spec issue holds its whole rework prompt; others hold the task.
+      await this.send(id, row.spec_ref ? row.held_prompt : grillPrompt(row.held_prompt), "followUp");
       return;
     }
     this.update(id, { phase: "direct", mode: "direct" });
@@ -940,13 +975,15 @@ export class SessionManager extends EventEmitter {
     } else if (row.phase === "spec" && row.spec) {
       this.update(id, { phase: "tickets" });
       await this.send(id, ticketsPrompt(row.spec_ref), "followUp");
-    } else if (row.phase === "tickets" && this.tickets(id).length > 0) {
-      this.update(id, { phase: "implement" });
-      await this.runNext(id);
+    } else if (row.phase === "tickets" && !row.rework_tickets && this.tickets(id).length > 0) {
+      // The tickets are on the tracker: the card waits in Issues until Solve all starts the runs.
+      this.update(id, { phase: "ready" });
     } else if (row.phase === "implement") {
       await this.afterTicketRun(id, s);
     } else if (row.phase === "review" && row.review_run === this.runOf(row)) {
       await this.afterReviewRun(id, s);
+    } else if (row.phase === "pr" && row.merge_run && row.merge_run === this.runOf(row) && this.resolving.has(id)) {
+      await this.afterMergeRun(id, s);
     } else if (row.phase === "retro" && row.retro_run === this.runOf(row)) {
       await this.afterRetroRun(id, s);
     }
@@ -1061,6 +1098,7 @@ export class SessionManager extends EventEmitter {
   private async afterReviewRun(id: string, s: Live) {
     const report = s.finished;
     s.finished = undefined;
+    if (report) this.update(id, { review_note: report.note || null });
     if (report && this.retroDue(id)) await this.startRetro(id, report.note);
     else if (report) await this.finishPipeline(id, report.note);
     else if (s.lastSettleAborted) this.flag(id, "The review was stopped. Reply to continue it, retry it, or mark it done.");
@@ -1129,18 +1167,28 @@ export class SessionManager extends EventEmitter {
       this.notify(id, `The retro run failed: ${(err as Error).message}. The pipeline finishes without its report.`, "warning");
     }
     await this.finishPipeline(id, reviewNote);
-    if (changed) this.flag(id, "The retro run changed the worktree; it must only propose. Check the changes before you create the PR.");
+    if (changed) this.flag(id, "The retro run changed the worktree; it must only propose. Check the changes before you approve the PR.");
   }
 
   private notify(id: string, message: string, level: "info" | "warning") {
     this.emit("event", id, { type: "wb_notify", message, level });
   }
 
+  /** The review is finished: push the branch and open the PR. If it cannot open, stay in review with the reason. */
   private async finishPipeline(id: string, reviewNote: string | null) {
-    // Switch back to the plan conversation before announcing "done", so no one sees done + review run.
+    let pr: { number: number; url: string };
+    try {
+      if (!this.delivery) throw new Error("this workbench has no GitHub connection");
+      const { row, repo } = this.repoOf(id);
+      pr = await this.delivery.openPr(row, repo, this.tickets(id));
+    } catch (err) {
+      this.flag(id, `The PR could not open: ${(err as Error).message}. Retry the review, or mark it done to try the PR again.`);
+      return;
+    }
+    // Switch back to the plan conversation before announcing "pr", so no one sees pr + review run.
     await this.switchRun(id, id, false);
-    this.update(id, { phase: "done", attention: null });
-    const msg = `All tickets are done and reviewed${reviewNote ? ` (${reviewNote})` : ""}. Create the PR.`;
+    this.update(id, { phase: "pr", pr_number: pr.number, pr_url: pr.url, attention: null });
+    const msg = `All tickets are done and reviewed${reviewNote ? ` (${reviewNote})` : ""}. PR #${pr.number} is open.`;
     this.emit("event", id, { type: "wb_notify", message: msg, level: "info" });
   }
 
@@ -1162,7 +1210,11 @@ export class SessionManager extends EventEmitter {
     }
     const t = nextTicket(tickets);
     if (!t) {
-      this.flag(id, "No ticket can start: every remaining ticket waits on a blocked one.");
+      const remaining = tickets.filter((x) => x.status !== "done");
+      const blocked = remaining.filter((x) => x.status === "blocked").map((x) => `#${x.num}`).join(", ");
+      // Every remaining ticket is blocked itself, or some wait on the blocked ones.
+      const why = remaining.every((x) => x.status === "blocked") ? "every remaining ticket is blocked" : "every remaining ticket is blocked or waits on a blocked one";
+      this.flag(id, `No ticket can start: ${why} (${blocked}).`);
       return;
     }
     const runId = `${id}-t${t.num}-${Date.now().toString(36)}`;
@@ -1234,8 +1286,8 @@ export class SessionManager extends EventEmitter {
     if (row.mode !== "pipeline") throw Object.assign(new Error("Not a pipeline session"), { status: 409 });
     const current = this.tickets(id).find((t) => t.status === "running" || t.status === "blocked");
     if (action === "stop") {
-      await this.abort(id).catch(() => {});
-      this.update(id, { phase: "done", attention: null });
+      // Stop pauses the card in Issues, the same as a move there; Solve all continues it.
+      await this.pause(id);
     } else if (row.phase === "review") {
       if (action === "retry") await this.startReview(id);
       else await this.finishPipeline(id, null);
@@ -1256,6 +1308,199 @@ export class SessionManager extends EventEmitter {
     this.emitSummary(id, true);
   }
 
+  /**
+   * The board's moves (`<from>><to>` columns): each drag is a command that changes the phase.
+   * A move with no entry here is refused with 409, so the card snaps back.
+   */
+  private readonly moves: Partial<Record<`${Column}>${Column}`, (id: string) => Promise<void>>> = {
+    "issues>doing": (id) => this.solveAll(id),
+    "review>done": (id) => this.approve(id),
+    "doing>issues": (id) => this.pause(id),
+    "qa>issues": (id) => this.pause(id),
+    "review>issues": (id) => this.pause(id),
+    "issues>todo": (id) => this.rework(id),
+    "doing>todo": (id) => this.rework(id),
+    "qa>todo": (id) => this.rework(id),
+    "review>todo": (id) => this.rework(id),
+  };
+
+  /**
+   * Stop the live run and wait in `ready`; ticket statuses stay, and an open PR stays open for the
+   * next review to push to. The phase changes first, so the stopped run's settle moves nothing.
+   */
+  private async pause(id: string) {
+    this.update(id, { phase: "ready", attention: null });
+    await this.stop(id);
+    await this.dropRun(id);
+  }
+
+  /**
+   * A backward move stopped the live run. The stop rule's clock goes with it (the next run gets a
+   * fresh watch), and a merge run's half-done merge is undone, so Approve can start again.
+   */
+  private async dropRun(id: string) {
+    this.unwatch(this.state(id));
+    if (this.resolving.delete(id)) await git(this.row(id).worktree, ["merge", "--abort"], await this.gitEnv()).catch(() => {});
+  }
+
+  /**
+   * Plan again: stop the live run, go back to the plan conversation, and grill with the rework
+   * prompt. The grill summary and spec are cleared (the spec ref stays), and the old tickets are
+   * marked stale until record_tickets replaces them, so afterSettled does not skip ahead; send()
+   * clears the attention.
+   */
+  private async rework(id: string) {
+    this.update(id, { phase: "grill", grill_summary: null, spec: null, rework_tickets: 1 });
+    await this.switchRun(id, id, false);
+    await this.dropRun(id);
+    // A ticket the stopped run left `running` is not worked on while the card is in To do.
+    for (const t of this.tickets(id)) if (t.status === "running") this.updateTicket(id, t.num, { status: "ready" });
+    await this.send(id, reworkPrompt(this.row(id).spec_ref));
+  }
+
+  /** Solve all: the paused session implements its tickets, one fresh run each. */
+  private async solveAll(id: string) {
+    // A ticket a stopped run left `running` starts again.
+    for (const t of this.tickets(id)) if (t.status === "running") this.updateTicket(id, t.num, { status: "ready" });
+    this.update(id, { phase: "implement" });
+    await this.runNext(id);
+  }
+
+  /**
+   * Approve: merge the card's PR with a merge commit, then deliver it (`delivered`). A merge
+   * conflict goes to `mergeConflict`; any other refusal keeps `pr` with GitHub's message.
+   */
+  async approve(id: string) {
+    const row = this.row(id);
+    if (row.phase !== "pr" || this.approving.has(id) || this.resolving.has(id)) throw Object.assign(new Error("Only a card in Review with its PR open can be approved."), { status: 409 });
+    this.approving.add(id);
+    try {
+      const { repo } = this.repoOf(id);
+      let result: MergeResult;
+      try {
+        if (!this.delivery) throw new Error("this workbench has no GitHub connection");
+        result = await this.delivery.merge(row, repo);
+      } catch (err) {
+        // A GitHubError carries GitHub's own message as `detail`; the flag ends in one period.
+        const why = ((err as { detail?: string }).detail || (err as Error).message).replace(/[.\s]+$/, "");
+        this.flag(id, `GitHub refused the merge: ${why}. Fix it on GitHub, then approve again.`);
+        return;
+      }
+      if ("conflict" in result) await this.mergeConflict(id, result.conflict);
+      else await this.delivered(id, repo);
+    } finally {
+      this.approving.delete(id);
+      this.emitSummary(id, true);
+    }
+  }
+
+  /**
+   * The merge stopped on a conflict; the card stays in Review. Merge the base branch into the
+   * worktree: a clean merge is pushed at once, and one that stops on conflicts goes to a fresh
+   * merge run with resolving-merge-conflicts, which `afterMergeRun` finishes.
+   */
+  private async mergeConflict(id: string, reason: string) {
+    const row = this.row(id);
+    const env = await this.gitEnv();
+    const sh = (args: string[]) => git(row.worktree, args, env);
+    try {
+      await sh(["fetch", "-q", "origin", row.base_branch]);
+      await sh(["merge", "--no-edit", `origin/${row.base_branch}`]);
+    } catch (err) {
+      const files = (await sh(["diff", "--name-only", "--diff-filter=U"]).catch(() => "")).split("\n").filter(Boolean);
+      if (!files.length) {
+        await sh(["merge", "--abort"]).catch(() => {});
+        this.flag(id, `${reason}, and the workbench could not merge ${row.base_branch} into the branch: ${(err as Error).message}. Resolve it on the branch, then approve again.`);
+        return;
+      }
+      // Switch to the merge run before anyone hears about it.
+      const runId = `${id}-merge-${Date.now().toString(36)}`;
+      this.update(id, { merge_run: runId, attention: null });
+      this.resolving.add(id);
+      await this.switchRun(id, runId, true);
+      this.emit("event", id, { type: "wb_notify", message: `${reason}. A merge run resolves it now.`, level: "info" });
+      await this.send(id, mergePrompt(row.base_branch, reason, files)).catch((err2) => {
+        this.resolving.delete(id);
+        this.flag(id, `The merge run could not start: ${(err2 as Error).message}. Resolve the conflict on the branch, then approve again.`);
+      });
+      return;
+    }
+    await this.pushResolved(id, `${row.base_branch} merged into the branch with no conflicting lines`);
+  }
+
+  /** The merge run settled: push a resolved merge; else undo the half-done merge and say why. */
+  private async afterMergeRun(id: string, s: Live) {
+    const report = s.finished;
+    s.finished = undefined;
+    this.resolving.delete(id);
+    const row = this.row(id);
+    const unfinished = report?.status === "done" ? await this.unfinishedMerge(row) : null;
+    if (report?.status === "done" && !unfinished) {
+      await this.pushResolved(id, report.note);
+      return;
+    }
+    await git(row.worktree, ["merge", "--abort"], await this.gitEnv()).catch(() => {});
+    const why = unfinished
+      ? `the merge run called finish_merge "resolved", but ${unfinished}`
+      : report
+        ? report.note || "no reason given"
+        : s.lastSettleAborted
+          ? "the run was stopped"
+          : "the run stopped without finishing";
+    this.flag(id, `The merge conflict was not resolved: ${why}. Resolve it on the branch, then approve again.`);
+  }
+
+  /** Why the worktree does not hold a finished merge of the base branch, or null when it does. */
+  private async unfinishedMerge(row: SessionRow): Promise<string | null> {
+    const sh = (args: string[]) => git(row.worktree, args).then(() => true, () => false);
+    if (await sh(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) return "the merge is not committed";
+    if (!(await sh(["merge-base", "--is-ancestor", `origin/${row.base_branch}`, "HEAD"]))) return `HEAD does not contain origin/${row.base_branch}`;
+    return null;
+  }
+
+  /** Push the merge to the PR's branch; the card stays in Review for a second Approve. */
+  private async pushResolved(id: string, note: string) {
+    const row = this.row(id);
+    try {
+      await git(row.worktree, ["push", "-q", "origin", `HEAD:refs/heads/${row.branch}`], await this.gitEnv());
+    } catch (err) {
+      this.flag(id, `The merge conflict is resolved, but the push failed: ${(err as Error).message}. Push the branch, then approve again.`);
+      return;
+    }
+    this.flag(id, `The merge conflict with ${row.base_branch} is resolved and pushed${note ? ` (${note})` : ""}. Read the resolution, then approve again.`);
+  }
+
+  /**
+   * The PR is merged: close the issues when GitHub will not (a base that is not the default
+   * branch ignores `Closes`), delete the branch on GitHub and the worktree, and set `done`.
+   * A cleanup step that fails does not undo the merge; its reason goes on the card.
+   */
+  private async delivered(id: string, repo: RepoRow) {
+    const row = this.row(id);
+    const delivery = this.delivery!;
+    const problems: string[] = [];
+    if (row.base_branch !== repo.default_branch) {
+      await delivery.closeIssues(repo, closedIssues(row, this.tickets(id))).catch((err) => problems.push(`the issues did not close (${(err as Error).message})`));
+    }
+    await delivery.deleteBranch(row, repo).catch((err) => problems.push(`the branch was not deleted (${(err as Error).message})`));
+    await this.stop(id).catch(() => {});
+    if (fs.existsSync(row.worktree)) await removeWorktree(repo, row.worktree).catch((err) => problems.push(`the worktree was not removed (${(err as Error).message})`));
+    this.update(id, { phase: "done", attention: problems.length ? `PR #${row.pr_number} is merged, but ${problems.join(", and ")}.` : null });
+    this.emit("event", id, { type: "wb_notify", message: `PR #${row.pr_number} is merged.`, level: "info" });
+  }
+
+  /** A drag of a card to another column; the card's column follows from the phase it leaves. */
+  async move(id: string, to: Column) {
+    const from = columnOf(this.row(id).phase);
+    const command = from ? this.moves[`${from}>${to}`] : undefined;
+    if (!command) {
+      const label = (c: Column | null) => COLUMNS.find((x) => x.id === c)?.label ?? "this place";
+      throw Object.assign(new Error(`This card cannot move from ${label(from)} to ${label(to)} now.`), { status: 409 });
+    }
+    await command(id);
+    this.emitSummary(id, true);
+  }
+
   async archive(id: string) {
     const row = this.row(id);
     await this.stop(id);
@@ -1264,6 +1509,31 @@ export class SessionManager extends EventEmitter {
     this.update(id, { archived: 1, updated_at: Date.now() });
     this.live.delete(id);
     this.emit("removed", id);
+  }
+
+  /**
+   * Abandon a card: stop its runs, close its PR unmerged, delete its branch on GitHub and its
+   * worktree, then delete the session and its tickets. The GitHub issues stay open, so a spec
+   * issue with open tickets shows again as an unclaimed card. A GitHub step that fails keeps the card.
+   */
+  async abandon(id: string) {
+    const row = this.row(id);
+    const repo = getRepo(this.db, row.repo_id);
+    await this.stop(id);
+    if (repo && this.delivery) {
+      // A merged PR (a card in Done) is not closed again.
+      if (row.pr_number && row.phase !== "done") await this.delivery.closePr(row, repo);
+      await this.delivery.deleteBranch(row, repo);
+    }
+    if (repo && fs.existsSync(row.worktree)) await removeWorktree(repo, row.worktree);
+    clearTimeout(this.summaryTimers.get(id));
+    this.summaryTimers.delete(id);
+    this.db.prepare("DELETE FROM tickets WHERE session_id = ?").run(id);
+    this.db.prepare("DELETE FROM auto_decisions WHERE session_id = ?").run(id);
+    this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+    this.live.delete(id);
+    this.emit("removed", id);
+    this.emit("board", row.repo_id);
   }
 
   rename(id: string, title: string) {

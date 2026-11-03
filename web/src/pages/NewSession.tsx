@@ -3,6 +3,7 @@ import { go } from "../App.tsx";
 import { api } from "../api.ts";
 import { SkillPicker, useSkills } from "../session/Composer.tsx";
 import { useStore } from "../store.tsx";
+import { lastBoardRepo } from "./Board.tsx";
 import type { AutoApproveMode, Repo, SessionSummary, Skill } from "../types.ts";
 import { Empty, PageHeader, Spinner, issueUrl, parseIssueRef } from "../ui.tsx";
 
@@ -39,7 +40,8 @@ export function NewSession({
       .get<Repo[]>("/api/repos")
       .then((r) => {
         setRepos(r);
-        if (!repo && r[0]) setRepo(r[0].id);
+        // With no repo in the route, default to the board's repo (the one the board opened last).
+        if (!repo && r[0]) setRepo((r.find((x) => x.id === lastBoardRepo()) ?? r[0]).id);
       })
       .catch((e) => toast(e.message, "error"));
   }, [repoId, toast]);

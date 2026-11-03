@@ -228,10 +228,15 @@ test("pipeline: ticket validation, frontier order and prompts", async () => {
     { ...t(1, "done"), trackerRef: "#12" },
     { ...t(2, "ready"), trackerRef: "https://github.com/a/b/issues/13" },
     { ...t(3, "done"), trackerRef: ".scratch/x/issues/03.md" },
-  ]);
+    { ...t(4, "done"), trackerRef: "14" },
+    { ...t(5, "done"), trackerRef: "https://github.com/other/tracker/issues/15" },
+  ], "a/b");
   assert.match(section, /- \[x\] #1 T1 \(Closes #12\)/);
   assert.match(section, /- \[ \] #2 T2 \(Closes #13\)/);
   assert.match(section, /- \[x\] #3 T3 \(`\.scratch\/x\/issues\/03\.md`\)/);
+  assert.match(section, /- \[x\] #4 T4 \(Closes #14\)/);
+  // Another repo's issue is named, not closed.
+  assert.match(section, /- \[x\] #5 T5 \(`https:\/\/github\.com\/other\/tracker\/issues\/15`\)/);
 });
 
 test("ticketsFromSubIssues maps open sub-issues to tickets with remapped edges", async () => {
@@ -267,12 +272,44 @@ test("the origin issue's Closes line is deduped against ticket lines by number",
   const { originCloses } = await import("../src/prs.ts");
   const section = (ref: string) => `\n## Tickets\n\n- [x] #1 Ship it (${ref})\n`;
 
-  assert.equal(originCloses("me/app#42", ""), "Closes #42\n");
-  assert.equal(originCloses("me/app#42", section(`.scratch/issues/42.md`)), "Closes #42\n"); // a non-issue ref doesn't close anything
-  assert.equal(originCloses(null, section("Closes #42")), ""); // no origin issue
-  assert.equal(originCloses("me/app", ""), ""); // malformed ref
-  assert.equal(originCloses("me/app#42", section("Closes #42")), ""); // a ticket already closes it
-  assert.equal(originCloses("me/app#1", section("Closes #12")), "Closes #1\n"); // 1 is not 12
+  assert.equal(originCloses("me/app", "me/app#42", ""), "Closes #42\n");
+  assert.equal(originCloses("me/app", "me/app#42", section(`.scratch/issues/42.md`)), "Closes #42\n"); // a non-issue ref doesn't close anything
+  assert.equal(originCloses("me/app", null, section("Closes #42")), ""); // no origin issue
+  assert.equal(originCloses("me/app", "me/app", ""), ""); // malformed ref
+  assert.equal(originCloses("me/app", "me/app#42", section("Closes #42")), ""); // a ticket already closes it
+  assert.equal(originCloses("me/app", "me/app#1", section("Closes #12")), "Closes #1\n"); // 1 is not 12
+  // The spec issue closes too: as `#n` or an issues URL, once, and not when a ticket or the origin already does.
+  assert.equal(originCloses("me/app", null, "", "#12"), "Closes #12\n");
+  assert.equal(originCloses("me/app", "me/app#42", "", "https://github.com/me/app/issues/12"), "Closes #42\nCloses #12\n");
+  assert.equal(originCloses("me/app", "me/app#42", "", "https://github.com/me/app/issues/42"), "Closes #42\n");
+  assert.equal(originCloses("me/app", null, section("Closes #12"), "#12"), "");
+  assert.equal(originCloses("me/app", null, "", ".scratch/greeting/spec.md"), "");
+  // A ref to another repo's issue closes nothing here: GitHub would read `Closes #12` as this repo's #12.
+  assert.equal(originCloses("me/app", null, "", "other/tracker#12"), "");
+  assert.equal(originCloses("me/app", null, "", "https://github.com/other/tracker/issues/12"), "");
+  assert.equal(originCloses("me/app", "other/tracker#42", ""), "");
+});
+
+test("closedIssues closes only this repo's issues: a spec ref to another repo closes nothing here", async () => {
+  const { closedIssues } = await import("../src/prs.ts");
+  const row = (spec_ref: string | null, issue_ref: string | null = null) => ({ repo_id: "me/app", issue_ref, spec_ref }) as any;
+  const ticket = (trackerRef: string) => ({ num: 1, title: "T", body: "", blockedBy: [], trackerRef, status: "done", note: null, runId: null }) as any;
+  assert.deepEqual(closedIssues(row("me/app#40", "me/app#40"), [ticket("41")]), [41, 40]);
+  assert.deepEqual(closedIssues(row("other/tracker#12"), []), []);
+  assert.deepEqual(closedIssues(row("https://github.com/other/tracker/issues/12"), [ticket("https://github.com/other/tracker/issues/13")]), []);
+});
+
+test("issue refs: parseIssueRef reads every form; a card id maps back to its spec issue's number", async () => {
+  const { parseIssueRef, unclaimedId, unclaimedNumber } = await import("../../shared/board.ts");
+  assert.deepEqual(parseIssueRef("me/app#12"), { repo: "me/app", number: 12 });
+  assert.deepEqual(parseIssueRef("https://github.com/me/app/issues/12/"), { repo: "me/app", number: 12 });
+  assert.deepEqual(parseIssueRef("#12"), { repo: null, number: 12 });
+  assert.deepEqual(parseIssueRef(" 12 "), { repo: null, number: 12 });
+  assert.equal(parseIssueRef(".scratch/greeting/spec.md"), null);
+  assert.equal(parseIssueRef(null), null);
+  assert.equal(unclaimedNumber(unclaimedId(12)), 12);
+  assert.equal(unclaimedNumber("3f2a-session-id"), null);
+  assert.equal(unclaimedNumber("issue:x"), null);
 });
 
 test("requireTrackedRepo resolves tracked repos and rejects the rest", () => {
@@ -315,6 +352,29 @@ test("old databases gain the pipeline columns", async () => {
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM auto_decisions").get() as any).n, 1);
 });
 
+test("old done pipeline rows with a PR number open as pr, once", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wb-mig-")), "old.db");
+  const old = new DatabaseSync(file);
+  old.exec(
+    "CREATE TABLE sessions (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, title TEXT NOT NULL, branch TEXT NOT NULL, base_branch TEXT NOT NULL, worktree TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, pr_number INTEGER, pr_url TEXT, held_prompt TEXT, archived INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'direct', phase TEXT NOT NULL DEFAULT 'direct')",
+  );
+  const add = old.prepare("INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, pr_number, mode, phase) VALUES (?, 'r', 't', 'b', 'main', '/w', 0, 0, ?, ?, ?)");
+  add.run("reviewed-with-pr", 4, "pipeline", "done");
+  add.run("reviewed-no-pr", null, "pipeline", "done");
+  add.run("implementing", 5, "pipeline", "implement");
+  add.run("direct", 6, "direct", "direct");
+  old.close();
+  const phases = (db: ReturnType<typeof openDb>) =>
+    Object.fromEntries((db.prepare("SELECT id, phase FROM sessions ORDER BY id").all() as any[]).map((r) => [r.id, r.phase]));
+  const db = openDb(file);
+  assert.deepEqual(phases(db), { "reviewed-with-pr": "pr", "reviewed-no-pr": "done", implementing: "implement", direct: "direct" });
+  // `done` now means merged: a later merge is not turned back into `pr` on the next open.
+  db.prepare("UPDATE sessions SET phase = 'done' WHERE id = 'reviewed-with-pr'").run();
+  db.close();
+  assert.equal(phases(openDb(file))["reviewed-with-pr"], "done");
+});
+
 test("README documents the issues feature for a fresh setup", () => {
   const readme = fs.readFileSync(new URL("../../README.md", import.meta.url), "utf8");
   const section = (title: string) => {
@@ -333,23 +393,20 @@ test("README documents the issues feature for a fresh setup", () => {
   assert.match(clause, /read/i);
   assert.doesNotMatch(clause, /write/i);
 
-  // Features: the Issues page browses and searches the open issues of a tracked repo, reads the discussion, and starts a pre-filled session.
+  // Features: a spec issue with open tickets shows as an unclaimed card; its drags solve or rework it.
   const features = section("What you get");
-  assert.match(features, /Issues\*{0,2} page/i);
-  assert.match(features, /open issues/);
-  assert.match(features, /search/i);
-  assert.match(features, /discussion|comment/i);
-  assert.match(features, /pre-?filled/i);
-
-  // Solve flow: the PR body carries Closes #n, and merging the PR closes the issue.
-  assert.match(features, /Closes #/);
-  assert.match(features, /merg/i);
+  assert.match(features, /unclaimed card/i);
+  assert.match(features, /ticket sub-issues/);
+  assert.match(features, /Doing/);
+  assert.match(features, /To do/);
+  // Solve flow: the PR closes the spec issue and every ticket issue.
+  assert.match(features, /closes the spec issue/i);
 });
 
 test("every pipeline prompt starts with a /skill: command pi will expand", async () => {
   const p = await import("../src/pipeline.ts");
   const t = { num: 1, title: "T", body: "b", blockedBy: [], trackerRef: null, status: "ready", note: null, runId: null } as any;
-  for (const prompt of [p.grillPrompt("task"), p.specPrompt(), p.ticketsPrompt(null), p.ticketsPrompt("#4"), p.implementPrompt(t, null, null, []), p.reviewPrompt("main", null, null, [t])]) {
+  for (const prompt of [p.grillPrompt("task"), p.specPrompt(), p.ticketsPrompt(null), p.ticketsPrompt("#4"), p.implementPrompt(t, null, null, []), p.reviewPrompt("main", null, null, [t]), p.reworkPrompt("#4"), p.reworkPrompt(null), p.mergePrompt("main", "PR #1 has a merge conflict with main", ["a.txt"])]) {
     // pi needs an argument after the skill name on the first line.
     assert.match(prompt.split("\n")[0], /^\/skill:[\w-]+ \S/);
   }
@@ -362,9 +419,9 @@ test("glossary and ADR 0003 record the stop-rule, rescue and retro vocabulary", 
   }
   // The relationship: the Reviewer's settings drive the Reviewer, rescue and retro runs.
   assert.match(glossary, /an empty Reviewer model turns all three off/i);
-  // The Phase union puts retro between review and done, server and web.
-  assert.match(fs.readFileSync(new URL("../src/pipeline.ts", import.meta.url), "utf8"), /"review" \| "retro" \| "done"/);
-  assert.match(fs.readFileSync(new URL("../../web/src/types.ts", import.meta.url), "utf8"), /"review" \| "retro" \| "done"/);
+  // The Phase union puts retro between review and pr (then done), server and web.
+  assert.match(fs.readFileSync(new URL("../src/pipeline.ts", import.meta.url), "utf8"), /"review" \| "retro" \| "pr" \| "done"/);
+  assert.match(fs.readFileSync(new URL("../../web/src/types.ts", import.meta.url), "utf8"), /"review" \| "retro" \| "pr" \| "done"/);
   const adrs = fs.readdirSync(new URL("../../docs/adr", import.meta.url));
   const file = adrs.find((f) => f.startsWith("0003-"));
   assert.ok(file, "ADR 0003 exists");

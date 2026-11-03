@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { issueNumberOf } from "../../shared/board.ts";
 import type { RepoRow, SessionRow } from "./db.ts";
 import { git, type GitEnv } from "./git.ts";
 import type { GitHub } from "./github.ts";
@@ -44,22 +45,29 @@ function newFileDiff(root: string, file: string) {
 }
 
 /**
- * The `Closes #n` line for the session's origin issue, ready to append after the ticket section.
- * Empty when the session has no origin issue, or when a ticket line already closes the same
- * number (matched as a whole number, so `#1` is not deduped against `#12`).
+ * The `Closes #n` lines for the session's origin issue (`owner/name#n`) and its spec issue
+ * (`#n` or an issues URL), ready to append after the ticket section. A ref that names no issue
+ * of `repoId` (a `.scratch` path, another repo's issue) adds nothing, and a number that a ticket
+ * line or the other ref already closes is not repeated (matched as a whole number, so `#1` is
+ * not deduped against `#12`).
  */
-export function originCloses(issueRef: string | null, ticketSection: string): string {
-  const m = /#(\d+)$/.exec(issueRef ?? "");
-  if (!m) return "";
-  const closed = [...ticketSection.matchAll(/Closes #(\d+)/g)].map((x) => x[1]);
-  return closed.includes(m[1]) ? "" : `Closes #${m[1]}\n`;
+export function originCloses(repoId: string, issueRef: string | null, ticketSection: string, specRef: string | null = null): string {
+  const closed = [...ticketSection.matchAll(/Closes #(\d+)/g)].map((x) => Number(x[1]));
+  let lines = "";
+  for (const ref of [issueRef, specRef]) {
+    const n = issueNumberOf(ref, repoId);
+    if (n === null || closed.includes(n)) continue;
+    closed.push(n);
+    lines += `Closes #${n}\n`;
+  }
+  return lines;
 }
 
 /** Ask the configured model for a title and body; fall back to the session title and commit list. */
 export async function draftPr(row: SessionRow, env: GitEnv, model: ModelSettings, apiKey: string | undefined, tickets: Ticket[] = []) {
   const c = await changes(row, env);
-  const ticketList = ticketsSection(tickets);
-  const issueLine = originCloses(row.issue_ref, ticketList);
+  const ticketList = ticketsSection(tickets, row.repo_id);
+  const issueLine = originCloses(row.repo_id, row.issue_ref, ticketList, row.spec_ref);
   const fallback = { title: row.title, body: `## Summary\n\n${c.log || "- (no commits yet)"}\n${ticketList}${issueLine}` };
   const diff = `${c.committed}\n${c.uncommitted}`.trim();
   if (!diff) return { ...fallback, drafted: false, error: "No changes against the base branch yet", ...c };
@@ -79,15 +87,22 @@ export async function draftPr(row: SessionRow, env: GitEnv, model: ModelSettings
   }
 }
 
-/** The pipeline's tickets; GitHub issue references become "Closes #n" so merging closes them. */
-export function ticketsSection(tickets: Ticket[]) {
+/** The pipeline's tickets; references to `repoId`'s issues become "Closes #n" so merging closes them. */
+export function ticketsSection(tickets: Ticket[], repoId: string) {
   if (tickets.length === 0) return "";
   const lines = tickets.map((t) => {
-    const issue = /(?:^#|\/issues\/)(\d+)$/.exec(t.trackerRef ?? "") ?? /^(\d+)$/.exec(t.trackerRef ?? "");
-    const ref = issue ? `Closes #${issue[1]}` : t.trackerRef ? `\`${t.trackerRef}\`` : "";
+    const issue = issueNumberOf(t.trackerRef, repoId);
+    const ref = issue !== null ? `Closes #${issue}` : t.trackerRef ? `\`${t.trackerRef}\`` : "";
     return `- [${t.status === "done" ? "x" : " "}] #${t.num} ${t.title}${ref ? ` (${ref})` : ""}`;
   });
   return `\n## Tickets\n\n${lines.join("\n")}\n`;
+}
+
+/** The issue numbers the PR body's `Closes` lines name: the ticket issues, then the origin and spec issues. */
+export function closedIssues(row: SessionRow, tickets: Ticket[]): number[] {
+  const section = ticketsSection(tickets, row.repo_id);
+  const lines = `${section}${originCloses(row.repo_id, row.issue_ref, section, row.spec_ref)}`;
+  return [...new Set([...lines.matchAll(/Closes #(\d+)/g)].map((m) => Number(m[1])))];
 }
 
 export async function openPr(

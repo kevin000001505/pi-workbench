@@ -13,7 +13,30 @@ export function startMockGitHub(root: string, login = "kevin") {
   const issues: any[] = []; // repo-scoped: { owner, name, ...issue }; the issues feed carries pull-request entries too
   const comments: any[] = []; // { owner, name, issueNumber, ...comment }
   const subIssueSeeds: Record<string, any> = {}; // `${owner}/${name}#${specNumber}` → { spec, subs } for the /graphql route
+  // Every PR head's check runs; a test edits it. A pull whose head conflicts with its base is "dirty", as on
+  // GitHub; set its `mergeable_state` to force a state, or its `merge_refusal` to a message for a merge that branch protection refuses.
+  const checkRuns: { name: string; status: string; conclusion: string | null }[] = [
+    { name: "ci", status: "completed", conclusion: "success" },
+    { name: "lint", status: "in_progress", conclusion: null },
+  ];
+  // Every issue a merge or an issue PATCH closed, in order: `{ ref: "owner/name#n", by: "merge" | "api" }`.
+  const closed: { ref: string; by: "merge" | "api" }[] = [];
   const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
+  /**
+   * A pull's mergeable state: its `mergeable_state` switch when a test set one, else what git says
+   * about merging its head into its base (a real conflict is "dirty").
+   */
+  const mergeableState = (owner: string, name: string, pr: any): string => {
+    if (pr.mergeable_state) return pr.mergeable_state;
+    if (pr.merged) return "clean";
+    try {
+      sh(path.join(root, owner, `${name}.git`), "merge-tree", "--write-tree", `refs/heads/${pr.base}`, `refs/heads/${pr.head}`);
+      return "clean";
+    } catch (err) {
+      // merge-tree exits 1 on a conflict; any other failure (a ref is gone) is no conflict.
+      return (err as { status?: number }).status === 1 ? "dirty" : "clean";
+    }
+  };
 
   const createBare = (owner: string, name: string) => {
     const bare = path.join(root, owner, `${name}.git`);
@@ -78,6 +101,17 @@ export function startMockGitHub(root: string, login = "kevin") {
     subIssueSeeds[`${owner}/${name}#${spec.number}`] = { spec, subs };
   };
 
+  /** Close an issue wherever the mock knows it: the issues feed, the sub-issue seeds, and `closed`. */
+  const closeIssue = (owner: string, name: string, number: number, by: "merge" | "api") => {
+    for (const i of issues) if (i.owner === owner && i.name === name && i.number === number) i.state = "closed";
+    for (const [key, seed] of Object.entries(subIssueSeeds)) {
+      if (!key.startsWith(`${owner}/${name}#`)) continue;
+      if (seed.spec.number === number) seed.spec.state = "CLOSED";
+      for (const sub of seed.subs) if (sub.number === number) sub.state = "CLOSED";
+    }
+    closed.push({ ref: `${owner}/${name}#${number}`, by });
+  };
+
   const server = http.createServer(async (req, res) => {
     let raw = "";
     for await (const c of req) raw += c;
@@ -126,13 +160,32 @@ export function startMockGitHub(root: string, login = "kevin") {
       if (!all) return send(404, { message: "Not Found" });
       return send(200, comments.filter((c) => c.owner === m[1] && c.name === m[2] && c.issueNumber === Number(m[3])));
     }
-    // The workbench's one GraphQL call: an issue's sub-issues and their blockedBy edges.
+    // The workbench's GraphQL calls: an issue's sub-issues and their blockedBy edges, and the repo's open issues with sub-issue counts.
     if (req.method === "POST" && p === "/graphql") {
       // GitHub's GraphQL Issue type has `url`, not REST's `html_url`; reject `html_url` with HTTP 200 + errors like GitHub does.
       if (/\bhtml_url\b/.test(String(body.query ?? ""))) {
         return send(200, { errors: [{ message: "Field 'html_url' doesn't exist on type 'Issue'" }] });
       }
       const { variables } = body;
+      // The board's repo-wide query: the open issues with their sub-issue counts.
+      if (variables.number === undefined) {
+        const all = repoIssues(variables.owner, variables.name);
+        if (!all) return send(200, { data: { repository: null }, errors: [{ type: "NOT_FOUND", message: "Could not resolve to a Repository" }] });
+        const specs = Object.entries(subIssueSeeds)
+          .filter(([k]) => k.startsWith(`${variables.owner}/${variables.name}#`))
+          .map(([, seed]) => seed)
+          .filter((seed) => (seed.spec.state ?? "OPEN") === "OPEN");
+        const nodes = [
+          ...all.filter((i) => !i.pull_request && i.state === "open").map((i) => ({ number: i.number, title: i.title, url: i.html_url, subIssuesSummary: { total: 0, completed: 0 } })),
+          ...specs.map((seed) => ({
+            number: seed.spec.number,
+            title: seed.spec.title,
+            url: seed.spec.url ?? `https://github.com/${variables.owner}/${variables.name}/issues/${seed.spec.number}`,
+            subIssuesSummary: { total: seed.subs.length, completed: seed.subs.filter((x: any) => (x.state ?? "OPEN") !== "OPEN").length },
+          })),
+        ];
+        return send(200, { data: { repository: { issues: { nodes } } } });
+      }
       const seed = subIssueSeeds[`${variables.owner}/${variables.name}#${variables.number}`];
       if (!seed) {
         return send(200, {
@@ -162,19 +215,63 @@ export function startMockGitHub(root: string, login = "kevin") {
         },
       });
     }
-    if ((m = /^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(p))) {
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/.exec(p)) && req.method === "PATCH") {
+      if (body.state === "closed") closeIssue(m[1], m[2], Number(m[3]), "api");
+      return send(200, { number: Number(m[3]), state: body.state ?? "open" });
+    }
+    // Merge a PR: a set `merge_refusal` (branch protection) or a "dirty" PR is refused with 405, as GitHub does.
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)\/merge$/.exec(p)) && req.method === "PUT") {
+      const pr = pulls[Number(m[3]) - 1];
+      if (!pr) return send(404, { message: "Not Found" });
+      if (pr.merged) return send(405, { message: "Pull Request is not mergeable" });
+      if (pr.merge_refusal) return send(405, { message: pr.merge_refusal });
+      if (mergeableState(m[1], m[2], pr) === "dirty") return send(405, { message: "Pull Request is not mergeable" });
+      const bare = path.join(root, m[1], `${m[2]}.git`);
+      const git = (...args: string[]) => sh(bare, "-c", "user.name=gh", "-c", "user.email=gh@x", ...args).toString().trim();
+      const baseSha = git("rev-parse", `refs/heads/${pr.base}`);
+      const headSha = git("rev-parse", `refs/heads/${pr.head}`);
+      const tree = git("merge-tree", "--write-tree", baseSha, headSha);
+      const sha = git("commit-tree", tree, "-p", baseSha, "-p", headSha, "-m", `Merge pull request #${pr.number} from ${pr.head}`);
+      git("update-ref", `refs/heads/${pr.base}`, sha);
+      Object.assign(pr, { merged: true, merge_method: body.merge_method ?? "merge", merge_sha: sha });
+      // GitHub honours `Closes #n` only on a merge into the default branch.
+      if (pr.base === repoJson(m[1], m[2]).default_branch) {
+        for (const c of String(pr.body ?? "").matchAll(/Closes #(\d+)/g)) closeIssue(m[1], m[2], Number(c[1]), "merge");
+      }
+      return send(200, { sha, merged: true, message: "Pull Request successfully merged" });
+    }
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/git\/refs\/heads\/(.+)$/.exec(p)) && req.method === "DELETE") {
+      const bare = path.join(root, m[1], `${m[2]}.git`);
+      try {
+        sh(bare, "rev-parse", "--verify", `refs/heads/${m[3]}`);
+      } catch {
+        return send(422, { message: "Reference does not exist" });
+      }
+      sh(bare, "update-ref", "-d", `refs/heads/${m[3]}`);
+      res.writeHead(204);
+      return res.end();
+    }
+    // Close (or reopen) a PR: `state` on the pull records it.
+    if ((m = /^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(p)) && req.method === "PATCH") {
       const pr = pulls[Number(m[1]) - 1];
+      if (!pr) return send(404, { message: "Not Found" });
+      if (pr.merged) return send(422, { message: "Validation Failed" });
+      if (body.state) pr.state = body.state;
+      return send(200, { number: pr.number, state: pr.state ?? "open", html_url: pr.html_url });
+    }
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)$/.exec(p))) {
+      const pr = pulls[Number(m[3]) - 1];
       return pr
-        ? send(200, { state: "open", merged: false, draft: !!pr.draft, mergeable_state: "clean", html_url: pr.html_url, head: { sha: "abc" }, comments: 0, review_comments: 1 })
+        ? send(200, { state: pr.merged ? "closed" : (pr.state ?? "open"), merged: !!pr.merged, draft: !!pr.draft, mergeable_state: mergeableState(m[1], m[2], pr), html_url: pr.html_url, head: { sha: "abc" }, comments: 0, review_comments: 1 })
         : send(404, { message: "Not Found" });
     }
     if (/\/commits\/[^/]+\/check-runs$/.test(p)) {
-      return send(200, { check_runs: [{ name: "ci", status: "completed", conclusion: "success" }, { name: "lint", status: "in_progress", conclusion: null }] });
+      return send(200, { check_runs: checkRuns });
     }
     send(404, { message: `mock has no ${req.method} ${p}` });
   });
 
-  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; close: () => Promise<void> }>((resolve) => {
+  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; checkRuns: typeof checkRuns; closed: typeof closed; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; close: () => Promise<void> }>((resolve) => {
     server.listen(Number(process.env.MOCK_GH_PORT ?? 0), "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
       resolve({
@@ -182,6 +279,8 @@ export function startMockGitHub(root: string, login = "kevin") {
         pulls,
         issues,
         comments,
+        checkRuns,
+        closed,
         createBare,
         seedSubIssues,
         close: () => new Promise((r) => server.close(() => r())),

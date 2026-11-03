@@ -1,0 +1,202 @@
+/*
+ * The Board's look, ported from kanzo (https://github.com/emanuele-em/kanzo, src/index.html),
+ * AGPL-3.0: see LICENSE at the repo root. The classes carry a `kz-` prefix so they do not mix
+ * with the rest of the workbench's styles; the tokens live on `.kz-board` and follow the system
+ * light/dark setting, as kanzo's do.
+ */
+.kz-board {
+  --kz-bg: #ffffff; --kz-col: #f7f7f7; --kz-card: #ffffff; --kz-card-hover: #f4f4f4;
+  --kz-hover: #ececec; --kz-active: #e5e5e5;
+  --kz-text: #0d0d0d; --kz-muted: #5d5d5d; --kz-faint: #8f8f8f; --kz-border: #e5e5e5; --kz-card-border: #ebebeb;
+  --kz-accent: #0d0d0d; --kz-accent-text: #ffffff; --kz-danger: #dc2626; --kz-danger-bg: rgba(220, 38, 38, .08);
+  --kz-link: #2563eb;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  .kz-board {
+    --kz-bg: #000000; --kz-col: #0b0b0b; --kz-card: #171717; --kz-card-hover: #1e1e1e;
+    --kz-hover: #1a1a1a; --kz-active: #242424;
+    --kz-text: #ececec; --kz-muted: #a1a1a1; --kz-faint: #6e6e6e; --kz-border: #1f1f1f; --kz-card-border: transparent;
+    --kz-accent: #ffffff; --kz-accent-text: #000000; --kz-danger: #f87171; --kz-danger-bg: rgba(248, 113, 113, .1);
+    --kz-link: #7ab7ff;
+    color-scheme: dark;
+  }
+}
+
+.kz-board {
+  height: 100%; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--kz-bg); color: var(--kz-text);
+  font: 14px/1.5 ui-sans-serif, -apple-system, system-ui, "Segoe UI", "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  scrollbar-width: thin; scrollbar-color: var(--kz-active) transparent;
+}
+.kz-board * { box-sizing: border-box; }
+.kz-board button { font: inherit; color: inherit; cursor: pointer; }
+.kz-board :focus { outline: none; }
+.kz-board .icon { display: inline-flex; flex: none; }
+.kz-board .icon svg { width: 18px; height: 18px; display: block; }
+
+.kz-header {
+  display: flex; align-items: center; gap: 12px; padding: 16px 24px 14px; flex-wrap: wrap; min-height: 64px;
+}
+.kz-header .info { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.kz-header h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: -.01em; }
+.kz-header .sub { color: var(--kz-muted); }
+.kz-header .repo-link {
+  display: inline-flex; align-items: center; gap: 6px; align-self: center; padding: 3px 10px 3px 8px;
+  border-radius: 99px; background: var(--kz-hover); color: var(--kz-muted); font-size: 12.5px; text-decoration: none;
+}
+.kz-header .repo-link:hover, .kz-header .repo-link:focus-visible { background: var(--kz-active); color: var(--kz-text); }
+.kz-header .repo-link .icon svg { width: 14px; height: 14px; }
+
+.kz-btn {
+  border: 0; background: var(--kz-hover); border-radius: 99px; padding: 7px 16px; font-weight: 500;
+  color: var(--kz-text); text-decoration: none; display: inline-flex; align-items: center; gap: 6px;
+}
+.kz-btn:hover, .kz-btn:focus-visible { background: var(--kz-active); text-decoration: none; }
+.kz-btn.primary { background: var(--kz-accent); color: var(--kz-accent-text); padding-left: 12px; }
+.kz-btn.primary:hover, .kz-btn.primary:focus-visible { opacity: .85; }
+.kz-btn .icon svg { width: 16px; height: 16px; }
+
+.kz-columns {
+  flex: 1; min-height: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(260px, 1fr);
+  gap: 12px; padding: 0 24px 24px; overflow-x: auto;
+}
+.kz-column {
+  background: var(--kz-col); border-radius: 18px; display: flex; flex-direction: column; min-height: 0;
+}
+.kz-column.drop-target { outline: 2px dashed var(--kz-faint); outline-offset: -2px; }
+.kz-column h2 {
+  font-size: 13px; font-weight: 600; color: var(--kz-muted);
+  margin: 0; padding: 14px 16px 10px; display: flex; align-items: center; gap: 8px;
+}
+.kz-column h2 .count { color: var(--kz-faint); font-weight: 400; }
+.kz-board .status-icon { display: inline-flex; flex: none; }
+.kz-board .status-icon svg { width: 14px; height: 14px; display: block; }
+.kz-cards { flex: 0 1 auto; overflow-y: auto; padding: 2px 8px 8px; display: flex; flex-direction: column; gap: 6px; min-height: 8px; }
+.kz-card {
+  display: block; background: var(--kz-card); border: 1px solid var(--kz-card-border); border-radius: 14px; padding: 10px 12px;
+  color: inherit; text-decoration: none; user-select: none; transition: background .1s;
+}
+.kz-card:hover { background: var(--kz-card-hover); text-decoration: none; }
+.kz-card .head { display: flex; align-items: flex-start; gap: 10px; }
+.kz-card .title { overflow-wrap: anywhere; flex: 1; min-width: 0; }
+.kz-card .num {
+  display: inline-flex; align-items: center; gap: 5px; flex: none; margin-top: 2px;
+  color: var(--kz-faint); font-size: 12px; font-variant-numeric: tabular-nums;
+}
+.kz-card .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.kz-card .desc {
+  display: block; margin-top: 2px; color: var(--kz-muted); font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.kz-card .desc.attention { color: var(--kz-danger); }
+.kz-tag {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--kz-muted);
+  background: var(--kz-hover); border-radius: 99px; padding: 1px 9px 1px 8px;
+}
+.kz-tag .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: currentColor; }
+/* The PR badge's dot: green when it can merge, amber while checks run or fail, red on a conflict. */
+.kz-tag.pr-open .dot { background: #2f9e44; }
+.kz-tag.pr-checks .dot { background: #e8a317; }
+.kz-tag.pr-conflict { color: var(--kz-danger); }
+/* A merged PR (a Done card): purple, as GitHub shows it. */
+.kz-tag.pr-merged .dot { background: #8250df; }
+/* The note after a resolved merge conflict asks for a second Approve; it is not an error. */
+.kz-detail-attention.info { background: var(--kz-hover); color: var(--kz-text); }
+/* A refused move or a failed load: over the board, so the layout does not shift. */
+.kz-board { position: relative; }
+.kz-error {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 30;
+  max-width: min(640px, calc(100vw - 32px)); display: flex; align-items: flex-start; gap: 10px;
+  background: var(--kz-bg); color: var(--kz-danger); border: 1px solid var(--kz-border); border-radius: 12px;
+  padding: 8px 10px 8px 14px; box-shadow: 0 8px 24px rgba(0, 0, 0, .15); overflow-wrap: anywhere;
+}
+.kz-error button { flex: none; border: 0; background: none; color: var(--kz-muted); padding: 0 4px; }
+.kz-error button:hover { color: var(--kz-text); }
+.kz-empty {
+  margin: auto; text-align: center; color: var(--kz-muted); max-width: 380px; padding: 40px 20px;
+}
+.kz-empty h1 { color: var(--kz-text); font-size: 22px; font-weight: 600; letter-spacing: -.01em; }
+
+@media (max-width: 700px) {
+  .kz-columns { grid-auto-columns: minmax(78vw, 1fr); padding: 0 12px 12px; }
+  .kz-header { padding: 12px 12px 12px 56px; }
+}
+
+/* The card detail: a panel on the right of the board, over a dimmed backdrop. */
+.kz-detail-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .25); z-index: 40; }
+.kz-detail {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100vw); z-index: 41; overflow-y: auto;
+  background: var(--kz-bg); border-left: 1px solid var(--kz-border); padding: 20px 24px 32px;
+  display: flex; flex-direction: column; gap: 16px; box-shadow: -8px 0 24px rgba(0, 0, 0, .12);
+}
+.kz-detail-head { display: flex; align-items: flex-start; gap: 12px; }
+.kz-detail-head .info { flex: 1; min-width: 0; }
+.kz-detail-head h2 { margin: 0; font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+.kz-detail-head .sub { color: var(--kz-muted); font-size: 13px; }
+.kz-detail-links { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.kz-detail a { color: var(--kz-link); }
+.kz-detail a.kz-btn { color: var(--kz-text); }
+.kz-detail .kz-pr { text-decoration: none; padding: 4px 10px; font-size: 13px; }
+.kz-detail-attention { background: var(--kz-danger-bg); color: var(--kz-danger); border-radius: 12px; padding: 10px 14px; }
+.kz-detail-attention p { margin: 0; }
+.kz-detail-attention .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.kz-detail-pending { display: flex; flex-direction: column; gap: 8px; }
+.kz-detail-section { border-top: 1px solid var(--kz-border); padding-top: 12px; }
+.kz-detail-section summary { cursor: pointer; font-weight: 600; }
+.kz-detail-section h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+.kz-detail-section p { margin: 0; }
+.kz-detail-muted { color: var(--kz-muted); font-weight: 400; font-size: 13px; }
+.kz-detail .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: var(--kz-muted); }
+.kz-detail-tickets { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.kz-detail-tickets li { background: var(--kz-col); border-radius: 10px; padding: 8px 12px; }
+.kz-detail-tickets .row { display: flex; align-items: baseline; gap: 8px; }
+.kz-detail-tickets .state { flex: none; font-size: 12px; color: var(--kz-muted); min-width: 56px; }
+.kz-detail-tickets .t-done .state { color: #2f9e44; }
+.kz-detail-tickets .t-blocked .state { color: var(--kz-danger); }
+.kz-detail-tickets .t-running .state { color: #3b82f6; }
+.kz-detail-tickets .title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.kz-detail-tickets .note { margin: 4px 0 0; color: var(--kz-muted); font-size: 13px; }
+@media (max-width: 700px) { .kz-detail { padding: 16px; } }
+
+/* Board tools: the filter (f), search (/ or ⌘K) and New card (n). */
+.kz-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.kz-filter {
+  display: inline-flex; align-items: center; gap: 6px; background: var(--kz-hover); border-radius: 99px;
+  padding: 4px 12px 4px 10px; color: var(--kz-muted);
+}
+.kz-filter.on { background: var(--kz-active); color: var(--kz-text); }
+.kz-filter .icon svg { width: 14px; height: 14px; }
+.kz-filter input { border: 0; background: none; color: var(--kz-text); font: inherit; width: 140px; padding: 2px 0; }
+.kz-btn.danger, .kz-detail a.kz-btn.danger { color: var(--kz-danger); }
+.kz-btn.danger:hover, .kz-btn.danger:focus-visible { background: var(--kz-danger-bg); }
+.kz-btn:disabled { opacity: .5; cursor: default; }
+.kz-more {
+  border: 0; background: none; color: var(--kz-muted); font-size: 13px; padding: 6px 4px; text-align: left;
+}
+.kz-more:hover, .kz-more:focus-visible { color: var(--kz-text); text-decoration: underline; }
+
+/* New card and Search: a dialog over a dimmed board. */
+.kz-modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .3); z-index: 50; }
+.kz-modal {
+  position: fixed; z-index: 51; top: 12vh; left: 50%; transform: translateX(-50%); width: min(520px, calc(100vw - 32px));
+  background: var(--kz-bg); color: var(--kz-text); border: 1px solid var(--kz-border); border-radius: 18px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .2); padding: 18px; display: flex; flex-direction: column; gap: 10px;
+}
+.kz-modal h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.kz-modal .actions { display: flex; justify-content: flex-end; gap: 8px; }
+.kz-field {
+  width: 100%; border: 1px solid var(--kz-border); background: var(--kz-col); color: var(--kz-text);
+  border-radius: 12px; padding: 8px 12px; font: inherit; resize: vertical;
+}
+.kz-field:focus { border-color: var(--kz-faint); }
+.kz-search .results { display: flex; flex-direction: column; gap: 2px; max-height: 50vh; overflow-y: auto; }
+.kz-search .result {
+  display: flex; align-items: center; gap: 10px; border: 0; background: none; text-align: left;
+  border-radius: 10px; padding: 8px 10px;
+}
+.kz-search .result.selected { background: var(--kz-hover); }
+.kz-search .result .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kz-search .result .meta { color: var(--kz-faint); font-size: 12px; }
+.kz-search .note { color: var(--kz-muted); padding: 8px 10px; }

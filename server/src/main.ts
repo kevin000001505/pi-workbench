@@ -3,6 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import path from "node:path";
+import { boardCards, DONE_PAGE, issueNumberOf, limitDone, prState, unclaimedCards } from "../../shared/board.ts";
 import { config, TYPESAFE_SKILL } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { GitEnv } from "./git.ts";
@@ -10,6 +11,7 @@ import { GitHub, GitHubError } from "./github.ts";
 import { autoApproveView, getAutoApproveSettings, listModelsFor, localJudge, saveAutoApproveKey, saveReviewerKey, savedJudgeToken, savedReviewerKey, testJudge, testReviewer } from "./autoapprove.ts";
 import { checkRequestOrigin, type Ctx, HttpError, readJson, Router, sendJson, serveStatic } from "./http.ts";
 import { listModelsAt, probeEndpoint } from "./llm.ts";
+import { githubDelivery } from "./delivery.ts";
 import { draftPr, openPr, changes } from "./prs.ts";
 import { addRepo, assertRepoName, clonePath, getRepo, listRepos, repoNeedsSetup, requireTrackedRepo } from "./repos.ts";
 import { assertUserScope, GLOBAL_SCOPE, SecretStore, userSecrets } from "./secrets.ts";
@@ -68,9 +70,18 @@ async function gitEnv(): Promise<GitEnv> {
   return { ...identity.env, ...env };
 }
 
-const sessions = new SessionManager(db, secrets, gitEnv, () => applySsh(db, secrets, config.agentHome, config.piAgentDir), (ref) => github().ticketsFromIssueRef(ref), rescueProxy);
-
 const llmKey = () => secrets.get(GLOBAL_SCOPE, LLM_KEY_ENV);
+
+const delivery = githubDelivery({ github, gitEnv, model: () => getModelSettings(db), llmKey });
+const sessions = new SessionManager(
+  db,
+  secrets,
+  gitEnv,
+  () => applySsh(db, secrets, config.agentHome, config.piAgentDir),
+  (ref) => github().ticketsFromIssueRef(ref),
+  rescueProxy,
+  delivery,
+);
 
 async function repoView(r: ReturnType<typeof listRepos>[number]) {
   return {
@@ -81,6 +92,18 @@ async function repoView(r: ReturnType<typeof listRepos>[number]) {
     private: !!r.private,
     needsSetup: fs.existsSync(clonePath(r)) ? await repoNeedsSetup(r) : true,
   };
+}
+
+/** The repo's unclaimed cards; none when GitHub cannot be read (no token, offline). */
+/** Unclaimed cards (`owner/name#n`) whose move is creating their session now. */
+const claiming = new Set<string>();
+
+async function unclaimedOf(repoId: string, mine: ReturnType<SessionManager["list"]>) {
+  const [owner, name] = repoId.split("/");
+  const specs = await Promise.resolve()
+    .then(() => github().listSpecIssues(owner, name))
+    .catch(() => []);
+  return unclaimedCards(specs, mine.flatMap((s) => [s.issueRef, s.specRef]), repoId);
 }
 
 const router = new Router()
@@ -154,6 +177,43 @@ const router = new Router()
     return { ok: true };
   })
 
+  // --- board ---------------------------------------------------------------------------------
+  .on("GET", "/api/board", async ({ query }) => {
+    const repo = requireTrackedRepo(db, query.get("repo") ?? "");
+    // `done` is how many Done cards to list, newest first; the board's "show more" raises it.
+    const done = query.has("done") ? Number(query.get("done")) : DONE_PAGE;
+    if (!Number.isInteger(done) || done < 0) throw new HttpError(400, "done must be a whole number of cards");
+    const mine = sessions.list().filter((s) => s.repoId === repo.id);
+    const board = limitDone(boardCards(mine, await unclaimedOf(repo.id, mine)), done);
+    // The PR badge's state comes from GitHub; a card whose PR cannot be read keeps state null.
+    await Promise.all(
+      board.cards.map(async (c) => {
+        if (c.pr) c.pr.state = await github().pullStatus(repo.owner, repo.name, c.pr.number).then(prState, () => null);
+      }),
+    );
+    return board;
+  })
+
+  // An unclaimed card (`issue:<number>`) has no session yet: its move creates one. To Doing is
+  // Solve all on the spec's open tickets; to To do grills in rework mode on that spec issue.
+  .on("POST", "/api/repos/:owner/:name/issues/:number/move", async ({ params, body }) => {
+    const repo = requireTrackedRepo(db, `${params.owner}/${params.name}`);
+    const number = Number(params.number);
+    const startFrom = body.column === "doing" ? "tickets" : body.column === "todo" ? "spec" : null;
+    if (!startFrom) throw new HttpError(409, "An unclaimed card can move only to Doing or To do.");
+    const mine = sessions.list().filter((s) => s.repoId === repo.id);
+    const claim = `${repo.id}#${number}`;
+    if (claiming.has(claim) || mine.some((s) => issueNumberOf(s.issueRef, repo.id) === number || issueNumberOf(s.specRef, repo.id) === number))
+      throw new HttpError(409, `A card already works on issue #${number}.`);
+    // Held from the check until the session row exists, so a second move of the same card is refused.
+    claiming.add(claim);
+    try {
+      return await sessions.create({ repoId: repo.id, title: "", prompt: "", mode: "pipeline", issueRef: claim, startFrom });
+    } finally {
+      claiming.delete(claim);
+    }
+  })
+
   // --- sessions -----------------------------------------------------------------------------
   .on("GET", "/api/sessions", () => sessions.list())
   .on("POST", "/api/sessions", async ({ body }) =>
@@ -210,6 +270,18 @@ const router = new Router()
     if (!["retry", "skip", "stop"].includes(body.action)) throw new HttpError(400, "action must be retry, skip or stop");
     await sessions.pipelineAction(params.id, body.action);
     return sessions.summary(params.id);
+  })
+  .on("POST", "/api/sessions/:id/move", async ({ params, body }) => {
+    await sessions.move(params.id, body.column);
+    return sessions.summary(params.id);
+  })
+  .on("POST", "/api/sessions/:id/approve", async ({ params }) => {
+    await sessions.approve(params.id);
+    return sessions.summary(params.id);
+  })
+  .on("POST", "/api/sessions/:id/abandon", async ({ params }) => {
+    await sessions.abandon(params.id);
+    return { ok: true };
   })
   .on("GET", "/api/sessions/:id/runs/:runId", ({ params }) => sessions.runTranscript(params.id, params.runId))
   .on("GET", "/api/sessions/:id/changes", async ({ params }) => {
@@ -389,6 +461,8 @@ const broadcast = (msg: unknown, sessionId?: string) => {
 };
 sessions.on("summary", (session) => broadcast({ type: "summary", session }));
 sessions.on("removed", (id) => broadcast({ type: "removed", id }));
+// A card was created (or removed): open boards of that repo fetch GET /api/board again.
+sessions.on("board", (repoId) => broadcast({ type: "wb_board", repoId }));
 sessions.on("event", (sessionId, event) => broadcast({ type: "event", sessionId, event }, sessionId));
 
 server.listen(config.port, config.host, () => {

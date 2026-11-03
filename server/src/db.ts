@@ -27,7 +27,7 @@ export type SessionRow = {
   archived: number;
   /** "pipeline" (grill → tickets → implement) or "direct" (plain agent turns). */
   mode: string;
-  /** setup | grill | spec | tickets | implement | review | retro | done | direct */
+  /** setup | grill | spec | tickets | ready | implement | review | retro | pr | done | direct */
   phase: string;
   /** Short summary of the decisions agreed while grilling. */
   grill_summary: string | null;
@@ -36,6 +36,14 @@ export type SessionRow = {
   spec_ref: string | null;
   /** pi session id of the final code-review run. */
   review_run: string | null;
+  /** pi session id of the last merge run, which resolves a conflict that Approve found. */
+  merge_run: string | null;
+  /** 1 from a rework until record_tickets records the new breakdown; the old ticket rows stay for the board until then. */
+  rework_tickets: number;
+  /** finish_review's note from the last review run, for the card detail. */
+  review_note: string | null;
+  /** When the card last reached Done; the board lists Done newest first by it. */
+  done_at: number | null;
   /** pi session id of the end-of-spec retro run, when one ran. */
   retro_run: string | null;
   /** pi session id of the conversation on screen: the session id itself, or a ticket's run. */
@@ -141,6 +149,10 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ["sessions", "issue_ref", "TEXT"],
   ["sessions", "auto_approve", "TEXT"],
   ["sessions", "typesafe_skill", "INTEGER NOT NULL DEFAULT 0"],
+  ["sessions", "review_note", "TEXT"],
+  ["sessions", "done_at", "INTEGER"],
+  ["sessions", "merge_run", "TEXT"],
+  ["sessions", "rework_tickets", "INTEGER NOT NULL DEFAULT 0"],
   ["tickets", "start_commit", "TEXT"],
   ["tickets", "stop_reason", "TEXT"],
   ["tickets", "rescue_run_id", "TEXT"],
@@ -153,6 +165,12 @@ function migrate(db: DatabaseSync) {
   for (const [table, column, type] of ADDED_COLUMNS) {
     const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
     if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
+  // `done` used to mean "reviewed"; it now means "merged", and a reviewed card with a PR is `pr`.
+  // Once only: a card merged after this must stay `done`.
+  if (!getSetting(db, "migrated.donePr")) {
+    db.exec("UPDATE sessions SET phase = 'pr' WHERE phase = 'done' AND pr_number IS NOT NULL");
+    putSetting(db, "migrated.donePr", true);
   }
 }
 

@@ -94,12 +94,16 @@ before(async () => {
   ghMock = await startMockGitHub(path.join(tmp, "gh"));
   config.githubApi = ghMock.url;
   const { GitHub } = await import("../src/github.ts");
-  mgr = new SessionManager(db, secrets, async () => ({
+  const { githubDelivery } = await import("../src/delivery.ts");
+  const { getModelSettings } = await import("../src/settings.ts");
+  const gitEnv = async () => ({
     GIT_AUTHOR_NAME: "t",
     GIT_AUTHOR_EMAIL: "t@t",
     GIT_COMMITTER_NAME: "t",
     GIT_COMMITTER_EMAIL: "t@t",
-  }), undefined, (ref) => new GitHub("ghp_test").ticketsFromIssueRef(ref), proxy);
+  });
+  const delivery = githubDelivery({ github: () => new GitHub("ghp_test"), gitEnv, model: () => getModelSettings(db), llmKey: () => undefined });
+  mgr = new SessionManager(db, secrets, gitEnv, undefined, (ref) => new GitHub("ghp_test").ticketsFromIssueRef(ref), proxy, delivery);
   mgr.on("event", (id: string, ev: any) => events.push({ id, ev }));
 });
 
@@ -131,7 +135,18 @@ test("a pipeline session grills, writes a spec and tickets, implements them one 
 
   // to-tickets asks for approval, publishes, records.
   await answerNext(s.id, /Approve/);
-  await waitFor(() => mgr.summary(s.id).phase === "implement");
+  // The recorded tickets pause the session in `ready` (the board's Issues column): no ticket run starts.
+  await waitFor(() => mgr.summary(s.id).phase === "ready" && mgr.summary(s.id).status === "idle");
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(mgr.summary(s.id).phase, "ready");
+  assert.equal(mgr.summary(s.id).activeRun, s.id);
+  assert.ok(!mock.requests.some((r) => JSON.stringify(r.messages ?? []).includes('<skill name=\\"tdd\\"')), "no ticket run starts in ready");
+  // A ticket left `running` by a stopped run (what a move back to Issues leaves; this card never
+  // ran a ticket, so the db write stands in for one) starts again from `ready`.
+  db.prepare("UPDATE tickets SET status = 'running', run_id = ? WHERE session_id = ? AND num = 1").run(`${s.id}-t1-stopped`, s.id);
+  // Solve all: the Issues → Doing move (the route POST /api/sessions/:id/move calls this) resumes it.
+  await mgr.move(s.id, "doing");
+  assert.equal(mgr.summary(s.id).phase, "implement");
   const sum = await waitFor(() => {
     const x = mgr.summary(s.id);
     return x.attention ? x : undefined;
@@ -177,14 +192,21 @@ test("a pipeline session grills, writes a spec and tickets, implements them one 
   assert.ok(!(await mgr.snapshot(s.id)).transcript.messages.some((m: any) => m.role === "autoAnswer"));
 
   // Skip the blocked ticket: one fresh code-review run covers the whole branch, then the pipeline
-  // finishes and returns to the plan conversation.
+  // opens the PR. GitHub has no me/demo repo yet, so the PR cannot open: the session stays in
+  // review (the card in QA) with the reason, on the review run.
   await mgr.pipelineAction(s.id, "skip");
   assert.equal(mgr.summary(s.id).phase, "review");
-  await waitFor(() => mgr.summary(s.id).phase === "done");
-  const done = mgr.summary(s.id);
-  assert.equal(done.attention, null);
-  assert.equal(done.activeRun, s.id);
-  assert.equal(done.runs[done.runs.length - 1].label, "Review");
+  const failed = await waitFor(() => {
+    const x = mgr.summary(s.id);
+    return x.phase === "review" && x.attention ? x : undefined;
+  });
+  assert.match(failed.attention, /The PR could not open: .*No commits between main and/);
+  assert.equal(failed.prNumber, null);
+  assert.equal(failed.runs[failed.runs.length - 1].label, "Review");
+  assert.equal(failed.activeRun, failed.runs[failed.runs.length - 1].id);
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(mgr.summary(s.id).phase, "review", "a failed PR open does not move on");
+  assert.equal(ghMock.pulls.length, 0);
   const review = mock.requests.find((r) => JSON.stringify(r.messages ?? []).includes('<skill name=\\"code-review\\"'));
   assert.match(JSON.stringify(review.messages), /since origin\/main/);
   assert.ok(!JSON.stringify(review.messages).includes("Ticket #3: Add docs"), "the review run starts fresh");
@@ -194,9 +216,14 @@ test("a pipeline session grills, writes a spec and tickets, implements them one 
   assert.equal(autoAnswers()[1].answer, "allow");
   const row = db.prepare("SELECT worktree FROM sessions WHERE id = ?").get(s.id);
   assert.deepEqual(sh(row.worktree, "log", "--format=%s", "-4").trim().split("\n"), ["Fix review findings", "Ticket 3", "Ticket 2", "Ticket 1"]);
+
+  // The pipeline's Stop pauses the card in Issues.
+  await mgr.pipelineAction(s.id, "stop");
+  assert.equal(mgr.summary(s.id).phase, "ready");
+  assert.equal(mgr.summary(s.id).attention, null);
 });
 
-test("a session started from a spec's ticket issues implements every ticket, then reviews", { skip: !hasPi && "pi CLI not found" }, async () => {
+test("a session started from a spec's ticket issues implements every ticket, reviews, then opens the PR", { skip: !hasPi && "pi CLI not found" }, async () => {
   ghMock.seedSubIssues(
     "me",
     "demo",
@@ -207,6 +234,9 @@ test("a session started from a spec's ticket issues implements every ticket, the
       { number: 10, title: "Add docs", body: "Document it.", blockedBy: [8, 9] },
     ],
   );
+  // GitHub knows me/demo now (its bare repo is the clone's origin), so this session's PR opens.
+  fs.mkdirSync(path.join(tmp, "gh", "me"), { recursive: true });
+  fs.symlinkSync(path.join(tmp, "remote.git"), path.join(tmp, "gh", "me", "demo.git"));
   const s = await mgr.create({ repoId: "me/demo", title: "Greeting suite", issueRef: "me/demo#7", mode: "pipeline", startFrom: "tickets" });
   assert.equal(s.mode, "pipeline");
   // The first session never pushed its setup marker, so this one may start in setup; either way it lands on implement.
@@ -219,11 +249,22 @@ test("a session started from a spec's ticket issues implements every ticket, the
     sum0.tickets.map((t: any) => `${t.num}:${t.blockedBy.join(",")}:${t.trackerRef}`),
     ["1::8", "2:1:9", "3:1,2:10"],
   );
+  // After the review, the workbench pushes the branch and opens the PR: phase `pr`, the card in Review.
   const done = await waitFor(() => {
     const x = mgr.summary(s.id);
-    return x.phase === "done" ? x : undefined;
+    return x.phase === "pr" ? x : undefined;
   });
   assert.deepEqual(done.tickets.map((t: any) => t.status), ["done", "done", "done"]);
+  assert.equal(done.attention, null);
+  assert.equal(done.activeRun, s.id, "back on the plan conversation");
+  const pr = ghMock.pulls.at(-1);
+  assert.equal(done.prNumber, pr.number);
+  assert.equal(done.prUrl, pr.html_url);
+  assert.equal(pr.head, done.branch);
+  assert.equal(pr.base, "main");
+  assert.equal(pr.title, "Add a friendly greeting", "the model drafted the PR");
+  for (const n of [8, 9, 10, 7]) assert.match(pr.body, new RegExp(`Closes #${n}\\b`));
+  assert.equal(sh(path.join(tmp, "remote.git"), "log", "--format=%s", "-1", done.branch).trim(), "Fix review findings", "the branch is pushed");
   // Ticket 2's fresh run carried the spec text read from the spec issue.
   const t2 = mock.requests.find((r) => JSON.stringify(r.messages ?? []).includes("Ticket #2: Add a test"));
   assert.match(JSON.stringify(t2.messages), /hello.txt says Hello/);
@@ -372,7 +413,7 @@ test("a TDD cycle that runs the same test command between writes never trips the
   rescueOff();
   savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 2, toolCallLimit: 300 });
   const s = await solveOne("Cycle red and green. CYCLEME");
-  await waitFor(() => mgr.summary(s.id).phase === "done" || mgr.summary(s.id).attention);
+  await waitFor(() => mgr.summary(s.id).phase === "pr" || mgr.summary(s.id).attention);
   assert.equal(mgr.summary(s.id).attention, null);
   assert.equal(mgr.summary(s.id).tickets[0].status, "done");
 });
@@ -442,7 +483,7 @@ test("the stop rule watches only implement-phase runs: setup and review runs pas
   savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 1 });
   try {
     const s = await solveOne("Done at once. QUICKME", "A quick ticket. LONGREVIEW");
-    await waitFor(() => mgr.summary(s.id).phase === "done" || mgr.summary(s.id).attention);
+    await waitFor(() => mgr.summary(s.id).phase === "pr" || mgr.summary(s.id).attention);
     assert.equal(mgr.summary(s.id).attention, null);
     // The review run made five calls (a commit, three checks, finish_review) under the same limit.
     const review = mgr.summary(s.id).runs.find((r: any) => r.label === "Review");
@@ -500,7 +541,7 @@ test("a looping ticket gets a rescue run, a diagnosed result starts a fix run, t
   const s = await solveAll(["Greet the user. DIRTYME LOOPME HANDOFF-A", "Document it."]);
   const done = await waitFor(() => {
     const x = mgr.summary(s.id);
-    return x.phase === "done" || x.attention ? x : undefined;
+    return x.phase === "pr" || x.attention ? x : undefined;
   }, 90_000);
   assert.equal(done.attention, null);
   assert.deepEqual(done.tickets.map((t: any) => `${t.num}:${t.status}:${t.rescueState}`), ["1:done:rescued", "2:done:null"]);
@@ -607,7 +648,7 @@ test("a fourth rescue in one spec is refused and flags", { skip: !hasPi && "pi C
 
 // --- the retro run (issue #41) -----------------------------------------------------------------
 
-/** One rescued ticket, then the review; resolves when the pipeline is done. */
+/** One rescued ticket, then the review; resolves when the pipeline has opened the PR. */
 async function rescuedSpec(body: string) {
   const { savePipelineSettings } = await import("../src/settings.ts");
   savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 });
@@ -622,7 +663,7 @@ async function rescuedSpec(body: string) {
   };
   mgr.on("summary", onSummary);
   try {
-    const done = await waitFor(() => (mgr.summary(s.id).phase === "done" ? mgr.summary(s.id) : undefined), 90_000);
+    const done = await waitFor(() => (mgr.summary(s.id).phase === "pr" ? mgr.summary(s.id) : undefined), 90_000);
     return { s, done, phases, retroOn };
   } finally {
     mgr.off("summary", onSummary);
@@ -633,7 +674,7 @@ test("a spec with a rescued ticket gets a retro run after the review: facts and 
   const before = mock.requests.length;
   const { s, done, phases, retroOn } = await rescuedSpec("Greet. LOOPME");
   assert.deepEqual(done.runs.map((r: any) => r.label).slice(-2), ["Review", "retro"]);
-  assert.deepEqual(phases.filter((p) => ["review", "retro", "done"].includes(p)), ["review", "retro", "done"]);
+  assert.deepEqual(phases.filter((p) => ["review", "retro", "pr"].includes(p)), ["review", "retro", "pr"]);
   assert.equal(done.activeRun, s.id, "back on the plan conversation");
   // The run switched to the retro before the phase was announced, and back to the plan before done.
   assert.equal(retroOn[0], "retro");
@@ -678,4 +719,33 @@ for (const [word, says] of [["RETRO_SILENT", /retro run stopped without finish_r
 test("a retro run that changes the worktree flags the session", { skip: !hasPi && "pi CLI not found" }, async () => {
   const { done } = await rescuedSpec("Greet. LOOPME RETRO_DIRTY");
   assert.match(done.attention ?? (await flagged(done.id)), /retro run changed the worktree/);
+});
+
+test("QA → Issues during a retro run stops it; the resumed card reviews and retros again, then opens the PR", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { savePipelineSettings } = await import("../src/settings.ts");
+  savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 });
+  rescueOn();
+  const s = await solveOne("Greet. LOOPME RETRO_HOLD");
+  const dump = (e: Error) => {
+    throw new Error(`${e.message}: ${JSON.stringify({ ...mgr.summary(s.id), tickets: undefined })}`);
+  };
+  const holding = await waitFor(() => {
+    const x = mgr.summary(s.id);
+    return x.phase === "retro" && x.pending.some((p: any) => p.kind === "decision") ? x : undefined;
+  }, 90_000).catch(dump);
+  const firstRetro = holding.activeRun;
+  await mgr.move(s.id, "issues");
+  assert.equal(mgr.summary(s.id).phase, "ready");
+  assert.equal(mgr.summary(s.id).attention, null);
+
+  // Issues → Doing: every ticket is done, so the review runs again, then a fresh retro.
+  await mgr.move(s.id, "doing");
+  const again = await waitFor(() => {
+    const x = mgr.summary(s.id);
+    return x.phase === "retro" && x.activeRun !== firstRetro && x.pending.some((p: any) => p.kind === "decision") ? x : undefined;
+  }, 90_000).catch(dump);
+  mgr.respond(s.id, again.pending[0].id, { value: "Yes" });
+  const done = await waitFor(() => (mgr.summary(s.id).phase === "pr" ? mgr.summary(s.id) : undefined), 90_000).catch(dump);
+  assert.equal(done.attention, null);
+  assert.ok(events.some((e) => e.id === s.id && e.ev.type === "wb_notify" && /Retro report/.test(e.ev.message)));
 });

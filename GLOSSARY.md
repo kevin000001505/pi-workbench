@@ -17,7 +17,7 @@ An issue the pipeline's ticket phase publishes, referenced from a ticket's track
 _Avoid_: sub-issue
 
 **Solve all tickets**:
-The Issues page button on an issue that owns ticket sub-issues: one pipeline session reads every open ticket sub-issue with its blocking edges from GitHub, skips grill/spec/tickets, implements the tickets one fresh run at a time in dependency order, and opens a PR whose merge closes the spec issue and every ticket issue.
+The move of a card from Issues to Doing (for an unclaimed card, it creates the session): one pipeline session reads every open ticket sub-issue with its blocking edges from GitHub, skips grill/spec/tickets, implements the tickets one fresh run at a time in dependency order, and opens a PR whose merge closes the spec issue and every ticket issue.
 _Avoid_: solve all issues (that is the Start session flow, one session per issue)
 
 **Solve**:
@@ -76,9 +76,57 @@ _Avoid_: retry (a retry re-runs the same ticket with the same model; a fix run s
 A run at the end of a spec that reviews the rescued tickets with the `retro` skill and only proposes changes.
 _Avoid_: code review (the review phase reads every change; the retro reads only the rescued tickets)
 
+### Board
+
+**Board**:
+The kanban view of the workbench's features, with one column per stage of the pipeline.
+_Avoid_: kanban (the style, not the thing), dashboard
+
+**Card**:
+One feature on the board: its spec issue, its tickets, and the one session and one PR that deliver it.
+_Avoid_: task (kanzo's word), ticket (a ticket is one part of a card)
+
+**To do**:
+The column for a feature that is still being grilled, specced, or cut into tickets.
+_Avoid_: backlog, draft
+
+**Issues** (column):
+The column for a feature whose spec issue and ticket issues are on GitHub and that waits for Solve all.
+_Avoid_: ready (as a column name)
+
+**Unclaimed card**:
+A card in Issues for a spec issue on GitHub that has open ticket sub-issues and that no session claims yet. A move to Doing starts Solve all; a move to To do grills on that spec issue to rework it.
+
+**Doing**:
+The column for a feature whose tickets are being implemented.
+
+**QA** (column):
+The column for a feature whose finished branch is under code review.
+_Avoid_: QA as the `qa` skill (the workbench does not run it), test run
+
+**Review** (column):
+The column for a feature whose PR is open and waits for the user's Approve.
+_Avoid_: code review (that happens in QA), Reviewer (that is the permission reviewer)
+
+**Done**:
+The column for a feature whose PR is merged.
+
+**Approve**:
+The user's go-ahead on a card in Review: it merges the PR with a merge commit and deletes the branch.
+_Avoid_: Allow (that answers a permission), accept
+
+**Abandon**:
+Dropping a feature: it stops the card's runs, closes its PR, deletes its branch, and takes the card off the board; its GitHub issues stay open.
+_Avoid_: stop (a stop pauses the card; the card can resume), delete, cancel
+
 ## Relationships
 
 - Under **Auto-approve**, every **Permission** goes to the **Risk judge** first; a safe rating allows it, any other rating goes to the **Reviewer** with the rating attached
 - Only the **Reviewer** produces an **Escalation**; the **Risk judge** never sends a **Permission** to the user
 - **Decisions** are never auto-approved
 - The **Reviewer's** settings drive the **Reviewer** as well as **Rescue runs** and **Retro runs**; an empty Reviewer model turns all three off
+- A **Card** moves through the columns as its session's phase changes; the user's drag outranks the pipeline
+- Dragging a **Card** from **Issues** to **Doing** starts **Solve all**; dragging it from **Review** to **Done** is **Approve**; any other forward drag is refused
+- Dragging a **Card** back to **Issues** stops its run; dragging it to **Doing** again resumes the same session, and finished tickets stay finished
+- Dragging a **Card** back to **To do** stops its run and opens the grill again, so the spec and tickets can change
+- A merge conflict at **Approve** gets resolved on the branch, and the **Card** stays in **Review** for a second **Approve**

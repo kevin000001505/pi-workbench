@@ -1,12 +1,14 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { applyEvent, emptyTranscript, type RpcEvent, type Transcript } from "../../shared/transcript.ts";
-import { type SessionSummary, waitingOn } from "./types.ts";
+import { isResolvedNote, type SessionSummary, waitingOn } from "./types.ts";
 
 type Toast = { id: number; text: string; level: "info" | "warning" | "error" };
 
 type Store = {
   connected: boolean;
   sessions: Record<string, SessionSummary>;
+  /** Per repo id, how many `wb_board` events (a card created or removed) came in; a board refetches on a change. */
+  boardChanges: Record<string, number>;
   transcript: (id: string) => Transcript | undefined;
   stderr: (id: string) => string[];
   /** Bumps whenever the open transcript changes; components read it to re-render. */
@@ -54,6 +56,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [connected, setConnected] = useState(false);
   const [sessions, setSessions] = useState<Record<string, SessionSummary>>({});
   const [version, setVersion] = useState(0);
+  const [boardChanges, setBoardChanges] = useState<Record<string, number>>({});
   const [toasts, setToasts] = useState<Toast[]>([]);
   const transcripts = useRef(new Map<string, Transcript>());
   const stderrs = useRef(new Map<string, string[]>());
@@ -96,8 +99,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const prev = lastState.current.get(s.id);
     lastState.current.set(s.id, key);
     if (prev !== undefined && prev !== key) {
-      if (s.attention) notify(s, "Pipeline needs you", s.attention, `${s.id}-attention`);
-      else if (s.phase === "done" && s.mode === "pipeline" && !prev.endsWith("|done")) notify(s, "All tickets done", "Review and create the PR.", `${s.id}-done`);
+      if (s.attention) notify(s, isResolvedNote(s.attention) ? "Conflict resolved" : "Pipeline needs you", s.attention, `${s.id}-attention`);
+      else if (s.phase === "pr" && s.mode === "pipeline" && !prev.endsWith("|pr")) notify(s, "PR opened", `PR #${s.prNumber ?? ""} is open. Review it on the board.`, `${s.id}-pr`);
     }
     setSessions((prev) => ({ ...prev, [s.id]: s }));
   }, []);
@@ -132,6 +135,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
           case "summary":
             upsert(msg.session);
+            break;
+          case "wb_board":
+            setBoardChanges((prev) => ({ ...prev, [msg.repoId]: (prev[msg.repoId] ?? 0) + 1 }));
             break;
           case "removed":
             setSessions((prev) => {
@@ -195,6 +201,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     () => ({
       connected,
       sessions,
+      boardChanges,
       version,
       transcript: (id) => transcripts.current.get(id),
       stderr: (id) => stderrs.current.get(id) ?? [],
@@ -204,7 +211,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast,
       dismiss: (id) => setToasts((t) => t.filter((x) => x.id !== id)),
     }),
-    [connected, sessions, version, watch, upsert, toasts, toast],
+    [connected, sessions, boardChanges, version, watch, upsert, toasts, toast],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

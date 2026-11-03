@@ -252,6 +252,19 @@ export default function workbench(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "finish_merge",
+    label: "Finish merge",
+    description: "pi-workbench pipeline: report that the merge conflict is resolved and the merge is committed, or that it cannot be resolved.",
+    parameters: Type.Object({
+      status: Type.Union([Type.Literal("resolved"), Type.Literal("failed")]),
+      note: Type.String({ description: "How you reconciled each side, or why it cannot be resolved" }),
+    }),
+    async execute(_id, params) {
+      return { content: [{ type: "text", text: `Merge marked ${params.status}. Stop here; the workbench pushes it.` }], details: {} };
+    },
+  });
+
+  pi.registerTool({
     name: "record_tickets",
     label: "Record tickets",
     description:
