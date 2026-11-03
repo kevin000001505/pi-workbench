@@ -1,16 +1,67 @@
 import { useEffect, useState } from "react";
 import type { Card } from "../../../shared/board.ts";
-import { COLUMNS, isPlainUnclaimedCard, parseIssueRef, refLabel, unclaimedNumber } from "../../../shared/board.ts";
+import { COLUMNS, isPlainUnclaimedCard, issueNumberOf, parseIssueRef, refLabel, unclaimedNumber } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { PendingCard } from "../session/PendingCard.tsx";
 import { phaseLabel } from "../session/PipelinePanel.tsx";
 import { useStore } from "../store.tsx";
-import { isResolvedNote, type Ticket } from "../types.ts";
+import { isResolvedNote, type SessionSummary, type Ticket } from "../types.ts";
 import { Markdown, Spinner } from "../ui.tsx";
 import { CardActions, SOLVE, SPLIT } from "./CardActions.tsx";
 
 /** The TICKET_STATE labels for a card's tickets. */
 const TICKET_STATE: Record<Ticket["status"], string> = { ready: "Ready", running: "Running", done: "Done", blocked: "Blocked" };
+
+/**
+ * One ticket row of a card detail: the state, a live dot on the running ticket, "waits on #n" for
+ * blockers that are not done, Solve on a ticket the card can solve (disabled otherwise), and a link:
+ * the run link for a ticket with a run, the GitHub issue for a tracker ref that names an issue of
+ * this repo, no link for any other ticket.
+ */
+function TicketRow({ s, t, busy, onSolve }: { s: SessionSummary; t: Ticket; busy: boolean; onSolve: (num: number) => void }) {
+  const done = new Set(s.tickets.filter((x) => x.status === "done").map((x) => x.num));
+  const waitingOn = t.blockedBy.filter((b) => !done.has(b));
+  const issue = issueNumberOf(t.trackerRef, s.repoId);
+  const link = t.runId
+    ? `#/session/${s.id}?run=${t.runId}`
+    : issue !== null
+      ? `https://github.com/${s.repoId}/issues/${issue}`
+      : undefined;
+  // A card in Issues can solve a ticket that is not done or blocked and has every blocker done;
+  // a ticket a stopped run left `running` counts as ready and gets a fresh run.
+  const solveShown = s.phase === "ready" && (t.status === "ready" || t.status === "running");
+  const canSolve = solveShown && waitingOn.length === 0;
+  return (
+    <li className={`t-${t.status}`}>
+      <div className="row">
+        <span className="state">{TICKET_STATE[t.status]}</span>
+        {t.status === "running" && <span className="live-dot" />}
+        <span className="title">
+          {link ? (
+            <a href={link} target="_blank" rel="noopener">
+              #{t.num} {t.title}
+            </a>
+          ) : (
+            `#${t.num} ${t.title}`
+          )}
+        </span>
+        {t.trackerRef && !link && <span className="mono">{refLabel(t.trackerRef)}</span>}
+        {waitingOn.length > 0 && <span className="waits">waits on {waitingOn.map((b) => `#${b}`).join(", ")}</span>}
+        {solveShown && (
+          <button
+            className="kz-btn ticket-solve"
+            disabled={!canSolve || busy}
+            title={canSolve ? "Run only this ticket; the card waits in Issues again when it is done" : "Solve waits for the tickets that block it"}
+            onClick={() => onSolve(t.num)}
+          >
+            {busy ? <Spinner small /> : "Solve"}
+          </button>
+        )}
+      </div>
+      {t.note && <p className="note">{t.note}</p>}
+    </li>
+  );
+}
 
 /**
  * A card's detail, beside the board: the spec, the tickets with their notes, the review note, the
@@ -97,6 +148,18 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
     try {
       await api.post(`/api/sessions/${card.id}/abandon`, {});
       onClose();
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Solve one ticket: the card's session runs only that ticket, then waits in Issues again.
+  const solveTicket = async (num: number) => {
+    setBusy(true);
+    try {
+      await api.post(`/api/sessions/${s!.id}/tickets/${num}/solve`, {});
     } catch (e) {
       toast((e as Error).message, "error");
     } finally {
@@ -234,23 +297,7 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
                 </h3>
                 <ol className="kz-detail-tickets">
                   {s.tickets.map((t) => (
-                    <li key={t.num} className={`t-${t.status}`}>
-                      <div className="row">
-                        <span className="state">{TICKET_STATE[t.status]}</span>
-                        <span className="title">
-                          #{t.num} {t.title}
-                        </span>
-                        {t.trackerRef &&
-                          (/^https?:\/\//.test(t.trackerRef) ? (
-                            <a href={t.trackerRef} target="_blank" rel="noopener">
-                              {refLabel(t.trackerRef)}
-                            </a>
-                          ) : (
-                            <span className="mono">{refLabel(t.trackerRef)}</span>
-                          ))}
-                      </div>
-                      {t.note && <p className="note">{t.note}</p>}
-                    </li>
+                    <TicketRow key={t.num} s={s} t={t} busy={busy} onSolve={solveTicket} />
                   ))}
                 </ol>
               </section>

@@ -79,6 +79,8 @@ export type SessionSummary = {
   reviewNote: string | null;
   doneAt: number | null;
   issueRef: string | null;
+  /** The ticket Solve one ticket runs now; null for a card running every ticket (Solve all) or none. */
+  soloTicket: number | null;
   /** The session's own auto-approve setting, and whether auto-approve is in effect for it now. */
   autoApprove: AutoApproveMode;
   autoApproveActive: boolean;

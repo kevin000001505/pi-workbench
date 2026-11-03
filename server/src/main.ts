@@ -264,6 +264,12 @@ const router = new Router()
     await sessions.pipelineAction(params.id, body.action);
     return sessions.summary(params.id);
   })
+  // Solve one ticket: the card's session runs only that ticket, then waits in Issues again.
+  .on("POST", "/api/sessions/:id/tickets/:num/solve", ({ params }) => {
+    const num = Number(params.num);
+    if (!Number.isInteger(num) || num < 1) throw new HttpError(400, "The ticket number must be a whole number");
+    return sessions.solveTicket(params.id, num);
+  })
   .on("POST", "/api/sessions/:id/move", async ({ params, body }) => {
     await sessions.move(params.id, body.column);
     return sessions.summary(params.id);

@@ -56,6 +56,8 @@ export type SessionRow = {
   attention: string | null;
   /** The GitHub issue this session solves, e.g. `owner/name#123`; null for plain sessions. */
   issue_ref: string | null;
+  /** The ticket Solve one ticket is running now; null for a card running every ticket (Solve all) or none. */
+  solo_ticket: number | null;
   /** Auto-approve for this session: null inherits the global switch, or "on" / "off". */
   auto_approve: string | null;
   /** 1 when the session loads the TypeSafe skill (picked on the New session form). */
@@ -165,6 +167,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ["tickets", "diagnosis", "TEXT"],
   ["tickets", "fix_run_id", "TEXT"],
   ["tickets", "rescue_state", "TEXT"],
+  ["sessions", "solo_ticket", "INTEGER"],
 ];
 
 function migrate(db: DatabaseSync) {
