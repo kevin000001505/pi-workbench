@@ -218,7 +218,7 @@ test("Done lists merged cards newest first, and a done limit hides the older one
   for (const title of ["First", "Second", "Third"]) {
     const s = (await api("POST", "/api/sessions", { repoId: "kevin/history", title, prompt: `add ${title}` })).json;
     await waitFor(async () => (await summary(s.id)).pending.some((p: any) => p.kind === "decision"));
-    // Stop ends the run (the card pauses in Issues); until Approve exists, the db write puts it in Done.
+    // Stop ends the run (the card pauses in Issues); Approve needs an open PR, so the db write puts it in Done as a merge would.
     assert.equal((await api("POST", `/api/sessions/${s.id}/pipeline`, { action: "stop" })).status, 200);
     await waitFor(async () => (await summary(s.id)).phase === "ready");
     markDone(s.id);

@@ -12,13 +12,13 @@ export function startMockGitHub(root: string, login = "kevin") {
   const pulls: any[] = [];
   const issues: any[] = []; // repo-scoped: { owner, name, ...issue }; the issues feed carries pull-request entries too
   const comments: any[] = []; // { owner, name, issueNumber, ...comment }
-  const subIssueSeeds: Record<string, any> = {};
+  const subIssueSeeds: Record<string, any> = {}; // `${owner}/${name}#${specNumber}` → { spec, subs } for the /graphql route
   // Every PR head's check runs; a test edits it. A pull whose head conflicts with its base is "dirty", as on
   // GitHub; set its `mergeable_state` to force a state, or its `merge_refusal` to a message for a merge that branch protection refuses.
   const checkRuns: { name: string; status: string; conclusion: string | null }[] = [
     { name: "ci", status: "completed", conclusion: "success" },
     { name: "lint", status: "in_progress", conclusion: null },
-  ]; // `${owner}/${name}#${specNumber}` → { spec, subs } for the /graphql route
+  ];
   // Every issue a merge or an issue PATCH closed, in order: `{ ref: "owner/name#n", by: "merge" | "api" }`.
   const closed: { ref: string; by: "merge" | "api" }[] = [];
   const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
