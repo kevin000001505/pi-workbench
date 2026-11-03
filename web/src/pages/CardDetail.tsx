@@ -94,7 +94,7 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
             Open the full transcript
           </a>
           {card.pr && (
-            <a className={`kz-tag kz-pr ${card.pr.state ? `pr-${card.pr.state as string}` : ""}`} href={prUrl ?? undefined} target="_blank" rel="noopener">
+            <a className={`kz-tag kz-pr ${card.pr.state ? `pr-${card.pr.state}` : ""}`} href={prUrl ?? undefined} target="_blank" rel="noopener">
               <span className="dot" />
               PR #{card.pr.number}
               {card.pr.state ? ` · ${card.pr.state}` : ""}
