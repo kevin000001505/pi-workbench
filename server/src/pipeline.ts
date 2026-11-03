@@ -44,8 +44,14 @@ export type TicketInput = { number: number; title: string; body: string; blocked
 /** An open sub-issue of a spec, as GitHub returns it: its own blockers' issue numbers. */
 export type SubIssueSeed = { number: number; title: string; body: string | null; blockedBy: number[] };
 
-/** A spec issue and the tickets it owns, ready to feed into a session. */
-export type TicketSeed = { spec: { number: number; title: string; body: string | null; htmlUrl: string }; subIssues: SubIssueSeed[] };
+/**
+ * A spec issue and the tickets it owns, ready to feed into a session. `hasParent` is true when
+ * the issue is itself a sub-issue of another issue: its spec's card owns it, so moves refuse it.
+ */
+export type TicketSeed = {
+  spec: { number: number; title: string; body: string | null; htmlUrl: string; hasParent: boolean };
+  subIssues: SubIssueSeed[];
+};
 
 /**
  * A spec's open sub-issues become pipeline tickets: local numbers run 1..N in sub-issue number
@@ -139,6 +145,76 @@ Present the breakdown and ask the user to approve it with ask_user before publis
 call record_tickets with every ticket: its number, title, full body (what to build and acceptance criteria), blockedBy (ticket numbers) and trackerRef (the file path or issue number/URL).
 Then stop. Do not start implementing.`;
 }
+
+/**
+ * A plain issue is too big for one ticket: break it into tickets with to-tickets, publishing each
+ * as a sub-issue of the issue with its blocking edges, so it becomes a spec issue that waits in
+ * Issues for Solve all. The issue itself is not changed or closed.
+ */
+export function splitPrompt(issueUrl: string) {
+  return `/skill:to-tickets Split the issue (${issueUrl}) into tickets: it is too big for one ticket.
+
+[pi-workbench pipeline: split of a plain issue]
+Present the breakdown and ask the user to approve it with ask_user before publishing. After approval,
+publish every ticket as a sub-issue of this issue, with its blocking edges. Do not change or close the issue itself.
+Call record_tickets with every ticket: its number, title, full body (what to build and acceptance criteria), blockedBy (ticket numbers) and trackerRef (the sub-issue's number or URL).
+Then stop. Do not start implementing.`;
+}
+
+/** A plain issue becomes the card's only ticket: its title, body (or a fallback) and number as the tracker ref. */
+export function ticketFromIssue(spec: { number: number; title: string; body: string | null }): TicketInput[] {
+  return [{ number: 1, title: spec.title.trim(), body: (spec.body ?? "").trim() || `No description for #${spec.number}`, blockedBy: [], trackerRef: String(spec.number) }];
+}
+
+/** The start a session takes from an unclaimed card's move, picked by the issue's open ticket sub-issues. */
+export type StartFrom = "tickets" | "spec" | "issue" | "split";
+
+/**
+ * What one StartFrom begins a session with: its phase, the prompt held until setup is done
+ * (or sent at once), the tickets recorded at once, and its spec bookkeeping. The one table for
+ * the four unclaimed-card starts, so the move route and SessionManager read them the same way.
+ */
+export type StartPlan = {
+  phase: Phase;
+  /** Held until setup is done, then released: the rework grill or the split. */
+  held?: (seed: TicketSeed) => string;
+  /** Recorded at once, so the first ticket run starts after setup. */
+  tickets?: (seed: TicketSeed) => TicketInput[];
+  /** The seed must have open sub-issues (404 without); the plain starts refuse them (409 with). */
+  needsSubIssues: boolean;
+  /** True when the issue's body becomes the session's spec text. A rework re-saves its spec in the to-spec step. */
+  spec: boolean;
+};
+
+export const START_PLANS: Record<StartFrom, StartPlan> = {
+  tickets: {
+    phase: "implement",
+    tickets: (seed) => validateTickets(ticketsFromSubIssues(seed.subIssues)),
+    needsSubIssues: true,
+    spec: true,
+  },
+  issue: {
+    phase: "implement",
+    tickets: (seed) => ticketFromIssue(seed.spec),
+    needsSubIssues: false,
+    spec: true,
+  },
+  split: {
+    phase: "tickets",
+    held: (seed) => splitPrompt(seed.spec.htmlUrl),
+    needsSubIssues: false,
+    spec: true,
+  },
+  spec: {
+    phase: "grill",
+    held: (seed) => reworkPrompt(seed.spec.htmlUrl),
+    needsSubIssues: true,
+    spec: false,
+  },
+};
+
+/** True when an unchecked create body's startFrom names one of the unclaimed-card starts. */
+export const isStartFrom = (v: unknown): v is StartFrom => typeof v === "string" && v in START_PLANS;
 
 function specSection(spec: string | null, specRef: string | null) {
   if (!spec) return specRef ? `Read the spec first: ${specRef}` : "(no spec recorded)";

@@ -309,7 +309,7 @@ test("listTicketSubIssues returns the spec and its open ticket sub-issues, with 
     ],
   );
   const seed = await client.listTicketSubIssues("kevin", "ticketed", 7);
-  assert.deepEqual(seed.spec, { number: 7, title: "The spec", body: "Do things in order.", htmlUrl: "https://github.com/kevin/ticketed/issues/7" });
+  assert.deepEqual(seed.spec, { number: 7, title: "The spec", body: "Do things in order.", htmlUrl: "https://github.com/kevin/ticketed/issues/7", hasParent: false });
   assert.deepEqual(
     seed.subIssues.map((s) => [s.number, s.title, s.blockedBy]),
     [

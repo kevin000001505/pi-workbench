@@ -29,13 +29,16 @@ import {
   rescuePrompt,
   retroPrompt,
   nextTicket,
+  isStartFrom,
+  START_PLANS,
+  type StartFrom,
   type Phase,
   PIPELINE_TOOLS,
   reviewPrompt,
   specPrompt,
   type Ticket,
+  type TicketInput,
   type TicketSeed,
-  ticketsFromSubIssues,
   ticketsPrompt,
   validateDiagnosis,
   validateTickets,
@@ -102,7 +105,7 @@ export type UiResponse = { value?: string; confirmed?: boolean; cancelled?: bool
 export type Run = { id: string; label: string };
 
 /** What POST /api/sessions (and an unclaimed card's move) asks SessionManager.create for. */
-export type CreateInput = { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: string };
+export type CreateInput = { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: StartFrom };
 
 export type SessionSummary = {
   id: string;
@@ -455,24 +458,29 @@ export class SessionManager extends EventEmitter {
       throw Object.assign(new Error(`The TypeSafe skill is not installed (expected at ${typesafeSkillDir()})`), { status: 400 });
     }
     const mode = input.mode === "direct" ? "direct" : "pipeline";
-    // An unclaimed card's moves: the spec and its ticket sub-issues already exist on GitHub.
-    // `tickets` (to Doing) skips grill/spec/tickets and starts at implement; `spec` (to To do)
-    // grills in rework mode on that spec issue, so it updates the spec and tickets in place.
-    const startFrom = input.startFrom === "tickets" || input.startFrom === "spec" ? input.startFrom : undefined;
+    // Unclaimed card moves start a session from the issue; START_PLANS picks its phase, its
+    // tickets, its held prompt and its spec bookkeeping. A spec card to Doing solves its
+    // tickets; to To do reworks it. A plain card to Doing is Solve (the issue is the card's
+    // only ticket); to To do is Split (to-tickets on the issue).
+    const startFrom = isStartFrom(input.startFrom) ? input.startFrom : undefined;
+    const plan = startFrom ? START_PLANS[startFrom] : undefined;
     if (startFrom && input.mode === "direct")
-      throw Object.assign(new Error("Solving tickets needs a pipeline session"), { status: 400 });
+      throw Object.assign(new Error("Solving an issue needs a pipeline session"), { status: 400 });
     const task = (input.prompt ?? "").trim();
     if (mode === "pipeline" && !task && !startFrom) throw Object.assign(new Error("Describe what you want built; grill-me starts from it"), { status: 400 });
     const issueRef = input.issueRef?.trim() || null;
     if (startFrom) {
-      if (!issueRef) throw Object.assign(new Error("Solving tickets needs the spec issue (issueRef)"), { status: 400 });
+      if (!issueRef) throw Object.assign(new Error("Solving an issue needs its issue ref (issueRef)"), { status: 400 });
       if (!this.fetchTicketSeed) throw Object.assign(new Error("This workbench has no GitHub connection to read tickets from"), { status: 400 });
     }
-    // The spec issue's title, body and URL, and its ticket sub-issues, for startFrom sessions.
+    // The issue's title, body, URL and parent, and its ticket sub-issues, for startFrom sessions.
     let seed: TicketSeed | undefined;
     if (startFrom) {
       seed = await this.fetchTicketSeed!(issueRef!);
-      if (seed.subIssues.length === 0) throw Object.assign(new Error(`Issue ${issueRef} has no open ticket sub-issues`), { status: 404 });
+      if (plan!.needsSubIssues && seed.subIssues.length === 0)
+        throw Object.assign(new Error(`Issue ${issueRef} has no open ticket sub-issues`), { status: 404 });
+      if (!plan!.needsSubIssues && seed.subIssues.length > 0)
+        throw Object.assign(new Error(`Issue ${issueRef} already has open ticket sub-issues; move it to Doing to solve them as a spec.`), { status: 409 });
     }
     const id = crypto.randomUUID();
     const title = input.title.trim() || task.split("\n")[0].slice(0, 60) || seed?.spec.title.slice(0, 120) || "New session";
@@ -481,37 +489,38 @@ export class SessionManager extends EventEmitter {
     const worktree = await createWorktree(repo, id, branch, base, await this.gitEnv());
     const now = Date.now();
     const needsSetup = worktreeNeedsSetup(worktree);
-    if (startFrom === "tickets" && seed) {
-      let ticketInputs;
+    if (plan?.tickets && seed) {
+      let ticketInputs: TicketInput[];
       try {
-        ticketInputs = validateTickets(ticketsFromSubIssues(seed.subIssues));
+        ticketInputs = plan.tickets(seed);
       } catch (err) {
         throw Object.assign(new Error(`${(err as Error).message} (from the tickets of ${issueRef})`), { status: 400 });
       }
-      const insert = this.db.prepare(
-        "INSERT INTO tickets (session_id, num, title, body, blocked_by, tracker_ref, status) VALUES (?, ?, ?, ?, ?, ?, 'ready')",
-      );
-      for (const t of ticketInputs) insert.run(id, t.number, t.title, t.body, JSON.stringify(t.blockedBy), t.trackerRef ?? null);
+      this.insertTickets(id, ticketInputs);
     }
-    const phase: Phase = needsSetup ? "setup" : startFrom === "tickets" ? "implement" : mode === "pipeline" ? "grill" : "direct";
-    // The grill's first prompt; a setup run holds it until setup is done.
-    const held = startFrom === "spec" ? reworkPrompt(seed!.spec.htmlUrl) : task ? input.prompt : null;
+    const phase: Phase = needsSetup ? "setup" : plan ? plan.phase : mode === "pipeline" ? "grill" : "direct";
+    // The first prompt; a setup run holds it until setup is done. A rework holds its rework
+    // prompt, a split its split prompt, a plain task the task itself; Solve holds nothing
+    // (its recorded ticket starts the run after setup).
+    const held = plan?.held ? plan.held(seed!) : task ? input.prompt : null;
+    // The phase releaseHeld moves the session to when a held prompt is released.
+    const heldPhase = held ? (plan ? plan.phase : mode === "pipeline" ? "grill" : "direct") : null;
     this.db
       .prepare(
-        `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt, mode, phase, active_run, issue_ref, auto_approve, typesafe_skill, spec, spec_ref)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt, mode, phase, active_run, issue_ref, auto_approve, typesafe_skill, spec, spec_ref, held_phase)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup ? held : null, mode, phase, id, issueRef, autoApprove === "inherit" ? null : autoApprove, typesafe ? 1 : 0, startFrom === "tickets" ? (seed?.spec.body ?? null) : null, seed?.spec.htmlUrl ?? null);
+      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup ? held : null, mode, phase, id, issueRef, autoApprove === "inherit" ? null : autoApprove, typesafe ? 1 : 0, plan?.spec ? (seed?.spec.body ?? null) : null, startFrom ? (seed?.spec.htmlUrl ?? null) : null, needsSetup ? heldPhase : null);
     const s = this.state(id);
     s.loaded = true;
     await this.start(id);
     if (needsSetup) {
       s.setupRunning = true;
       await this.send(id, SETUP_PROMPT);
-    } else if (startFrom === "tickets") {
+    } else if (plan?.tickets) {
       // grill/spec/tickets are skipped: the first ticket run starts now.
       await this.runNext(id);
-    } else if (startFrom === "spec") {
+    } else if (plan?.held) {
       await this.send(id, held!);
     } else if (mode === "pipeline") {
       await this.send(id, grillPrompt(input.prompt));
@@ -522,6 +531,14 @@ export class SessionManager extends EventEmitter {
     // A pipeline session is a new card on its repo's board.
     if (mode === "pipeline") this.emit("board", repo.id);
     return this.summary(id);
+  }
+
+  /** Record the session's tickets, fresh and ready. */
+  private insertTickets(id: string, inputs: TicketInput[]) {
+    const insert = this.db.prepare(
+      "INSERT INTO tickets (session_id, num, title, body, blocked_by, tracker_ref, status) VALUES (?, ?, ?, ?, ?, ?, 'ready')",
+    );
+    for (const t of inputs) insert.run(id, t.number, t.title, t.body, JSON.stringify(t.blockedBy), t.trackerRef ?? null);
   }
 
   /** Spawn pi for the session's active run if it isn't running; resumes its saved conversation. */
@@ -703,10 +720,7 @@ export class SessionManager extends EventEmitter {
     } else if (name === "record_tickets" && row.phase === "tickets") {
       const tickets = validateTickets(args.tickets);
       this.db.prepare("DELETE FROM tickets WHERE session_id = ?").run(id);
-      const insert = this.db.prepare(
-        "INSERT INTO tickets (session_id, num, title, body, blocked_by, tracker_ref, status) VALUES (?, ?, ?, ?, ?, ?, 'ready')",
-      );
-      for (const t of tickets) insert.run(id, t.number, t.title, t.body, JSON.stringify(t.blockedBy), t.trackerRef ?? null);
+      this.insertTickets(id, tickets);
       this.update(id, { rework_tickets: 0 });
     } else if (name === "finish_ticket" && row.phase === "implement" && (args.status === "done" || args.status === "blocked")) {
       s.finished = { status: args.status, note: String(args.note ?? "").trim() };
@@ -968,9 +982,11 @@ export class SessionManager extends EventEmitter {
     this.state(id).setupRunning = false;
     this.emit("event", id, { type: "wb_held", heldPrompt: null });
     if (row.mode === "pipeline" && !discard) {
-      this.update(id, { phase: "grill" });
+      // held_phase names the phase the prompt releases into: tickets for a split, grill for a
+      // rework or a task.
+      this.update(id, { phase: row.held_phase ?? "grill" });
       this.emitSummary(id);
-      // A session on an existing spec issue holds its whole rework prompt; others hold the task.
+      // A session on an existing spec issue holds its whole rework or split prompt; others hold the task.
       await this.send(id, row.spec_ref ? row.held_prompt : grillPrompt(row.held_prompt), "followUp");
       return;
     }

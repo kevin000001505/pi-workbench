@@ -312,7 +312,7 @@ test("issue refs: parseIssueRef reads every form; a card id maps back to its spe
   assert.equal(unclaimedNumber("issue:x"), null);
 });
 
-test("unclaimed cards: a plain open issue sits in To do, a ticketed spec in Issues, a sub-issue and a claimed issue are no cards", async () => {
+test("unclaimed cards: plain and ticketed spec issues both sit in Issues; a sub-issue and a claimed issue are no cards", async () => {
   const { unclaimedCards, claimRefs, boardCards } = await import("../../shared/board.ts");
   const issues = [
     { number: 1, title: "A plain issue", url: "https://github.com/me/app/issues/1", openTickets: 0, hasParent: false },
@@ -323,11 +323,19 @@ test("unclaimed cards: a plain open issue sits in To do, a ticketed spec in Issu
   const sessions = [{ mode: "pipeline", phase: "ready", issueRef: "me/app#8", specRef: null }];
   const cards = unclaimedCards(issues, claimRefs(sessions), "me/app");
   assert.deepEqual(cards, [
-    { id: "issue:1", title: "A plain issue", column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/me/app/issues/1" },
+    { id: "issue:1", title: "A plain issue", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/me/app/issues/1" },
     { id: "issue:5", title: "A spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, pr: null, specRef: "https://github.com/me/app/issues/5" },
   ]);
-  // On the board, the plain card sits in To do, ahead of the spec's Issues card.
+  // On the board, the plain card sits in Issues, before the spec's Issues card.
   assert.deepEqual(boardCards([], cards).map((c) => c.id), ["issue:1", "issue:5"]);
+});
+
+test("isPlainUnclaimedCard follows the tickets count, not the column", async () => {
+  const { isPlainUnclaimedCard } = await import("../../shared/board.ts");
+  const card = (id: string, total: number) => ({ id, column: "issues" as const, tickets: { done: 0, total } });
+  assert.equal(isPlainUnclaimedCard(card("issue:1", 0)), true, "an unclaimed issue with no tickets is plain");
+  assert.equal(isPlainUnclaimedCard(card("issue:5", 2)), false, "an unclaimed issue with open tickets is a spec card");
+  assert.equal(isPlainUnclaimedCard({ id: "some-session", column: "issues" as const, tickets: { done: 0, total: 0 } }), false, "a session card is never plain");
 });
 
 test("ref labels: an issue ref that names a repo keeps the repo's name, one that does not is #n, a file ref is its file name", async () => {
@@ -442,10 +450,60 @@ test("README documents the issues feature for a fresh setup", () => {
 test("every pipeline prompt starts with a /skill: command pi will expand", async () => {
   const p = await import("../src/pipeline.ts");
   const t = { num: 1, title: "T", body: "b", blockedBy: [], trackerRef: null, status: "ready", note: null, runId: null } as any;
-  for (const prompt of [p.grillPrompt("task"), p.specPrompt(), p.ticketsPrompt(null), p.ticketsPrompt("#4"), p.implementPrompt(t, null, null, []), p.reviewPrompt("main", null, null, [t]), p.reworkPrompt("#4"), p.reworkPrompt(null), p.mergePrompt("main", "PR #1 has a merge conflict with main", ["a.txt"])]) {
+  for (const prompt of [p.grillPrompt("task"), p.specPrompt(), p.ticketsPrompt(null), p.ticketsPrompt("#4"), p.implementPrompt(t, null, null, []), p.reviewPrompt("main", null, null, [t]), p.reworkPrompt("#4"), p.reworkPrompt(null), p.mergePrompt("main", "PR #1 has a merge conflict with main", ["a.txt"]), p.splitPrompt("https://github.com/a/b/issues/5")]) {
     // pi needs an argument after the skill name on the first line.
     assert.match(prompt.split("\n")[0], /^\/skill:[\w-]+ \S/);
   }
+});
+
+test("the split prompt breaks the issue into sub-issues with blocking edges, and leaves the issue itself untouched", async () => {
+  const { splitPrompt } = await import("../src/pipeline.ts");
+  const prompt = splitPrompt("https://github.com/a/b/issues/5");
+  assert.match(prompt, /^\/skill:to-tickets /);
+  assert.ok(prompt.includes("https://github.com/a/b/issues/5"), "names the issue URL");
+  assert.match(prompt, /sub-issue/i, "publishes the tickets as sub-issues of the issue");
+  assert.match(prompt, /blocking/i, "keeps the tickets' blocking edges");
+  assert.match(prompt, /ask_user/, "asks the user to approve the breakdown");
+  assert.match(prompt, /record_tickets/, "records every ticket with its tracker ref");
+  assert.match(prompt, /do not (change|close).*the issue itself/i, "does not change or close the issue itself");
+});
+
+test("the unclaimed-card starts pick phase, tickets, held prompt and spec in one table", async () => {
+  const { START_PLANS, isStartFrom, ticketFromIssue } = await import("../src/pipeline.ts");
+  assert.deepEqual(Object.keys(START_PLANS).sort(), ["issue", "spec", "split", "tickets"]);
+  assert.ok(isStartFrom("split"), "names the four starts");
+  assert.ok(!isStartFrom("grill"));
+  assert.ok(!isStartFrom(null));
+  assert.ok(!isStartFrom(3));
+  assert.equal(START_PLANS.tickets.phase, "implement", "Solve all starts at the tickets");
+  assert.equal(START_PLANS.issue.phase, "implement", "Solve starts at the one ticket");
+  assert.equal(START_PLANS.split.phase, "tickets", "Split starts at the to-tickets run");
+  assert.equal(START_PLANS.spec.phase, "grill", "rework starts at the grill");
+  assert.equal(START_PLANS.tickets.needsSubIssues, true, "Solve all needs the sub-issue tickets");
+  assert.equal(START_PLANS.spec.needsSubIssues, true, "rework needs the sub-issue tickets");
+  assert.equal(START_PLANS.issue.needsSubIssues, false, "Solve refuses a spec issue");
+  assert.equal(START_PLANS.split.needsSubIssues, false, "Split refuses a spec issue");
+  const seed = { spec: { number: 3, title: "A plain issue", body: "Fix it", htmlUrl: "https://github.com/a/b/issues/3", hasParent: false }, subIssues: [] };
+  assert.deepEqual(START_PLANS.issue.tickets!(seed), ticketFromIssue(seed.spec), "Solve records the issue as its only ticket");
+  assert.ok(START_PLANS.split.held!(seed).includes("https://github.com/a/b/issues/3"), "Split holds the split prompt");
+  assert.ok(START_PLANS.spec.held!(seed).startsWith("/skill:grill-with-docs"), "rework holds the rework prompt");
+  assert.ok(START_PLANS.tickets.tickets, "Solve all derives its tickets from the sub-issues");
+  assert.equal(START_PLANS.split.spec, true, "a split takes the issue body as its spec");
+  assert.equal(START_PLANS.spec.spec, false, "a rework re-saves its spec in the to-spec step");
+});
+
+test("the glossary records the board's columns and card actions", () => {
+  const glossary = fs.readFileSync(new URL("../../GLOSSARY.md", import.meta.url), "utf8");
+  for (const term of ["To do", "Unclaimed card", "Solve", "Split"]) {
+    assert.match(glossary, new RegExp(`\\*\\*${term}\\*\\*:`), `glossary defines ${term}`);
+  }
+  assert.match(glossary, /\*\*Issues\*\* \(column\):/);
+  assert.match(glossary, /\*\*Card\*\*:/);
+  assert.match(
+    glossary,
+    /\*\*Split\*\*:\nBreaking a plain issue into ticket sub-issues with `to-tickets`, so it becomes a spec issue that waits for Solve all\./,
+    "Split is a term entry, not only the drag-relationship mention",
+  );
 });
 
 test("glossary and ADR 0003 record the stop-rule, rescue and retro vocabulary", () => {

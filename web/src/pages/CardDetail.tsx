@@ -7,6 +7,7 @@ import { phaseLabel } from "../session/PipelinePanel.tsx";
 import { useStore } from "../store.tsx";
 import { isResolvedNote, type Ticket } from "../types.ts";
 import { Markdown, Spinner } from "../ui.tsx";
+import { CardActions, SOLVE, SPLIT } from "./CardActions.tsx";
 
 /** The TICKET_STATE labels for a card's tickets. */
 const TICKET_STATE: Record<Ticket["status"], string> = { ready: "Ready", running: "Running", done: "Done", blocked: "Blocked" };
@@ -73,6 +74,21 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
     }
   };
 
+  // A plain card's move creates its session: the unclaimed card goes, and this detail closes with it.
+  const movePlain = async (column: "doing" | "todo") => {
+    setBusy(true);
+    const ref = parseIssueRef(card.specRef);
+    try {
+      if (!ref?.repo) throw new Error("The card has no issue link to move");
+      await api.post(`/api/repos/${ref.repo}/issues/${ref.number}/move`, { column });
+      onClose();
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // Abandon drops the feature: the server closes the PR, deletes the branch, the worktree and the
   // card, and a wb_board makes every board refetch, so this panel closes as the card goes.
   const abandon = async () => {
@@ -117,6 +133,9 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
             <a className="kz-btn" href={card.specRef ?? undefined} target="_blank" rel="noopener">
               Open on GitHub
             </a>
+          )}
+          {plain && (
+            <CardActions actions={[{ ...SOLVE, primary: true }, SPLIT]} busy={busy} spinner flat onMove={(column) => movePlain(column)} />
           )}
           {card.pr && (
             <a className={`kz-tag kz-pr ${card.pr.state ? `pr-${card.pr.state}` : ""}`} href={prUrl ?? undefined} target="_blank" rel="noopener">

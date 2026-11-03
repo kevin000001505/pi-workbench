@@ -191,17 +191,19 @@ const router = new Router()
     return board;
   })
 
-  // An unclaimed card (`issue:<number>`) has no session yet: its move creates one. To Doing is
-  // Solve all on the spec's open tickets; to To do grills in rework mode on that spec issue.
+  // An unclaimed card (`issue:<number>`) has no session yet: its move creates one. A spec card
+  // (open ticket sub-issues) to Doing is Solve all, to To do rework; a plain card to Doing is
+  // Solve (the issue is the card's only ticket), to To do Split (to-tickets on the issue).
   .on("POST", "/api/repos/:owner/:name/issues/:number/move", async ({ params, body }) => {
     const repo = requireTrackedRepo(db, `${params.owner}/${params.name}`);
     const number = Number(params.number);
-    const startFrom = body.column === "doing" ? "tickets" : body.column === "todo" ? "spec" : null;
-    if (!startFrom) throw new HttpError(409, "An unclaimed card can move only to Doing or To do.");
-    // A plain issue card (no open ticket sub-issues) cannot start work yet; every move is refused.
+    if (body.column !== "doing" && body.column !== "todo") throw new HttpError(409, "An unclaimed card can move only to Doing or To do.");
     const seed = await github().listTicketSubIssues(repo.owner, repo.name, number);
-    if (seed.subIssues.length === 0) throw new HttpError(409, "A plain issue card cannot move yet: it has no open ticket sub-issues.");
-    // create() refuses a second session for a spec issue that a card works on already (409).
+    // A sub-issue has no card: its spec's card owns it. A stale tab can still post its number.
+    if (seed.spec.hasParent) throw new HttpError(409, `Issue #${number} is a sub-issue of another issue; its spec's card owns it.`);
+    const specCard = seed.subIssues.length > 0;
+    const startFrom = specCard ? (body.column === "doing" ? "tickets" : "spec") : (body.column === "doing" ? "issue" : "split");
+    // create() refuses a second session for an issue a card works on already (409).
     return sessions.create({ repoId: repo.id, title: "", prompt: "", mode: "pipeline", issueRef: `${repo.id}#${number}`, startFrom });
   })
 
