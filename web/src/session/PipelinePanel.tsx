@@ -50,7 +50,8 @@ export const phaseLabel = (s: SessionSummary) => {
 /** "#12" for GitHub issues (any ref form parseIssueRef reads), the file name for local ticket files. */
 export const refLabel = (ref: string) => {
   const issue = parseIssueRef(ref);
-  return issue ? `#${issue.number}` : ref.split("/").pop() || ref;
+  if (!issue) return ref.split("/").pop() || ref;
+  return issue.repo ? `${issue.repo.split("/").pop()}#${issue.number}` : `#${issue.number}`;
 };
 
 const RESCUE_LABEL = { diagnosing: "rescue: diagnosing", fixing: "rescue: fixing", rescued: "rescued", failed: "rescue failed" } as const;
