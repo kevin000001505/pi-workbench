@@ -186,6 +186,11 @@ test("a direct session is a card in Doing, even while it sets up: every drag is 
   assert.equal(s.mode, "direct");
   assert.equal(s.phase, "setup");
   assert.equal(await col(s.id), "doing", "the card is in Doing while it sets up");
+  // Every drag of the card is refused while it is in Doing — even while the session still sets up.
+  for (const column of ["todo", "issues", "qa", "review", "done"]) {
+    const r = await api("POST", `/api/sessions/${s.id}/move`, { column });
+    assert.equal(r.status, 409, `a drag to ${column} while it sets up: ${JSON.stringify(r.json)}`);
+  }
   await waitFor(() => events.seen.length >= before + 1);
   assert.equal(events.seen[before], "kevin/direct");
 

@@ -2,7 +2,7 @@ import { useStore } from "../store.tsx";
 import { waitingOn } from "../types.ts";
 import { ago, Empty, PageHeader, StatusPill, issueUrl, repoIssue } from "../ui.tsx";
 
-/** The direct-mode sessions: plain agent turns, which are no card on any board. */
+/** The direct-mode sessions: plain agent turns, each a card in Doing on its repo's board. */
 export function Sessions() {
   const { sessions } = useStore();
   const all = Object.values(sessions)
@@ -16,8 +16,8 @@ export function Sessions() {
       <div className="page">
         <Empty title="No direct sessions">
           <p className="muted">
-            Direct sessions skip the pipeline: pick <strong>Direct</strong> on the New session form. Pipeline sessions are cards on
-            each repo's <a href="#/">board</a>.
+            Direct sessions skip the pipeline: pick <strong>Direct</strong> on the New session form. Each is a card in Doing on
+            its repo's <a href="#/">board</a>.
           </p>
           <a className="btn btn-primary" href="#/new">
             + New session

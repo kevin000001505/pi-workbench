@@ -31,9 +31,18 @@ const BY_PHASE: Record<string, Column> = {
 };
 
 /** The column a session's phase puts its card in; null for the `direct` phase, which has no pipeline
- * column. A direct session's card sits in Doing all the while (see cardOf). */
+ * column. A direct session's card sits in Doing all the while (see sessionColumn). */
 export function columnOf(phase: string): Column | null {
   return BY_PHASE[phase] ?? null;
+}
+
+/**
+ * The column the board puts a session's card in: a pipeline card follows its phase, and a direct
+ * card sits in Doing all the while (even while it sets up, and even with a PR badge), because a
+ * direct session never goes through grill, spec or tickets.
+ */
+export function sessionColumn(mode: string, phase: string): Column | null {
+  return mode === "pipeline" ? columnOf(phase) : "doing";
 }
 
 /** What a card is built from: the fields of a session summary that the board reads. */
@@ -75,13 +84,9 @@ export function prState(s: PrStatus): PrState {
   return "open";
 }
 
-/**
- * The card for a session, or null. A pipeline session's column follows its phase; a direct session
- * is a card in Doing always (even while it sets up, and even with a PR badge), because it never
- * goes through grill, spec or tickets.
- */
+/** The card for a session, or null for a pipeline phase that has no column. */
 export function cardOf(s: CardSource): Card | null {
-  const column = s.mode === "pipeline" ? columnOf(s.phase) : "doing";
+  const column = sessionColumn(s.mode, s.phase);
   if (!column) return null;
   return {
     id: s.id,

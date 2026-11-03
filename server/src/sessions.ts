@@ -44,7 +44,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { claimRefs, type Column, COLUMNS, columnOf, issueNumberOf, resolvedNote } from "../../shared/board.ts";
+import { claimRefs, type Column, COLUMNS, issueNumberOf, resolvedNote, sessionColumn } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
   configureAutoApprove,
@@ -1590,10 +1590,15 @@ export class SessionManager extends EventEmitter {
     this.emit("event", id, { type: "wb_notify", message: `PR #${row.pr_number} is merged.`, level: "info" });
   }
 
-  /** A drag of a card to another column; the card's column follows from the phase it leaves. */
+  /**
+   * A drag of a card to another column. The `from` column is what the board shows (sessionColumn),
+   * and a drag is a command only on a pipeline card: a direct card sits in Doing always, and every
+   * drag of it is refused with 409, so it snaps back.
+   */
   async move(id: string, to: Column) {
-    const from = columnOf(this.row(id).phase);
-    const command = from ? this.moves[`${from}>${to}`] : undefined;
+    const row = this.row(id);
+    const from = sessionColumn(row.mode, row.phase);
+    const command = row.mode === "pipeline" && from ? this.moves[`${from}>${to}`] : undefined;
     if (!command) {
       const label = (c: Column | null) => COLUMNS.find((x) => x.id === c)?.label ?? "this place";
       throw Object.assign(new Error(`This card cannot move from ${label(from)} to ${label(to)} now.`), { status: 409 });

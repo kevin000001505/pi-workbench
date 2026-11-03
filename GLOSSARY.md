@@ -129,7 +129,8 @@ _Avoid_: stop (a stop pauses the card; the card can resume), delete, cancel
 - Only the **Reviewer** produces an **Escalation**; the **Risk judge** never sends a **Permission** to the user
 - **Decisions** are never auto-approved
 - The **Reviewer's** settings drive the **Reviewer** as well as **Rescue runs** and **Retro runs**; an empty Reviewer model turns all three off
-- A **Card** moves through the columns as its session's phase changes; the user's drag outranks the pipeline
+- A **Card** from a pipeline session moves through the columns as its phase changes; the user's drag outranks the pipeline
+- A **Card** from a direct session sits in **Doing** always; every drag of it is refused
 - Dragging a **Card** from **Issues** to **Doing** starts **Solve** (a plain issue) or **Solve all** (a spec issue or a ready session); dragging it from **Review** to **Done** is **Approve**; any other forward drag is refused
 - Dragging a plain **Card** in **Issues** to **To do** is **Split**: the issue is cut into ticket sub-issues before any work starts
 - Dragging a **Card** back to **Issues** stops its run; dragging it to **Doing** again resumes the same session, and finished tickets stay finished
