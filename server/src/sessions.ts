@@ -1363,11 +1363,15 @@ export class SessionManager extends EventEmitter {
 
   /**
    * A backward move stopped the live run. The stop rule's clock goes with it (the next run gets a
-   * fresh watch), and a merge run's half-done merge is undone, so Approve can start again.
+   * fresh watch), and a half-done merge is undone, so Approve can start again. The worktree says
+   * whether a merge is half done: after a restart no merge run is known, but its MERGE_HEAD stays.
    */
   private async dropRun(id: string) {
     this.unwatch(this.state(id));
-    if (this.resolving.delete(id)) await git(this.row(id).worktree, ["merge", "--abort"], await this.gitEnv()).catch(() => {});
+    this.resolving.delete(id);
+    const { worktree } = this.row(id);
+    if (await git(worktree, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).then(() => true, () => false))
+      await git(worktree, ["merge", "--abort"], await this.gitEnv()).catch(() => {});
   }
 
   /**

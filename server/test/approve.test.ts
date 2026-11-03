@@ -412,6 +412,23 @@ test("Review → To do during a merge run stops it and undoes the half-done merg
   assert.notEqual(again.json.activeRun, first);
 });
 
+test("Review → Issues undoes a half-done merge that no merge run holds (a server restart lost it)", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, worktree, branch } = await toReview(117);
+  const tip = git(bare, "rev-parse", `refs/heads/${branch}`);
+  // A merge run's half-done merge, left in the worktree: the restarted server knows of no merge run.
+  pushToBase("RESTART: main changed this line");
+  git(worktree, "fetch", "-q", "origin", "main");
+  assert.equal(spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@x", "merge", "--no-edit", "origin/main"], { cwd: worktree }).status, 1, "the merge stops on a conflict");
+  assert.ok(mergeInProgress(worktree));
+
+  const paused = await move(id, "issues");
+  assert.equal(paused.status, 200, JSON.stringify(paused.json));
+  assert.equal(paused.json.phase, "ready");
+  assert.ok(!mergeInProgress(worktree), "no merge is left half done");
+  assert.equal(git(worktree, "status", "--porcelain"), "", "no conflict markers are left in the worktree");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), tip);
+});
+
 for (const [word, spec, says] of [
   ["FAKERESOLVE", 87, /the merge is not committed/],
   ["ABORTRESOLVE", 97, /HEAD does not contain origin\/main/],
