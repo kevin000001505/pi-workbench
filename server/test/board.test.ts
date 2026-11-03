@@ -1198,6 +1198,105 @@ test("Stop during a solo ticket clears it: a later Solve all runs every remainin
   await api("POST", `/api/sessions/${s.id}/stop`, {});
 });
 
+test("a spec's open ticket sub-issues come from the read route: number, title, URL, and their open blockers; a closed or foreign blocker is dropped", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "tickets1");
+  assert.equal((await api("PUT", "/api/secrets", { scope: "global", name: "GITHUB_TOKEN", value: "ghp_test" })).status, 200);
+  assert.equal((await api("PUT", "/api/settings/model", { baseUrl: mock.url })).status, 200);
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/tickets1" })).status, 200);
+  gh.seedSubIssues("kevin", "tickets1", { number: 10, title: "Read me", body: "## Solution\nr.txt says R." }, [
+    { number: 11, title: "Write r.txt", body: "Create r.txt." },
+    { number: 12, title: "Then test r.txt", body: "Test it.", blockedBy: [11] },
+    { number: 13, title: "Solved already", body: "Done.", state: "CLOSED" },
+    { number: 14, title: "Blocks from outside", body: "x", blockedBy: [99] },
+  ]);
+  const r = await api("GET", "/api/repos/kevin/tickets1/issues/10/tickets");
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.deepEqual(r.json, {
+    spec: { number: 10, title: "Read me", url: "https://github.com/kevin/tickets1/issues/10" },
+    subIssues: [
+      { number: 11, title: "Write r.txt", url: "https://github.com/kevin/tickets1/issues/11", blockedBy: [] },
+      { number: 12, title: "Then test r.txt", url: "https://github.com/kevin/tickets1/issues/12", blockedBy: [11] },
+      // #13 is closed: it is not listed. #14's blocker 99 is not an open sub-issue of the spec, so it is dropped.
+      { number: 14, title: "Blocks from outside", url: "https://github.com/kevin/tickets1/issues/14", blockedBy: [] },
+    ],
+  });
+  // An unknown spec number: the GitHub module's 404 comes through.
+  assert.equal((await api("GET", "/api/repos/kevin/tickets1/issues/99/tickets")).status, 404);
+});
+
+test("a sub-issue's Solve on an unclaimed spec card creates one session, runs only that ticket, and pauses in Issues; a blocked or foreign sub-issue is refused (409)", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "unsolo");
+  assert.equal((await api("PUT", "/api/secrets", { scope: "global", name: "GITHUB_TOKEN", value: "ghp_test" })).status, 200);
+  assert.equal((await api("PUT", "/api/settings/model", { baseUrl: mock.url })).status, 200);
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/unsolo" })).status, 200);
+  const col = async (id: string) => (await board("kevin/unsolo")).find((c) => c.id === id)?.column;
+  gh.seedSubIssues("kevin", "unsolo", { number: 20, title: "Unclaimed solo", body: "## Solution\nu.txt says U." }, [
+    { number: 21, title: "Write u.txt", body: "Create u.txt containing U. PUSHME" },
+    { number: 22, title: "Test u.txt", body: "Test it.", blockedBy: [21] },
+    { number: 23, title: "More u.txt", body: "More." },
+    { number: 24, title: "Solved already", body: "Done.", state: "CLOSED" },
+  ]);
+  assert.ok((await board("kevin/unsolo")).some((c) => c.id === "issue:20"), "the unclaimed card shows");
+  const solve = (sub: number) => api("POST", `/api/repos/kevin/unsolo/issues/20/tickets/${sub}/solve`, {});
+
+  // A sub-issue with an open blocker is refused (409) and names the blocker.
+  const refused = await solve(22);
+  assert.equal(refused.status, 409, JSON.stringify(refused.json));
+  assert.match(refused.json.error, /#21/);
+  // A number that is not an open sub-issue of the spec is refused too: the spec itself, a foreign one, and a closed one.
+  assert.equal((await solve(20)).status, 409);
+  assert.equal((await solve(99)).status, 409);
+  assert.equal((await solve(24)).status, 409);
+  // The unclaimed card is untouched by the refused Solves.
+  assert.ok((await board("kevin/unsolo")).some((c) => c.id === "issue:20"));
+
+  // A ticket's run starts with one request whose last message is its prompt; later steps of the
+  // run end with a tool result. The mock repeats the whole history in every request, and earlier
+  // tests used these local ticket numbers, so the baselines come first.
+  const ticketRuns = (num: number) => mock.requests.filter((r) => {
+    const last = (r.messages ?? []).at(-1);
+    return last?.role === "user" && JSON.stringify(last).includes(`Ticket #${num}: `);
+  }).length;
+  const t1Runs = ticketRuns(1);
+  const t2Runs = ticketRuns(2);
+  const t3Runs = ticketRuns(3);
+
+  // The un-setup repo runs setup first (To do), then the solo ticket runs.
+  const s = (await solve(21)).json;
+  assert.equal(s.repoId, "kevin/unsolo");
+  assert.equal(s.title, "Unclaimed solo");
+  assert.equal(s.issueRef, "kevin/unsolo#20");
+  assert.equal(s.phase, "setup");
+  assert.equal(s.soloTicket, 1, "the sub-issue's local number");
+  assert.deepEqual(s.tickets.map((t: any) => t.title), ["Write u.txt", "Test u.txt", "More u.txt"], "the closed sub-issue is not a ticket");
+  assert.equal(await col(s.id), "todo", "setup runs in To do first");
+  assert.ok(!(await board("kevin/unsolo")).some((c) => c.id === "issue:20"), "the unclaimed card is gone");
+
+  await waitFor(async () => (await summary(s.id)).phase === "implement");
+  assert.equal(await col(s.id), "doing");
+  const running = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.tickets[0].status === "running" ? x : undefined;
+  });
+  assert.equal(running.activeRun, running.tickets[0].runId);
+
+  // Its `git push` waits on a permission; only when it is answered has the ticket's run reached the model.
+  const perm = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));
+  assert.ok(ticketRuns(1) > t1Runs, "the solo ticket ran");
+  assert.equal(ticketRuns(2), t2Runs, "ticket 2 did not start");
+  assert.equal(ticketRuns(3), t3Runs, "ticket 3 did not start");
+  await api("POST", `/api/sessions/${s.id}/respond`, { requestId: perm.id, value: perm.options[0] });
+  const back = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.phase === "ready" ? x : undefined;
+  });
+  assert.equal(await col(s.id), "issues");
+  assert.equal(back.soloTicket, null);
+  assert.equal(back.attention, null);
+  assert.deepEqual(back.tickets.map((t: any) => t.status), ["done", "ready", "ready"], "1 of 3 done");
+  await api("POST", `/api/sessions/${s.id}/stop`, {});
+});
+
 test("a Done card and a direct session do not claim their issue: the unclaimed card shows, and a new pipeline session may take it", { skip: !hasPi && "pi CLI not found" }, async () => {
   gh.seedSubIssues("kevin", "demo", { number: 140, title: "Merged once", body: "## Solution\nAgain." }, [{ number: 141, title: "Do it", body: "Do it." }]);
   gh.seedSubIssues("kevin", "demo", { number: 150, title: "Talked about", body: "## Solution\nTalk." }, [{ number: 151, title: "Do it", body: "Do it." }]);

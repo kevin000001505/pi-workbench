@@ -42,7 +42,7 @@ export const RESCUES_PER_SPEC = 3;
 export type TicketInput = { number: number; title: string; body: string; blockedBy?: number[]; trackerRef?: string };
 
 /** An open sub-issue of a spec, as GitHub returns it: its own blockers' issue numbers. */
-export type SubIssueSeed = { number: number; title: string; body: string | null; blockedBy: number[] };
+export type SubIssueSeed = { number: number; title: string; body: string | null; url: string; blockedBy: number[] };
 
 /**
  * A spec issue and the tickets it owns, ready to feed into a session. `hasParent` is true when

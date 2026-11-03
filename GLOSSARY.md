@@ -21,7 +21,7 @@ The move of a card from Issues to Doing (for an unclaimed card, it creates the s
 _Avoid_: solve all issues (that is the Start session flow, one session per issue)
 
 **Solve one ticket**:
-The Solve button on a ticket row of a spec card's detail: the card's session runs only that ticket, in a fresh run, and when the ticket is done the card pauses back in Issues (for example 1/3 done). When the last ticket is done, the card goes on to the review and the PR.
+The Solve button on a ticket row of a spec card's detail: the card's session runs only that ticket, in a fresh run, and when the ticket is done the card pauses back in Issues (for example 1/3 done). When the last ticket is done, the card goes on to the review and the PR. A Solve on a sub-issue row of an unclaimed spec card's detail creates the spec's session and runs only that sub-issue, as its solo ticket.
 _Avoid_: Solve all tickets (that runs every ticket of the spec in one go), Solve (that is for a plain issue)
 
 **SSH host**:

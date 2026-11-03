@@ -5,7 +5,7 @@ import { api } from "../api.ts";
 import { PendingCard } from "../session/PendingCard.tsx";
 import { phaseLabel } from "../session/PipelinePanel.tsx";
 import { useStore } from "../store.tsx";
-import { isResolvedNote, type SessionSummary, type Ticket } from "../types.ts";
+import { isResolvedNote, type SessionSummary, type Ticket, type UnclaimedSpecTickets } from "../types.ts";
 import { Markdown, Spinner } from "../ui.tsx";
 import { CardActions, SOLVE, SPLIT } from "./CardActions.tsx";
 
@@ -64,6 +64,36 @@ function TicketRow({ s, t, busy, onSolve }: { s: SessionSummary; t: Ticket; busy
 }
 
 /**
+ * One row of an unclaimed spec card's ticket list: every open sub-issue is Ready. A row with an
+ * open blocker shows "waits on #n" and disables Solve; the row's link opens the sub-issue on
+ * GitHub in a new tab. Solve creates the spec's session with that sub-issue as the solo ticket.
+ */
+function UnclaimedTicketRow({ t, busy, onSolve }: { t: { number: number; title: string; url: string; blockedBy: number[] }; busy: boolean; onSolve: (sub: number) => void }) {
+  const canSolve = t.blockedBy.length === 0;
+  return (
+    <li className="t-ready">
+      <div className="row">
+        <span className="state">Ready</span>
+        <span className="title">
+          <a href={t.url} target="_blank" rel="noopener">
+            #{t.number} {t.title}
+          </a>
+        </span>
+        {t.blockedBy.length > 0 && <span className="waits">waits on {t.blockedBy.map((b) => `#${b}`).join(", ")}</span>}
+        <button
+          className="kz-btn ticket-solve"
+          disabled={!canSolve || busy}
+          title={canSolve ? "Create this spec's session and run only this ticket" : "Solve waits for the sub-issues that block it"}
+          onClick={() => onSolve(t.number)}
+        >
+          {busy ? <Spinner small /> : "Solve"}
+        </button>
+      </div>
+    </li>
+  );
+}
+
+/**
  * A card's detail, beside the board: the spec, the tickets with their notes, the review note, the
  * PR, the attention with retry and skip, and the session's pending decisions and permissions, which
  * you answer here with the same PendingCard as the session view. The link opens the full transcript.
@@ -72,7 +102,28 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
   const { sessions, toast } = useStore();
   const s = sessions[card.id];
   const plain = isPlainUnclaimedCard(card);
+  const unclaimedSpec = unclaimedNumber(card.id) !== null && !plain;
   const [busy, setBusy] = useState(false);
+
+  // An unclaimed spec card has no session yet: its ticket list comes from the spec's open sub-issues.
+  const [specTickets, setSpecTickets] = useState<UnclaimedSpecTickets | null | undefined>(undefined);
+  useEffect(() => {
+    if (!unclaimedSpec) return;
+    const ref = parseIssueRef(card.specRef);
+    if (!ref?.repo) {
+      setSpecTickets(null);
+      return;
+    }
+    const [owner, name] = ref.repo.split("/");
+    let live = true;
+    api.get<UnclaimedSpecTickets>(`/api/repos/${owner}/${name}/issues/${ref.number}/tickets`).then(
+      (t) => live && setSpecTickets(t),
+      () => live && setSpecTickets(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [unclaimedSpec, card.specRef]);
 
   // A plain unclaimed card has no session: read its issue body from the API it was read from.
   const [issueBody, setIssueBody] = useState<string | null | undefined>(undefined);
@@ -140,6 +191,23 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
     }
   };
 
+  // Solve one sub-issue of an unclaimed spec card: it creates the spec's session with that
+  // sub-issue as the solo ticket. The unclaimed card goes, and this detail closes with it.
+  const solveUnclaimed = async (sub: number) => {
+    setBusy(true);
+    const ref = parseIssueRef(card.specRef);
+    try {
+      if (!ref?.repo) throw new Error("The card has no issue link to solve");
+      const [owner, name] = ref.repo.split("/");
+      await api.post(`/api/repos/${owner}/${name}/issues/${ref.number}/tickets/${sub}/solve`, {});
+      onClose();
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // Abandon drops the feature: the server closes the PR, deletes the branch, the worktree and the
   // card, and a wb_board makes every board refetch, so this panel closes as the card goes.
   const abandon = async () => {
@@ -191,12 +259,12 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
         </header>
 
         <div className="kz-detail-links">
-          {!plain && (
+          {!plain && !unclaimedSpec && (
             <a className="kz-btn" href={`#/session/${card.id}`} target="_blank" rel="noopener">
               Open the full transcript
             </a>
           )}
-          {plain && (
+          {(plain || unclaimedSpec) && (
             <a className="kz-btn" href={card.specRef ?? undefined} target="_blank" rel="noopener">
               Open on GitHub
             </a>
@@ -216,7 +284,7 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
               {busy ? <Spinner small /> : null} Approve
             </button>
           )}
-          {!plain && card.column !== "done" && (
+          {!plain && !unclaimedSpec && card.column !== "done" && (
             <button className="kz-btn danger" disabled={busy} onClick={abandon} title="Stop the runs, close the PR, delete the branch, the worktree and the card; the issues stay open">
               Abandon
             </button>
@@ -250,6 +318,27 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
               <Markdown text={issueBody} />
             ) : (
               <p className="kz-detail-muted">The issue has no body.</p>
+            )}
+          </section>
+        ) : unclaimedSpec ? (
+          <section className="kz-detail-section">
+            <h3>
+              Tickets <span className="kz-detail-muted">{specTickets ? `${specTickets.subIssues.length} open` : ""}</span>
+            </h3>
+            {specTickets === undefined ? (
+              <p className="kz-detail-muted">
+                <Spinner small /> Loading the tickets…
+              </p>
+            ) : specTickets === null ? (
+              <p className="kz-detail-muted">The tickets could not be read from GitHub.</p>
+            ) : specTickets.subIssues.length === 0 ? (
+              <p className="kz-detail-muted">This spec has no open tickets.</p>
+            ) : (
+              <ol className="kz-detail-tickets">
+                {specTickets.subIssues.map((t) => (
+                  <UnclaimedTicketRow key={t.number} t={t} busy={busy} onSolve={solveUnclaimed} />
+                ))}
+              </ol>
             )}
           </section>
         ) : !s ? (

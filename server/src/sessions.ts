@@ -105,7 +105,7 @@ export type UiResponse = { value?: string; confirmed?: boolean; cancelled?: bool
 export type Run = { id: string; label: string };
 
 /** What POST /api/sessions (and an unclaimed card's move) asks SessionManager.create for. */
-export type CreateInput = { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: StartFrom };
+export type CreateInput = { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: StartFrom; soloTicket?: number | null };
 
 export type SessionSummary = {
   id: string;
@@ -510,10 +510,10 @@ export class SessionManager extends EventEmitter {
     const heldPhase = held ? (plan ? plan.phase : mode === "pipeline" ? "grill" : "direct") : null;
     this.db
       .prepare(
-        `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt, mode, phase, active_run, issue_ref, auto_approve, typesafe_skill, spec, spec_ref, held_phase)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt, mode, phase, active_run, issue_ref, auto_approve, typesafe_skill, spec, spec_ref, held_phase, solo_ticket)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup ? held : null, mode, phase, id, issueRef, autoApprove === "inherit" ? null : autoApprove, typesafe ? 1 : 0, plan?.spec ? (seed?.spec.body ?? null) : null, startFrom ? (seed?.spec.htmlUrl ?? null) : null, needsSetup ? heldPhase : null);
+      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup ? held : null, mode, phase, id, issueRef, autoApprove === "inherit" ? null : autoApprove, typesafe ? 1 : 0, plan?.spec ? (seed?.spec.body ?? null) : null, startFrom ? (seed?.spec.htmlUrl ?? null) : null, needsSetup ? heldPhase : null, input.soloTicket ?? null);
     const s = this.state(id);
     s.loaded = true;
     await this.start(id);
