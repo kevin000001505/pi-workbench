@@ -720,3 +720,32 @@ test("a retro run that changes the worktree flags the session", { skip: !hasPi &
   const { done } = await rescuedSpec("Greet. LOOPME RETRO_DIRTY");
   assert.match(done.attention ?? (await flagged(done.id)), /retro run changed the worktree/);
 });
+
+test("QA → Issues during a retro run stops it; the resumed card reviews and retros again, then opens the PR", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { savePipelineSettings } = await import("../src/settings.ts");
+  savePipelineSettings(db, { timeLimitMinutes: 30, repeatLimit: 3, toolCallLimit: 300 });
+  rescueOn();
+  const s = await solveOne("Greet. LOOPME RETRO_HOLD");
+  const dump = (e: Error) => {
+    throw new Error(`${e.message}: ${JSON.stringify({ ...mgr.summary(s.id), tickets: undefined })}`);
+  };
+  const holding = await waitFor(() => {
+    const x = mgr.summary(s.id);
+    return x.phase === "retro" && x.pending.some((p: any) => p.kind === "decision") ? x : undefined;
+  }, 90_000).catch(dump);
+  const firstRetro = holding.activeRun;
+  await mgr.move(s.id, "issues");
+  assert.equal(mgr.summary(s.id).phase, "ready");
+  assert.equal(mgr.summary(s.id).attention, null);
+
+  // Issues → Doing: every ticket is done, so the review runs again, then a fresh retro.
+  await mgr.move(s.id, "doing");
+  const again = await waitFor(() => {
+    const x = mgr.summary(s.id);
+    return x.phase === "retro" && x.activeRun !== firstRetro && x.pending.some((p: any) => p.kind === "decision") ? x : undefined;
+  }, 90_000).catch(dump);
+  mgr.respond(s.id, again.pending[0].id, { value: "Yes" });
+  const done = await waitFor(() => (mgr.summary(s.id).phase === "pr" ? mgr.summary(s.id) : undefined), 90_000).catch(dump);
+  assert.equal(done.attention, null);
+  assert.ok(events.some((e) => e.id === s.id && e.ev.type === "wb_notify" && /Retro report/.test(e.ev.message)));
+});

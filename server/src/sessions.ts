@@ -683,6 +683,7 @@ export class SessionManager extends EventEmitter {
         "INSERT INTO tickets (session_id, num, title, body, blocked_by, tracker_ref, status) VALUES (?, ?, ?, ?, ?, ?, 'ready')",
       );
       for (const t of tickets) insert.run(id, t.number, t.title, t.body, JSON.stringify(t.blockedBy), t.trackerRef ?? null);
+      this.update(id, { rework_tickets: 0 });
     } else if (name === "finish_ticket" && row.phase === "implement" && (args.status === "done" || args.status === "blocked")) {
       s.finished = { status: args.status, note: String(args.note ?? "").trim() };
     } else if (name === "finish_diagnosis" && row.phase === "implement") {
@@ -974,7 +975,7 @@ export class SessionManager extends EventEmitter {
     } else if (row.phase === "spec" && row.spec) {
       this.update(id, { phase: "tickets" });
       await this.send(id, ticketsPrompt(row.spec_ref), "followUp");
-    } else if (row.phase === "tickets" && this.tickets(id).length > 0) {
+    } else if (row.phase === "tickets" && !row.rework_tickets && this.tickets(id).length > 0) {
       // The tickets are on the tracker: the card waits in Issues until Solve all starts the runs.
       this.update(id, { phase: "ready" });
     } else if (row.phase === "implement") {
@@ -1327,16 +1328,30 @@ export class SessionManager extends EventEmitter {
   private async pause(id: string) {
     this.update(id, { phase: "ready", attention: null });
     await this.stop(id);
+    await this.dropRun(id);
+  }
+
+  /**
+   * A backward move stopped the live run. The stop rule's clock goes with it (the next run gets a
+   * fresh watch), and a merge run's half-done merge is undone, so Approve can start again.
+   */
+  private async dropRun(id: string) {
+    this.unwatch(this.state(id));
+    if (this.resolving.delete(id)) await git(this.row(id).worktree, ["merge", "--abort"], await this.gitEnv()).catch(() => {});
   }
 
   /**
    * Plan again: stop the live run, go back to the plan conversation, and grill with the rework
-   * prompt. The grill summary and spec are cleared (the spec ref stays), so afterSettled does not
-   * skip ahead; send() clears the attention, and record_tickets replaces the ticket rows.
+   * prompt. The grill summary and spec are cleared (the spec ref stays), and the old tickets are
+   * marked stale until record_tickets replaces them, so afterSettled does not skip ahead; send()
+   * clears the attention.
    */
   private async rework(id: string) {
-    this.update(id, { phase: "grill", grill_summary: null, spec: null });
+    this.update(id, { phase: "grill", grill_summary: null, spec: null, rework_tickets: 1 });
     await this.switchRun(id, id, false);
+    await this.dropRun(id);
+    // A ticket the stopped run left `running` is not worked on while the card is in To do.
+    for (const t of this.tickets(id)) if (t.status === "running") this.updateTicket(id, t.num, { status: "ready" });
     await this.send(id, reworkPrompt(this.row(id).spec_ref));
   }
 

@@ -38,6 +38,8 @@ export type SessionRow = {
   review_run: string | null;
   /** pi session id of the last merge run, which resolves a conflict that Approve found. */
   merge_run: string | null;
+  /** 1 from a rework until record_tickets records the new breakdown; the old ticket rows stay for the board until then. */
+  rework_tickets: number;
   /** finish_review's note from the last review run, for the card detail. */
   review_note: string | null;
   /** When the card last reached Done; the board lists Done newest first by it. */
@@ -150,6 +152,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ["sessions", "review_note", "TEXT"],
   ["sessions", "done_at", "INTEGER"],
   ["sessions", "merge_run", "TEXT"],
+  ["sessions", "rework_tickets", "INTEGER NOT NULL DEFAULT 0"],
   ["tickets", "start_commit", "TEXT"],
   ["tickets", "stop_reason", "TEXT"],
   ["tickets", "rescue_run_id", "TEXT"],

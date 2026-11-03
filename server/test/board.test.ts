@@ -401,6 +401,45 @@ test("a backward move clears the card's attention", { skip: !hasPi && "pi CLI no
   await waitFor(() => mock.requests.some((r) => /Rework the spec \(\S*issues\/40\)/.test(JSON.stringify(r.messages ?? []))));
 });
 
+test("a reworked card waits in To do until the new breakdown is recorded; a ticket the stopped run left running is ready again", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.seedSubIssues("kevin", "demo", { number: 70, title: "Rework wave", body: "## Solution\nwave.txt says Wave." }, [
+    { number: 71, title: "Push wave.txt", body: "Create wave.txt and push it. PUSHME" },
+  ]);
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Rework wave", issueRef: "kevin/demo#70", mode: "pipeline", startFrom: "tickets" })).json;
+  // Ticket 1's `git push` waits on a permission in Doing: the ticket is running.
+  await waitFor(async () => (await summary(s.id)).pending.some((p: any) => p.kind === "permission"));
+  assert.equal((await summary(s.id)).tickets[0].status, "running");
+
+  const r = await api("POST", `/api/sessions/${s.id}/move`, { column: "todo" });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const reworked = await summary(s.id);
+  assert.deepEqual(reworked.tickets.map((t: any) => t.status), ["ready"], "the stopped run's ticket is not running");
+
+  // The grill and the spec run again; the breakdown question gets "Change it", and that run ends
+  // with a question and no record_tickets: the old ticket does not send the card to Issues.
+  await answerNext(s.id, /shared understanding/);
+  const ask = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "decision" && /seam/.test(p.title)));
+  assert.equal((await api("POST", `/api/sessions/${s.id}/respond`, { requestId: ask.id, value: ask.options[0] })).status, 200);
+  const breakdown = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "decision" && /Approve:/.test(p.title)));
+  assert.equal((await summary(s.id)).activity?.startsWith("#"), false, "the To do card names no ticket");
+  assert.equal((await api("POST", `/api/sessions/${s.id}/respond`, { requestId: breakdown.id, value: "Change it" })).status, 200);
+  await waitFor(async () => mock.requests.some((x) => JSON.stringify(x.messages ?? []).includes("Change it")));
+  await waitFor(async () => (await summary(s.id)).status === "idle");
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal((await summary(s.id)).phase, "tickets");
+  assert.equal(await columnOf(s.id), "todo");
+
+  // The user replies; the new breakdown is recorded, and only then the card waits in Issues.
+  assert.equal((await api("POST", `/api/sessions/${s.id}/prompt`, { message: "/skill:to-tickets Keep the breakdown as it is." })).status, 200);
+  await answerNext(s.id, /Approve:/);
+  const ready = await waitFor(async () => {
+    const x = await summary(s.id);
+    return x.phase === "ready" && x;
+  });
+  assert.deepEqual(ready.tickets.map((t: any) => t.title), ["Write hello.txt", "Add a test", "Add docs"]);
+  assert.equal(await columnOf(s.id), "issues");
+});
+
 /** The board events a WebSocket client hears, from now on. */
 async function boardEvents() {
   const ws = new WebSocket(`${base.replace("http", "ws")}/ws`);

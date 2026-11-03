@@ -341,3 +341,71 @@ test("a merge run that ends without finish_merge keeps the card in Review, and A
   assert.notEqual(again.json.activeRun, first);
   await waitFor(async () => (await summary(id)).attention, 120_000);
 });
+
+const move = (id: string, column: string) => api("POST", `/api/sessions/${id}/move`, { column });
+const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString().trim();
+const mergeInProgress = (worktree: string) => spawnSync("git", ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd: worktree }).status === 0;
+
+/** Approve a PR whose base changed under it, and wait while the merge run asks the user a question. */
+async function holdMergeRun(id: string) {
+  pushToBase("HOLDMERGE: main changed this line");
+  const r = await approve(id);
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.match(r.json.activeRun, new RegExp(`^${id}-merge-`));
+  await waitFor(async () => (await summary(id)).pending.some((p: any) => p.kind === "decision"), 120_000);
+  assert.ok(mergeInProgress(path.join(process.env.DATA_DIR!, "worktrees", id)), "the merge run works on a half-done merge");
+  return r.json.activeRun as string;
+}
+
+/** Drive a card back to Review: answer every question and permission, Solve all in Issues, skip a blocked ticket. */
+async function driveToReview(id: string) {
+  await waitFor(async () => {
+    const x = await summary(id);
+    const req = x.pending.find((p: any) => p.kind === "decision" || p.kind === "permission");
+    if (req) await api("POST", `/api/sessions/${id}/respond`, { requestId: req.id, value: req.options[0] });
+    else if (x.phase === "ready" && x.status !== "running") await move(id, "doing");
+    else if (x.phase === "implement" && x.attention) await api("POST", `/api/sessions/${id}/pipeline`, { action: "skip" });
+    return x.phase === "pr" && x.status !== "running";
+  }, 180_000);
+}
+
+test("Review → Issues during a merge run stops it and undoes the half-done merge; the resumed card's Approve starts a fresh merge run", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, worktree, branch } = await toReview(67);
+  const tip = git(bare, "rev-parse", `refs/heads/${branch}`);
+  const first = await holdMergeRun(id);
+
+  const paused = await move(id, "issues");
+  assert.equal(paused.status, 200, JSON.stringify(paused.json));
+  assert.equal(paused.json.phase, "ready");
+  assert.equal(await columnOf(id), "issues");
+  assert.ok(!mergeInProgress(worktree), "no merge is left half done");
+  assert.equal(git(worktree, "status", "--porcelain"), "", "no conflict markers are left in the worktree");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), tip);
+
+  // Issues → Doing: every ticket is done, so the review runs again and the card is back in Review.
+  await driveToReview(id);
+  const again = await approve(id);
+  assert.equal(again.status, 200, JSON.stringify(again.json));
+  assert.match(again.json.activeRun, new RegExp(`^${id}-merge-`));
+  assert.notEqual(again.json.activeRun, first);
+});
+
+test("Review → To do during a merge run stops it and undoes the half-done merge; the reworked card's Approve starts a fresh merge run", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, worktree, branch } = await toReview(77);
+  const tip = git(bare, "rev-parse", `refs/heads/${branch}`);
+  const first = await holdMergeRun(id);
+
+  const reworked = await move(id, "todo");
+  assert.equal(reworked.status, 200, JSON.stringify(reworked.json));
+  assert.equal(reworked.json.phase, "grill");
+  assert.equal(reworked.json.activeRun, id);
+  assert.ok(!mergeInProgress(worktree), "no merge is left half done");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), tip);
+  assert.equal(git(worktree, "status", "--porcelain"), "", "no conflict markers are left in the worktree");
+
+  await driveToReview(id);
+  const again = await approve(id);
+  assert.equal(again.status, 200, JSON.stringify(again.json));
+  assert.match(again.json.activeRun, new RegExp(`^${id}-merge-`));
+  assert.notEqual(again.json.activeRun, first);
+});

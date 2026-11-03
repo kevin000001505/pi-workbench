@@ -111,13 +111,15 @@ function textOf(content: unknown): string {
  * - grill-with-docs: ask to confirm → save_grill_summary → done
  * - to-spec: ask about seams → write the spec file → save_spec → done (trackerRef: the task's
  *   `SPEC_REF=<ref>`, or the spec file)
- * - to-tickets: ask to approve → write .scratch files → record_tickets (3 tickets) → done
+ * - to-tickets: ask to approve → write .scratch files → record_tickets (3 tickets) → done; a
+ *   "Change it" answer ends the run with a question instead
  * - tdd (a ticket): commit a line for the ticket (and `git push`, a gated call, if the ticket says
  *   PUSHME) → finish_ticket (blocked if the ticket says BLOCKME) → done
  * - code-review: commit a fix and `git push` it (a gated call) → finish_review → done
  * - resolving-merge-conflicts: keep both sides of every conflicted hunk in work.txt and commit the
  *   merge → finish_merge resolved → done; a base side that says GIVEUP is left alone → finish_merge failed,
- *   and one that says NOFINISH ends the run with no finish_merge call
+ *   and one that says NOFINISH ends the run with no finish_merge call; one that says HOLDMERGE asks
+ *   the user first (the run waits on a decision), then keeps both sides
  */
 function pipelineScript(userText: string, step: number, lastResult: string, conversation = ""): Reply | undefined {
   if (userText.includes('<skill name="grill-with-docs"')) {
@@ -139,6 +141,7 @@ function pipelineScript(userText: string, step: number, lastResult: string, conv
   }
   if (userText.includes('<skill name="to-tickets"')) {
     if (step === 0) return { tool: { name: "ask_user", args: { question: "Approve: 1. Write hello.txt; 2. Add a test (blocked by 1); 3. Add docs (blocked by 1)?", options: ["Approve", "Change it"] } } };
+    if (step === 1 && /Change it/.test(lastResult)) return { text: "What should change in the breakdown?" };
     if (step === 1) return { tool: { name: "bash", args: { command: "mkdir -p .scratch/greeting/issues && for n in 01 02 03; do echo ticket > .scratch/greeting/issues/$n.md; done && echo published" } } };
     if (step === 2) {
       return {
@@ -167,8 +170,9 @@ function pipelineScript(userText: string, step: number, lastResult: string, conv
   if (userText.includes('<skill name="resolving-merge-conflicts"')) {
     if (step === 0) {
       const keepBoth = "grep -v -e '^<<<<<<<' -e '^=======' -e '^>>>>>>>' work.txt > .resolved && mv .resolved work.txt && git add work.txt && git commit -q --no-edit && echo resolved";
-      return { tool: { name: "bash", args: { command: `if grep -q NOFINISH work.txt; then echo "wandered off"; elif grep -q GIVEUP work.txt; then echo "cannot reconcile"; else ${keepBoth}; fi` } } };
+      return { tool: { name: "bash", args: { command: `if grep -q HOLDMERGE work.txt; then echo "hold on"; elif grep -q NOFINISH work.txt; then echo "wandered off"; elif grep -q GIVEUP work.txt; then echo "cannot reconcile"; else ${keepBoth}; fi` } } };
     }
+    if (step === 1 && lastResult.includes("hold on")) return { tool: { name: "ask_user", args: { question: "Keep both sides of work.txt?", options: ["Yes", "No"] } } };
     if (step === 1 && lastResult.includes("wandered off")) return { text: "I looked at it." };
     if (step === 1) {
       return lastResult.includes("cannot reconcile")
@@ -263,11 +267,13 @@ function rescueScript(userText: string, step: number): Reply {
  * - RETRO_SILENT: a text reply, no finish_retro
  * - RETRO_LOOP: the same read forever (the stop rule)
  * - RETRO_DIRTY: writes notes.txt, then reports
+ * - RETRO_HOLD: asks the user first (the run waits on a decision), then reports
  * - otherwise: one read, then finish_retro with a proposal
  */
 function retroScript(userText: string, step: number): Reply {
   if (userText.includes("RETRO_SILENT")) return { text: "Nothing to add." };
   if (userText.includes("RETRO_LOOP")) return { tool: { name: "bash", args: { command: "git log --oneline -3" } } };
+  if (step === 0 && userText.includes("RETRO_HOLD")) return { tool: { name: "ask_user", args: { question: "Is the retro scope right?", options: ["Yes", "No"] } } };
   if (step === 0) return { tool: { name: "bash", args: { command: userText.includes("RETRO_DIRTY") ? "echo retro >> notes.txt" : "git log --oneline -3" } } };
   if (step === 1) return { tool: { name: "finish_retro", args: { report: "Raise the repeat limit to 4 in Settings → Pipeline: the test loop was a real loop." } } };
   return { text: "Retro done." };
