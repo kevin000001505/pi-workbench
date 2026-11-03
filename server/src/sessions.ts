@@ -1286,7 +1286,10 @@ export class SessionManager extends EventEmitter {
     if (row.mode !== "pipeline") throw Object.assign(new Error("Not a pipeline session"), { status: 409 });
     const current = this.tickets(id).find((t) => t.status === "running" || t.status === "blocked");
     if (action === "stop") {
-      // Stop pauses the card in Issues, the same as a move there; Solve all continues it.
+      // Stop pauses the card in Issues, the same as a move there; Solve all continues it. Only a
+      // card with tickets to continue stops: the phases the pipeline panel shows Stop in.
+      if (row.phase !== "implement" && row.phase !== "review" && row.phase !== "retro")
+        throw Object.assign(new Error("Stop applies only while the tickets, the review or the retro run"), { status: 409 });
       await this.pause(id);
     } else if (row.phase === "review") {
       if (action === "retry") await this.startReview(id);

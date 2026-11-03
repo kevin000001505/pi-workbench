@@ -218,9 +218,8 @@ test("Done lists merged cards newest first, and a done limit hides the older one
   for (const title of ["First", "Second", "Third"]) {
     const s = (await api("POST", "/api/sessions", { repoId: "kevin/history", title, prompt: `add ${title}` })).json;
     await waitFor(async () => (await summary(s.id)).pending.some((p: any) => p.kind === "decision"));
-    // Stop ends the run (the card pauses in Issues); Approve needs an open PR, so the db write puts it in Done as a merge would.
-    assert.equal((await api("POST", `/api/sessions/${s.id}/pipeline`, { action: "stop" })).status, 200);
-    await waitFor(async () => (await summary(s.id)).phase === "ready");
+    // Approve needs an open PR, so the run is stopped and the db write puts the card in Done as a merge would.
+    assert.equal((await api("POST", `/api/sessions/${s.id}/stop`, {})).status, 200);
     markDone(s.id);
     await waitFor(async () => (await summary(s.id)).phase === "done");
     ids.push(s.id);
@@ -241,6 +240,16 @@ test("Done lists merged cards newest first, and a done limit hides the older one
   // "Show more" raises the limit.
   assert.deepEqual((await api("GET", "/api/board?repo=kevin/history&done=3")).json.cards.length, 3);
   assert.equal((await api("GET", "/api/board?repo=kevin/history&done=nope")).status, 400);
+});
+
+test("the pipeline's Stop is refused while the card is planned: no ticketless card pauses in Issues", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Too early", prompt: "add a farewell" })).json;
+  await waitFor(async () => (await summary(s.id)).pending.some((p: any) => p.kind === "decision"));
+  const r = await api("POST", `/api/sessions/${s.id}/pipeline`, { action: "stop" });
+  assert.equal(r.status, 409, JSON.stringify(r.json));
+  assert.equal((await summary(s.id)).phase, "grill");
+  assert.equal(await columnOf(s.id), "todo");
+  assert.equal((await api("POST", `/api/sessions/${s.id}/stop`, {})).status, 200);
 });
 
 test("a move is a command: Issues → Doing is Solve all, a forward move with no command is refused", { skip: !hasPi && "pi CLI not found" }, async () => {
