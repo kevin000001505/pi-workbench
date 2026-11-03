@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import type { Card } from "../../../shared/board.ts";
-import { COLUMNS } from "../../../shared/board.ts";
+import { COLUMNS, refLabel } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { PendingCard } from "../session/PendingCard.tsx";
-import { phaseLabel, refLabel } from "../session/PipelinePanel.tsx";
+import { phaseLabel } from "../session/PipelinePanel.tsx";
 import { useStore } from "../store.tsx";
 import { isResolvedNote, type Ticket } from "../types.ts";
 import { Markdown, Spinner } from "../ui.tsx";
@@ -94,7 +94,7 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
             Open the full transcript
           </a>
           {card.pr && (
-            <a className={`kz-tag kz-pr ${card.pr.state ? `pr-${card.pr.state as string}` : ""}`} href={prUrl ?? undefined} target="_blank" rel="noopener">
+            <a className={`kz-tag kz-pr ${card.pr.state ? `pr-${card.pr.state}` : ""}`} href={prUrl ?? undefined} target="_blank" rel="noopener">
               <span className="dot" />
               PR #{card.pr.number}
               {card.pr.state ? ` · ${card.pr.state}` : ""}

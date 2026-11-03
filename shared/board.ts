@@ -134,6 +134,17 @@ export function parseIssueRef(ref: string | null): { repo: string | null; number
 }
 
 /**
+ * A ref's short label: `name#12` for an issue ref that names a repo (`owner/name#12` or the
+ * issue's URL), `#12` for one that does not, and the file name for any other ref (a local ticket
+ * or spec file).
+ */
+export function refLabel(ref: string): string {
+  const issue = parseIssueRef(ref);
+  if (!issue) return ref.split("/").pop() || ref;
+  return issue.repo ? `${issue.repo.split("/").pop()}#${issue.number}` : `#${issue.number}`;
+}
+
+/**
  * The issue number in `repoId` that a session's issue or spec ref names (see parseIssueRef).
  * Null for any other ref (a spec file path, another repo's issue).
  */
@@ -144,8 +155,15 @@ export function issueNumberOf(ref: string | null, repoId: string): number | null
 }
 
 /**
- * The unclaimed cards: the spec issues (each has open tickets) that no session's ref (its issue ref or
- * spec ref) names. They show in Issues; a move to Doing or To do gives each its session.
+ * The refs (issue ref and spec ref) that the sessions claim. Only a pipeline card that is not Done
+ * claims its issues: a direct session or a merged card leaves them free for a new card.
+ */
+export function claimRefs(sessions: { mode: string; phase: string; issueRef: string | null; specRef: string | null }[]): (string | null)[] {
+  return sessions.filter((s) => s.mode === "pipeline" && s.phase !== "done").flatMap((s) => [s.issueRef, s.specRef]);
+}
+
+/**
+ * The unclaimed cards: the spec issues (each has open tickets) that no claim (see claimRefs) names. They show in Issues; a move to Doing or To do gives each its session.
  */
 export function unclaimedCards(specs: SpecIssue[], claims: (string | null)[], repoId: string): Card[] {
   const claimed = new Set(claims.map((r) => issueNumberOf(r, repoId)));
@@ -161,3 +179,14 @@ export function unclaimedCards(specs: SpecIssue[], claims: (string | null)[], re
       specRef: s.url,
     }));
 }
+
+/**
+ * The card's note after a resolved merge conflict is pushed (SessionManager.pushResolved): it
+ * asks for a second Approve. `note` is the merge run's own word on the resolution, if any.
+ */
+export const resolvedNote = (base: string, note?: string | null) =>
+  `The merge conflict with ${base} is resolved and pushed${note ? ` (${note})` : ""}. Read the resolution, then approve again.`;
+
+/** Whether a card's note is the resolvedNote: not an error, so the UI shows it in the neutral style. */
+export const isResolvedNote = (text: string | null | undefined) =>
+  !!text && text.startsWith("The merge conflict with ") && text.includes(" is resolved and pushed");

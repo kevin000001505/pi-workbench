@@ -218,9 +218,8 @@ test("Done lists merged cards newest first, and a done limit hides the older one
   for (const title of ["First", "Second", "Third"]) {
     const s = (await api("POST", "/api/sessions", { repoId: "kevin/history", title, prompt: `add ${title}` })).json;
     await waitFor(async () => (await summary(s.id)).pending.some((p: any) => p.kind === "decision"));
-    // Stop ends the run (the card pauses in Issues); Approve needs an open PR, so the db write puts it in Done as a merge would.
-    assert.equal((await api("POST", `/api/sessions/${s.id}/pipeline`, { action: "stop" })).status, 200);
-    await waitFor(async () => (await summary(s.id)).phase === "ready");
+    // Approve needs an open PR, so the run is stopped and the db write puts the card in Done as a merge would.
+    assert.equal((await api("POST", `/api/sessions/${s.id}/stop`, {})).status, 200);
     markDone(s.id);
     await waitFor(async () => (await summary(s.id)).phase === "done");
     ids.push(s.id);
@@ -241,6 +240,16 @@ test("Done lists merged cards newest first, and a done limit hides the older one
   // "Show more" raises the limit.
   assert.deepEqual((await api("GET", "/api/board?repo=kevin/history&done=3")).json.cards.length, 3);
   assert.equal((await api("GET", "/api/board?repo=kevin/history&done=nope")).status, 400);
+});
+
+test("the pipeline's Stop is refused while the card is planned: no ticketless card pauses in Issues", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Too early", prompt: "add a farewell" })).json;
+  await waitFor(async () => (await summary(s.id)).pending.some((p: any) => p.kind === "decision"));
+  const r = await api("POST", `/api/sessions/${s.id}/pipeline`, { action: "stop" });
+  assert.equal(r.status, 409, JSON.stringify(r.json));
+  assert.equal((await summary(s.id)).phase, "grill");
+  assert.equal(await columnOf(s.id), "todo");
+  assert.equal((await api("POST", `/api/sessions/${s.id}/stop`, {})).status, 200);
 });
 
 test("a move is a command: Issues → Doing is Solve all, a forward move with no command is refused", { skip: !hasPi && "pi CLI not found" }, async () => {
@@ -484,6 +493,19 @@ test("two moves of one unclaimed card at once make one session: the second is re
   assert.equal((await move()).status, 409);
 });
 
+test("a new session on an issue a card already works on is refused, from the session form as from a move", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.seedSubIssues("kevin", "demo", { number: 110, title: "Claimed", body: "## Solution\nOnce." }, [{ number: 111, title: "Do it", body: "Do it." }]);
+  const create = () => api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Claimed", issueRef: "kevin/demo#110", mode: "pipeline", startFrom: "tickets" });
+  const both = await Promise.all([create(), create()]);
+  assert.deepEqual(both.map((r) => r.status).sort(), [200, 409], JSON.stringify(both.map((r) => r.json)));
+  assert.equal((await api("GET", "/api/sessions")).json.filter((x: any) => x.issueRef === "kevin/demo#110").length, 1);
+  // Claimed now: a later session for it, in another ref form, and a move of its card, are refused too.
+  assert.equal((await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Again", prompt: "work on it", issueRef: "https://github.com/kevin/demo/issues/110" })).status, 409);
+  assert.equal((await api("POST", "/api/repos/kevin/demo/issues/110/move", { column: "doing" })).status, 409);
+  const mine = (await api("GET", "/api/sessions")).json.find((x: any) => x.issueRef === "kevin/demo#110");
+  assert.equal((await api("POST", `/api/sessions/${mine.id}/stop`, {})).status, 200);
+});
+
 /** The board events a WebSocket client hears, from now on. */
 async function boardEvents() {
   const ws = new WebSocket(`${base.replace("http", "ws")}/ws`);
@@ -595,4 +617,32 @@ test("a card's spec issue, in any ref form to-spec gives, is claimed: no unclaim
   }
   // #83 is in another repo's ref, so this repo's #83 stays unclaimed.
   assert.deepEqual(await unclaimed(), ["issue:83"]);
+});
+
+test("a Done card and a direct session do not claim their issue: the unclaimed card shows, and a new pipeline session may take it", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.seedSubIssues("kevin", "demo", { number: 140, title: "Merged once", body: "## Solution\nAgain." }, [{ number: 141, title: "Do it", body: "Do it." }]);
+  gh.seedSubIssues("kevin", "demo", { number: 150, title: "Talked about", body: "## Solution\nTalk." }, [{ number: 151, title: "Do it", body: "Do it." }]);
+  const unclaimed = async () => (await board()).filter((c) => c.id.startsWith("issue:")).map((c) => c.id);
+  // A card on #140 reached Done; a direct session talks about #150.
+  const merged = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Merged once", issueRef: "kevin/demo#140", mode: "pipeline", startFrom: "tickets" })).json;
+  assert.ok(merged.id, JSON.stringify(merged));
+  assert.equal((await api("POST", `/api/sessions/${merged.id}/stop`, {})).status, 200);
+  markDone(merged.id);
+  await waitFor(async () => (await summary(merged.id)).phase === "done");
+  const talk = await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Talk", prompt: "what is left?", issueRef: "kevin/demo#150", mode: "direct" });
+  assert.equal(talk.status, 200, JSON.stringify(talk.json));
+  assert.ok((await unclaimed()).includes("issue:140"));
+  assert.ok((await unclaimed()).includes("issue:150"));
+
+  // A second direct session on #150 is allowed too, and a pipeline session may take each issue.
+  assert.equal((await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Talk again", prompt: "and now?", issueRef: "kevin/demo#150", mode: "direct" })).status, 200);
+  for (const n of [140, 150]) {
+    const again = await api("POST", "/api/sessions", { repoId: "kevin/demo", title: `Again ${n}`, prompt: "build it", issueRef: `kevin/demo#${n}`, mode: "pipeline" });
+    assert.equal(again.status, 200, JSON.stringify(again.json));
+  }
+  assert.ok(!(await unclaimed()).includes("issue:140"));
+  assert.ok(!(await unclaimed()).includes("issue:150"));
+  // A direct session may still talk about an issue a pipeline card works on.
+  assert.equal((await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Ask", prompt: "how is it going?", issueRef: "kevin/demo#140", mode: "direct" })).status, 200);
+  for (const s of (await api("GET", "/api/sessions")).json) await api("POST", `/api/sessions/${s.id}/stop`, {});
 });

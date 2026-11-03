@@ -85,8 +85,7 @@ function Icon({ name }: { name: keyof typeof ICONS }) {
 function BoardCard({ card, activity, onDrag, onOpen }: { card: Card; activity: string; onDrag: (card: Card | null) => void; onOpen: () => void }) {
   const issue = unclaimedNumber(card.id);
   const unclaimed = issue !== null;
-  // A string, not PrState: the badge styles every state the server sends, "merged" included.
-  const prState: string | null = card.pr?.state ?? null;
+  const prState = card.pr?.state ?? null;
   const line = card.attention ?? (unclaimed ? `Spec issue #${issue}: drag it to Doing to solve its tickets, or to To do to rework it` : activity);
   return (
     // A click opens the card detail; a modified click still opens the session in a new tab.

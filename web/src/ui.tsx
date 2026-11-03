@@ -2,6 +2,7 @@ import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { type ReactNode, useEffect, useMemo } from "react";
 import type { SessionStatus } from "./types.ts";
+import { parseIssueRef } from "../../shared/board.ts";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -87,18 +88,18 @@ export const ago = (ts: number) => {
   return `${Math.round(s / 86400)}d ago`;
 };
 
-/** The repo id and issue number out of an `owner/name#123` issue ref; null when the ref is malformed. */
-export function parseIssueRef(issueRef: string | null | undefined): { repoId: string; number: string } | null {
-  if (!issueRef) return null;
-  const i = issueRef.lastIndexOf("#");
-  const number = i >= 0 ? issueRef.slice(i + 1) : "";
-  if (i < 1 || !/^\d+$/.test(number)) return null;
-  return { repoId: issueRef.slice(0, i), number };
+/**
+ * The repo id and issue number of an issue ref that names its repo (`owner/name#123` or the
+ * issue's URL), read with shared/board.ts's parseIssueRef; null for any other ref.
+ */
+export function repoIssue(issueRef: string | null | undefined): { repoId: string; number: number } | null {
+  const issue = parseIssueRef(issueRef ?? null);
+  return issue?.repo ? { repoId: issue.repo, number: issue.number } : null;
 }
 
-/** The GitHub page of an `owner/name#123` issue ref. */
+/** The GitHub page of an issue ref that names its repo. */
 export const issueUrl = (issueRef: string | null | undefined) => {
-  const p = parseIssueRef(issueRef);
+  const p = repoIssue(issueRef);
   return p ? `https://github.com/${p.repoId}/issues/${p.number}` : undefined;
 };
 

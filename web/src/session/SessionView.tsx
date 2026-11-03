@@ -4,7 +4,7 @@ import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import type { Transcript as TranscriptT } from "../../../shared/transcript.ts";
 import type { AutoApproveMode, PrStatus, SessionSummary } from "../types.ts";
-import { Empty, kTokens, Spinner, StatusPill, issueUrl, parseIssueRef } from "../ui.tsx";
+import { Empty, kTokens, Spinner, StatusPill, issueUrl, repoIssue } from "../ui.tsx";
 import { ChangesModal } from "./ChangesModal.tsx";
 import { Composer } from "./Composer.tsx";
 import { PendingCard } from "./PendingCard.tsx";
@@ -63,7 +63,7 @@ export function SessionView({ id }: { id: string }) {
   const store = useStore();
   const { sessions, watch, toast, version } = store;
   const s = sessions[id];
-  const issue = parseIssueRef(s?.issueRef);
+  const issue = repoIssue(s?.issueRef);
   const t = store.transcript(id);
   const [pr, setPr] = useState(false);
   const [changes, setChanges] = useState(false);

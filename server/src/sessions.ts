@@ -16,7 +16,7 @@ import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
 import type { Db, RepoRow, SessionRow, TicketRow } from "./db.ts";
 import { git, type GitEnv } from "./git.ts";
 import type { Delivery, MergeResult } from "./delivery.ts";
-import { closedIssues } from "./prs.ts";
+import { closedIssues, foreignIssues } from "./prs.ts";
 import {
   allDone,
   type Diagnosis,
@@ -41,7 +41,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { type Column, COLUMNS, columnOf } from "../../shared/board.ts";
+import { claimRefs, type Column, COLUMNS, columnOf, issueNumberOf, resolvedNote } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
   configureAutoApprove,
@@ -56,7 +56,7 @@ import {
   transcriptExcerpt,
   type ReviewContext,
 } from "./autoapprove.ts";
-import { createWorktree, getRepo, removeWorktree, slugify, worktreeNeedsSetup } from "./repos.ts";
+import { createWorktree, getRepo, listRepos, removeWorktree, slugify, worktreeNeedsSetup } from "./repos.ts";
 import { loadSshHosts } from "./ssh.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, getPipelineSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
@@ -100,6 +100,9 @@ const autoApproveMode = (v: unknown): AutoApproveMode => {
 export type UiResponse = { value?: string; confirmed?: boolean; cancelled?: boolean };
 
 export type Run = { id: string; label: string };
+
+/** What POST /api/sessions (and an unclaimed card's move) asks SessionManager.create for. */
+export type CreateInput = { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: string };
 
 export type SessionSummary = {
   id: string;
@@ -245,6 +248,8 @@ export class SessionManager extends EventEmitter {
   private approving = new Set<string>();
   /** Sessions whose merge run resolves a conflict now; Approve waits for it to finish. */
   private resolving = new Set<string>();
+  /** Issues (`owner/name#n`) whose new session is being created now. */
+  private claiming = new Set<string>();
 
   constructor(db: Db, secrets: SecretStore, gitEnv: () => Promise<GitEnv>, refreshSsh?: () => void, fetchTicketSeed?: (ref: string) => Promise<TicketSeed>, rescueProxy?: RescueProxy, delivery?: Delivery) {
     super();
@@ -418,9 +423,28 @@ export class SessionManager extends EventEmitter {
     s.loaded = true;
   }
 
-  async create(input: { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: string }) {
+  /**
+   * A new session. A pipeline session whose issue ref names an issue of its repo claims it: a
+   * second one for an issue that a card works on already (see claimRefs) is refused with 409.
+   */
+  async create(input: CreateInput) {
     const repo = getRepo(this.db, input.repoId);
     if (!repo) throw Object.assign(new Error(`Unknown repo ${input.repoId}`), { status: 404 });
+    const number = issueNumberOf(input.issueRef?.trim() || null, repo.id);
+    if (number === null || input.mode === "direct") return this.createSession(input, repo);
+    const claim = `${repo.id.toLowerCase()}#${number}`;
+    const claimed = claimRefs(this.list().filter((s) => s.repoId === repo.id)).some((r) => issueNumberOf(r, repo.id) === number);
+    if (this.claiming.has(claim) || claimed) throw Object.assign(new Error(`A card already works on issue #${number}.`), { status: 409 });
+    // Held from the check until the session row exists, so a second create for the issue is refused.
+    this.claiming.add(claim);
+    try {
+      return await this.createSession(input, repo);
+    } finally {
+      this.claiming.delete(claim);
+    }
+  }
+
+  private async createSession(input: CreateInput, repo: RepoRow) {
     const autoApprove = autoApproveMode(input.autoApprove);
     // Absent or null means no, as null means inherit for autoApprove.
     if (input.typesafeSkill != null && typeof input.typesafeSkill !== "boolean") {
@@ -1286,7 +1310,10 @@ export class SessionManager extends EventEmitter {
     if (row.mode !== "pipeline") throw Object.assign(new Error("Not a pipeline session"), { status: 409 });
     const current = this.tickets(id).find((t) => t.status === "running" || t.status === "blocked");
     if (action === "stop") {
-      // Stop pauses the card in Issues, the same as a move there; Solve all continues it.
+      // Stop pauses the card in Issues, the same as a move there; Solve all continues it. Only a
+      // card with tickets to continue stops: the phases the pipeline panel shows Stop in.
+      if (row.phase !== "implement" && row.phase !== "review" && row.phase !== "retro")
+        throw Object.assign(new Error("Stop applies only while the tickets, the review or the retro run"), { status: 409 });
       await this.pause(id);
     } else if (row.phase === "review") {
       if (action === "retry") await this.startReview(id);
@@ -1329,18 +1356,35 @@ export class SessionManager extends EventEmitter {
    * next review to push to. The phase changes first, so the stopped run's settle moves nothing.
    */
   private async pause(id: string) {
+    const merging = this.onMergeRun(id);
     this.update(id, { phase: "ready", attention: null });
     await this.stop(id);
-    await this.dropRun(id);
+    await this.dropRun(id, merging);
+  }
+
+  /** Whether the run on screen is the merge run: it works, or the card still shows it after a restart. */
+  private onMergeRun(id: string) {
+    const row = this.row(id);
+    return this.resolving.has(id) || (!!row.merge_run && row.merge_run === this.runOf(row));
   }
 
   /**
    * A backward move stopped the live run. The stop rule's clock goes with it (the next run gets a
-   * fresh watch), and a merge run's half-done merge is undone, so Approve can start again.
+   * fresh watch), and a half-done merge is undone, so Approve can start again. The worktree says
+   * whether a merge is half done: after a restart no merge run is known, but its MERGE_HEAD stays.
+   * When the stopped run was the merge run (`merging`), a merge commit it made is dropped as well.
    */
-  private async dropRun(id: string) {
+  private async dropRun(id: string, merging: boolean) {
     this.unwatch(this.state(id));
-    if (this.resolving.delete(id)) await git(this.row(id).worktree, ["merge", "--abort"], await this.gitEnv()).catch(() => {});
+    this.resolving.delete(id);
+    const row = this.row(id);
+    if (merging) await this.undoMerge(row);
+    else if (await this.mergeHalfDone(row.worktree)) await git(row.worktree, ["merge", "--abort"], await this.gitEnv()).catch(() => {});
+  }
+
+  /** Whether the worktree holds a merge that is not committed yet (git's MERGE_HEAD is there). */
+  private mergeHalfDone(worktree: string) {
+    return git(worktree, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).then(() => true, () => false);
   }
 
   /**
@@ -1350,9 +1394,10 @@ export class SessionManager extends EventEmitter {
    * clears the attention.
    */
   private async rework(id: string) {
+    const merging = this.onMergeRun(id);
     this.update(id, { phase: "grill", grill_summary: null, spec: null, rework_tickets: 1 });
     await this.switchRun(id, id, false);
-    await this.dropRun(id);
+    await this.dropRun(id, merging);
     // A ticket the stopped run left `running` is not worked on while the card is in To do.
     for (const t of this.tickets(id)) if (t.status === "running") this.updateTicket(id, t.num, { status: "ready" });
     await this.send(id, reworkPrompt(this.row(id).spec_ref));
@@ -1415,7 +1460,7 @@ export class SessionManager extends EventEmitter {
       }
       // Switch to the merge run before anyone hears about it.
       const runId = `${id}-merge-${Date.now().toString(36)}`;
-      this.update(id, { merge_run: runId, attention: null });
+      this.update(id, { merge_run: runId, merge_files: JSON.stringify(files), attention: null });
       this.resolving.add(id);
       await this.switchRun(id, runId, true);
       this.emit("event", id, { type: "wb_notify", message: `${reason}. A merge run resolves it now.`, level: "info" });
@@ -1439,7 +1484,7 @@ export class SessionManager extends EventEmitter {
       await this.pushResolved(id, report.note);
       return;
     }
-    await git(row.worktree, ["merge", "--abort"], await this.gitEnv()).catch(() => {});
+    await this.undoMerge(row);
     const why = unfinished
       ? `the merge run called finish_merge "resolved", but ${unfinished}`
       : report
@@ -1450,12 +1495,39 @@ export class SessionManager extends EventEmitter {
     this.flag(id, `The merge conflict was not resolved: ${why}. Resolve it on the branch, then approve again.`);
   }
 
-  /** Why the worktree does not hold a finished merge of the base branch, or null when it does. */
+  /**
+   * Why the worktree does not hold a finished merge of the base branch, or null when it does. A
+   * file git reported as conflicted that still has a `<<<<<<< ` or `>>>>>>> ` line is not finished
+   * either (a lone `=======` can be a Markdown heading's underline).
+   */
   private async unfinishedMerge(row: SessionRow): Promise<string | null> {
     const sh = (args: string[]) => git(row.worktree, args).then(() => true, () => false);
-    if (await sh(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) return "the merge is not committed";
+    if (await this.mergeHalfDone(row.worktree)) return "the merge is not committed";
     if (!(await sh(["merge-base", "--is-ancestor", `origin/${row.base_branch}`, "HEAD"]))) return `HEAD does not contain origin/${row.base_branch}`;
+    const conflicted: string[] = JSON.parse(row.merge_files ?? "[]");
+    if (!conflicted.length) return null;
+    const marked = await git(row.worktree, ["grep", "-l", "-z", "-E", "^(<<<<<<<|>>>>>>>) ", "HEAD", "--", ...conflicted]).then(
+      (out) => out.split("\0").filter(Boolean).map((f) => f.replace(/^HEAD:/, "")),
+      () => [] as string[],
+    );
+    if (marked.length) return `${marked.join(", ")} still ${marked.length === 1 ? "has" : "have"} conflict markers`;
     return null;
+  }
+
+  /**
+   * Undo the merge run's merge: abort a half-done one, or drop a committed merge commit (HEAD's
+   * first parent is the tip `git merge` started from, ORIG_HEAD), so nothing of it is pushed later.
+   */
+  private async undoMerge(row: SessionRow) {
+    const env = await this.gitEnv();
+    const rev = (r: string) => git(row.worktree, ["rev-parse", "-q", "--verify", r]).then((x) => x.trim(), () => null);
+    if (await this.mergeHalfDone(row.worktree)) {
+      await git(row.worktree, ["merge", "--abort"], env).catch(() => {});
+      return;
+    }
+    const before = await rev("ORIG_HEAD");
+    const isMerge = !!(await rev("HEAD^2"));
+    if (before && isMerge && before === (await rev("HEAD^1"))) await git(row.worktree, ["reset", "-q", "--hard", before], env).catch(() => {});
   }
 
   /** Push the merge to the PR's branch; the card stays in Review for a second Approve. */
@@ -1467,13 +1539,15 @@ export class SessionManager extends EventEmitter {
       this.flag(id, `The merge conflict is resolved, but the push failed: ${(err as Error).message}. Push the branch, then approve again.`);
       return;
     }
-    this.flag(id, `The merge conflict with ${row.base_branch} is resolved and pushed${note ? ` (${note})` : ""}. Read the resolution, then approve again.`);
+    this.flag(id, resolvedNote(row.base_branch, note));
   }
 
   /**
    * The PR is merged: close the issues when GitHub will not (a base that is not the default
-   * branch ignores `Closes`), delete the branch on GitHub and the worktree, and set `done`.
-   * A cleanup step that fails does not undo the merge; its reason goes on the card.
+   * branch ignores `Closes`, and `Closes` never reaches another repo's issue, which closes only
+   * when the workbench tracks its repo), delete the branch on
+   * GitHub and the worktree, and set `done`. A cleanup step that fails does not undo the merge; its
+   * reason goes on the card.
    */
   private async delivered(id: string, repo: RepoRow) {
     const row = this.row(id);
@@ -1481,6 +1555,17 @@ export class SessionManager extends EventEmitter {
     const problems: string[] = [];
     if (row.base_branch !== repo.default_branch) {
       await delivery.closeIssues(repo, closedIssues(row, this.tickets(id))).catch((err) => problems.push(`the issues did not close (${(err as Error).message})`));
+    }
+    // An issue of another repo closes only when the workbench tracks that repo: a model-written ref
+    // must not close issues in any repo the token can write.
+    const tracked = new Set(listRepos(this.db).map((r) => r.id.toLowerCase()));
+    for (const issue of foreignIssues(row, this.tickets(id))) {
+      if (!tracked.has(issue.repo.toLowerCase())) {
+        problems.push(`issue ${issue.repo}#${issue.number} was not closed (it is in a repo the workbench does not track)`);
+        continue;
+      }
+      const [owner, name] = issue.repo.split("/");
+      await delivery.closeIssues({ owner, name }, [issue.number]).catch((err) => problems.push(`issue ${issue.repo}#${issue.number} did not close (${(err as Error).message})`));
     }
     await delivery.deleteBranch(row, repo).catch((err) => problems.push(`the branch was not deleted (${(err as Error).message})`));
     await this.stop(id).catch(() => {});

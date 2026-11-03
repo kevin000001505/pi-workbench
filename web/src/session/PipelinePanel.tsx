@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { refLabel } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import { isResolvedNote, type Phase, type SessionSummary, type Ticket } from "../types.ts";
@@ -44,12 +45,6 @@ export const phaseLabel = (s: SessionSummary) => {
     default:
       return "";
   }
-};
-
-/** "#12" for GitHub issues, the file name for local ticket files. */
-export const refLabel = (ref: string) => {
-  const issue = /^https?:\/\/.*\/issues\/(\d+)$/.exec(ref) ?? /^#?(\d+)$/.exec(ref);
-  return issue ? `#${issue[1]}` : ref.split("/").pop() || ref;
 };
 
 const RESCUE_LABEL = { diagnosing: "rescue: diagnosing", fixing: "rescue: fixing", rescued: "rescued", failed: "rescue failed" } as const;
@@ -105,7 +100,7 @@ export function PipelinePanel({ s, viewRun, onView }: { s: SessionSummary; viewR
   const done = s.tickets.filter((t) => t.status === "done").length;
 
   const act = async (action: "retry" | "skip" | "stop") => {
-    if (action === "stop" && !confirm("Stop the pipeline? Remaining tickets stay as they are; messages become plain follow-ups.")) return;
+    if (action === "stop" && !confirm("Stop the pipeline? The card pauses in Issues with its tickets as they are; Solve all (a move to Doing) continues it.")) return;
     setBusy(true);
     try {
       await api.post(`/api/sessions/${s.id}/pipeline`, { action });

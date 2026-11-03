@@ -4,138 +4,13 @@
  * scripted mock model and the mock GitHub. Skips when the pi CLI isn't available.
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
-import http from "node:http";
-import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { after, test } from "node:test";
-import { startMockLlm } from "./mock-llm.ts";
-import { startMockGitHub } from "./mock-github.ts";
+import { test } from "node:test";
+import { startReviewServer } from "./review-server.ts";
 
-const piBin = process.env.PI_BIN ?? "pi";
-const hasPi = spawnSync(piBin, ["--version"]).status === 0;
-
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wb-approve-"));
-const remotes = path.join(tmp, "remotes");
-fs.mkdirSync(remotes);
-process.env.DATA_DIR = path.join(tmp, "data");
-process.env.WORKBENCH_MASTER_KEY = "approve-master-key-0123456789";
-process.env.SKILLS_DIR = path.join(tmp, "skills");
-process.env.HOME = path.join(tmp, "agent-home");
-process.env.GITHUB_CLONE_BASE = `file://${remotes}`;
-process.env.PI_BIN = piBin;
-process.env.PI_EXTENSION = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "pi-extension", "workbench.ts");
-
-// Skills the pipeline invokes; pi expands /skill:name from these.
-for (const name of ["grill-with-docs", "to-spec", "to-tickets", "tdd", "code-review", "resolving-merge-conflicts", "setup-matt-pocock-skills"]) {
-  fs.mkdirSync(path.join(process.env.SKILLS_DIR, name), { recursive: true });
-  fs.writeFileSync(path.join(process.env.SKILLS_DIR, name, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} test skill\n---\n${name} body\n`);
-}
-
-const mock = await startMockLlm();
-const gh = await startMockGitHub(remotes);
-process.env.GITHUB_API_URL = gh.url;
-
-const freePort = await new Promise<number>((res, rej) => {
-  const srv = http.createServer();
-  srv.listen(0, "127.0.0.1", () => {
-    const p = (srv.address() as { port: number }).port;
-    srv.close(() => res(p));
-  });
-  srv.on("error", rej);
-});
-process.env.PORT = String(freePort);
-process.env.HOST = "127.0.0.1";
-const base = `http://127.0.0.1:${freePort}`;
-
-if (hasPi) await import("../src/main.ts");
-
-const api = async (method: string, url: string, body?: unknown) => {
-  const res = await fetch(`${base}${url}`, {
-    method,
-    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  return { status: res.status, json: (await res.json().catch(() => null)) as any };
-};
-
-async function waitFor<T>(fn: () => T | undefined | false | Promise<T | undefined | false>, ms = 60_000): Promise<T> {
-  const start = Date.now();
-  for (;;) {
-    const v = await fn();
-    if (v) return v;
-    if (Date.now() - start > ms) throw new Error("timed out");
-    await new Promise((r) => setTimeout(r, 50));
-  }
-}
-
-const summary = async (id: string) => (await api("GET", `/api/sessions/${id}`)).json.summary;
-
-/** Answer the decision the session waits on with its first option. */
-async function answerNext(id: string, expect: RegExp) {
-  const req = await waitFor(async () => (await summary(id)).pending.find((p: any) => p.kind === "decision"));
-  assert.match(req.title, expect);
-  const r = await api("POST", `/api/sessions/${id}/respond`, { requestId: req.id, value: req.options[0] });
-  assert.equal(r.status, 200);
-}
-
-const board = async (repo = "kevin/ship") => {
-  const r = await api("GET", `/api/board?repo=${repo}`);
-  assert.equal(r.status, 200);
-  return r.json.cards as any[];
-};
-const columnOf = async (id: string) => (await board()).find((c) => c.id === id)?.column;
-
-after(async () => {
-  await mock.close();
-  await gh.close();
-  // main.ts's SIGTERM handler stops the sessions and exits, after the TAP is out.
-  if (hasPi) process.kill(process.pid, "SIGTERM");
-});
-
-const bare = path.join(remotes, "kevin", "ship.git");
-const hasRef = (ref: string) => {
-  try {
-    execFileSync("git", ["rev-parse", "--verify", "-q", ref], { cwd: bare, stdio: "pipe" });
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-let ready: Promise<void> | undefined;
-/** The repo every test ships to; `develop` is a second, non-default base branch. */
-function setup() {
-  ready ??= (async () => {
-    await waitFor(async () => (await fetch(`${base}/api/health`).catch(() => null))?.ok);
-    assert.equal((await api("PUT", "/api/secrets", { scope: "global", name: "GITHUB_TOKEN", value: "ghp_test" })).status, 200);
-    assert.equal((await api("PUT", "/api/settings/model", { baseUrl: mock.url })).status, 200);
-    gh.createBare("kevin", "ship");
-    execFileSync("git", ["branch", "develop", "main"], { cwd: bare });
-    assert.equal((await api("POST", "/api/repos", { id: "kevin/ship" })).status, 200);
-  })();
-  return ready;
-}
-
-/** A card solved from spec issue `spec` with one ticket issue `spec + 1`, driven to Review with its PR open. */
-async function toReview(spec: number, baseBranch?: string) {
-  await setup();
-  gh.seedSubIssues("kevin", "ship", { number: spec, title: `Spec ${spec}`, body: "## Solution\nhello.txt says Hello." }, [
-    { number: spec + 1, title: "Write hello.txt", body: "Create hello.txt containing Hello." },
-  ]);
-  const s = (await api("POST", "/api/sessions", { repoId: "kevin/ship", title: `Spec ${spec}`, issueRef: `kevin/ship#${spec}`, mode: "pipeline", startFrom: "tickets", baseBranch })).json;
-  assert.ok(s.id, JSON.stringify(s));
-  // The review's `git push` waits on a permission.
-  const perm = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"), 120_000);
-  assert.equal((await api("POST", `/api/sessions/${s.id}/respond`, { requestId: perm.id, value: perm.options[0] })).status, 200);
-  const card = await waitFor(async () => (await board()).find((c) => c.id === s.id && c.column === "review"), 120_000);
-  await waitFor(async () => (await summary(s.id)).status !== "running");
-  const pr = gh.pulls.find((p) => p.number === card.pr.number);
-  return { id: s.id as string, pr, worktree: path.join(process.env.DATA_DIR!, "worktrees", s.id), branch: (await summary(s.id)).branch as string };
-}
+const { hasPi, tmp, base, gh, api, waitFor, summary, board, columnOf, bare, hasRef, toReview, setup } = await startReviewServer("approve");
 
 /**
  * Someone else changes the base branch on GitHub: a commit appends `line` to `file`. Every card's
@@ -154,6 +29,12 @@ function pushToBase(line: string, file = "work.txt", baseBranch = "main") {
 }
 
 const approve = (id: string) => api("POST", `/api/sessions/${id}/approve`, {});
+const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString().trim();
+
+/*
+ * Every merge-run word below (GIVEUP, NOFINISH, HOLDMERGE, ...) stays in main's work.txt, and the
+ * mock reads the whole file, so a test that needs the plain keep-both resolve comes before them.
+ */
 
 test("Approve merges the PR with a merge commit, deletes the branch and the worktree, and the merge closes the issues", { skip: !hasPi && "pi CLI not found" }, async () => {
   const { id, pr, worktree, branch } = await toReview(7);
@@ -263,6 +144,41 @@ test("a board-created card's spec issue gets a Closes line, so Approve closes it
   assert.deepEqual(gh.closed.slice(before), [{ ref: "kevin/ship#40", by: "api" }]);
 });
 
+test("Approve closes the issues that name another tracked repo on that repo; one that does not close is noted on the Done card", { skip: !hasPi && "pi CLI not found" }, async () => {
+  await setup();
+  gh.createBare("kevin", "tracker");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/tracker" })).status, 200);
+  // The origin issue and the spec issue live in another repo, so the PR's Closes lines cannot close them.
+  gh.lockedIssues.add("kevin/tracker#13");
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/ship", title: "Foreign", prompt: "add a greeting GHSPEC https://github.com/kevin/tracker/issues/13", issueRef: "kevin/tracker#12" })).json;
+  assert.ok(s.id, JSON.stringify(s));
+  await driveToReview(s.id);
+  const before = gh.closed.length;
+  const r = await approve(s.id);
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.phase, "done");
+  assert.deepEqual(gh.closed.slice(before), [{ ref: "kevin/tracker#12", by: "api" }]);
+  assert.match(r.json.attention, /^PR #\d+ is merged, but issue kevin\/tracker#13 did not close \(.*Resource not accessible by personal access token.*\)\.$/);
+  assert.equal((await board()).find((c) => c.id === s.id).column, "done");
+});
+
+test("Approve leaves open the issues of repos the workbench does not track, and lists them on the Done card", { skip: !hasPi && "pi CLI not found" }, async () => {
+  await setup();
+  // A spec ref the model wrote names an upstream repo, and the origin issue is in an untracked repo.
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/ship", title: "Upstream", prompt: "add a wave GHSPEC https://github.com/nodejs/node/issues/123", issueRef: "kevin/elsewhere#5" })).json;
+  assert.ok(s.id, JSON.stringify(s));
+  await driveToReview(s.id);
+  const before = gh.closed.length;
+  const r = await approve(s.id);
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.phase, "done");
+  assert.deepEqual(gh.closed.slice(before).filter((c) => !c.ref.startsWith("kevin/ship#")), []);
+  assert.equal(
+    r.json.attention,
+    `PR #${r.json.prNumber} is merged, but issue kevin/elsewhere#5 was not closed (it is in a repo the workbench does not track), and issue nodejs/node#123 was not closed (it is in a repo the workbench does not track).`,
+  );
+});
+
 test("Approve refuses a card outside Review, and a request from another site", { skip: !hasPi && "pi CLI not found" }, async () => {
   await setup();
   const s = (await api("POST", "/api/sessions", { repoId: "kevin/ship", title: "Not yet", prompt: "add a farewell" })).json;
@@ -307,6 +223,32 @@ test("Approve on a conflicting PR resolves the conflict in a merge run; after fi
   assert.ok(!fs.existsSync(worktree));
 });
 
+test("a merge run's resolve is pushed when a file the branch changed has a setext underline (=======) that is no conflict marker", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, worktree, branch } = await toReview(137);
+  // The branch's README has a Markdown heading underlined with seven `=`.
+  fs.writeFileSync(path.join(worktree, "README.md"), "Install\n=======\n\nRun it.\n");
+  git(worktree, "add", "README.md");
+  git(worktree, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "Add the README");
+  git(worktree, "push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+  const theirs = pushToBase("main was here too");
+  const r = await approve(id);
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.match(r.json.activeRun, new RegExp(`^${id}-merge-`));
+
+  const resolved = await waitFor(async () => (await summary(id)).attention && summary(id), 120_000);
+  assert.match(resolved.attention, /^The merge conflict with main is resolved and pushed/);
+  execFileSync("git", ["merge-base", "--is-ancestor", theirs, `refs/heads/${branch}`], { cwd: bare });
+});
+
+test("a merge run's resolve is pushed when the conflicted file keeps a lone ======= line (a heading underline)", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, branch } = await toReview(157);
+  pushToBase("SETEXT: main changed this line");
+  assert.equal((await approve(id)).status, 200);
+  const resolved = await waitFor(async () => (await summary(id)).attention && summary(id), 120_000);
+  assert.match(resolved.attention, /^The merge conflict with main is resolved and pushed/);
+  assert.match(git(bare, "show", `refs/heads/${branch}:work.txt`), /^Notes\n=======$/m);
+});
+
 test("a conflict resolve whose finish_merge fails keeps the card in Review with the run's reason", { skip: !hasPi && "pi CLI not found" }, async () => {
   const { id, pr, worktree, branch } = await toReview(47);
   const tip = execFileSync("git", ["rev-parse", `refs/heads/${branch}`], { cwd: bare }).toString().trim();
@@ -345,7 +287,6 @@ test("a merge run that ends without finish_merge keeps the card in Review, and A
 });
 
 const move = (id: string, column: string) => api("POST", `/api/sessions/${id}/move`, { column });
-const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString().trim();
 const mergeInProgress = (worktree: string) => spawnSync("git", ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd: worktree }).status === 0;
 
 /** Approve a PR whose base changed under it, and wait while the merge run asks the user a question. */
@@ -412,11 +353,29 @@ test("Review → To do during a merge run stops it and undoes the half-done merg
   assert.notEqual(again.json.activeRun, first);
 });
 
+test("Review → Issues undoes a half-done merge that no merge run holds (a server restart lost it)", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, worktree, branch } = await toReview(117);
+  const tip = git(bare, "rev-parse", `refs/heads/${branch}`);
+  // A merge run's half-done merge, left in the worktree: the restarted server knows of no merge run.
+  pushToBase("RESTART: main changed this line");
+  git(worktree, "fetch", "-q", "origin", "main");
+  assert.equal(spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@x", "merge", "--no-edit", "origin/main"], { cwd: worktree }).status, 1, "the merge stops on a conflict");
+  assert.ok(mergeInProgress(worktree));
+
+  const paused = await move(id, "issues");
+  assert.equal(paused.status, 200, JSON.stringify(paused.json));
+  assert.equal(paused.json.phase, "ready");
+  assert.ok(!mergeInProgress(worktree), "no merge is left half done");
+  assert.equal(git(worktree, "status", "--porcelain"), "", "no conflict markers are left in the worktree");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), tip);
+});
+
 for (const [word, spec, says] of [
   ["FAKERESOLVE", 87, /the merge is not committed/],
   ["ABORTRESOLVE", 97, /HEAD does not contain origin\/main/],
+  ["MARKERRESOLVE", 127, /work\.txt still has conflict markers/],
 ] as const)
-test(`a merge run that says resolved but ${word === "FAKERESOLVE" ? "leaves the merge half done" : "aborted the merge"} is not pushed: the card stays in Review with the reason`, { skip: !hasPi && "pi CLI not found" }, async () => {
+test(`a merge run that says resolved but ${{ FAKERESOLVE: "leaves the merge half done", ABORTRESOLVE: "aborted the merge", MARKERRESOLVE: "committed conflict markers" }[word]} is not pushed: the card stays in Review with the reason`, { skip: !hasPi && "pi CLI not found" }, async () => {
   const { id, pr, worktree, branch } = await toReview(spec);
   const tip = git(bare, "rev-parse", `refs/heads/${branch}`);
   pushToBase(`${word}: main changed this line`);
@@ -450,4 +409,22 @@ test("a conflicting PR whose base git cannot merge (no conflicted file) keeps th
   assert.ok(!mergeInProgress(worktree));
   assert.equal(git(bare, "rev-parse", `refs/heads/${branch}`), tip);
   delete pr.mergeable_state;
+});
+
+// Last: the mock reads COMMITHOLD before any other word, and it stays in main's work.txt.
+for (const [column, spec] of [["issues", 167], ["todo", 177]] as const)
+test(`Review → ${column === "issues" ? "Issues" : "To do"} after a merge run committed its resolve but did not call finish_merge drops that merge commit`, { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, worktree, branch } = await toReview(spec);
+  const tip = git(bare, "rev-parse", `refs/heads/${branch}`);
+  pushToBase("COMMITHOLD: main changed this line");
+  assert.equal((await approve(id)).status, 200);
+  await waitFor(async () => (await summary(id)).pending.some((p: any) => p.kind === "decision"), 120_000);
+  assert.ok(!mergeInProgress(worktree), "the merge run committed the merge");
+  assert.notEqual(git(worktree, "rev-parse", "HEAD"), tip);
+
+  const moved = await move(id, column);
+  assert.equal(moved.status, 200, JSON.stringify(moved.json));
+  assert.equal(git(worktree, "rev-parse", "HEAD"), tip);
+  assert.equal(git(worktree, "status", "--porcelain"), "");
+  assert.equal(git(bare, "rev-parse", `refs/heads/${branch}`), tip, "nothing is pushed");
 });

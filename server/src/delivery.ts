@@ -26,8 +26,8 @@ export type Delivery = {
   closePr(row: SessionRow, repo: RepoRow): Promise<void>;
   /** Delete the session's branch on GitHub. A branch that was never pushed counts as deleted. */
   deleteBranch(row: SessionRow, repo: RepoRow): Promise<void>;
-  /** Close these issues of the repo. */
-  closeIssues(repo: RepoRow, numbers: number[]): Promise<void>;
+  /** Close these issues of the repo (the card's own repo, or another repo its refs name). */
+  closeIssues(repo: Pick<RepoRow, "owner" | "name">, numbers: number[]): Promise<void>;
 };
 
 export type MergeResult = { merged: true } | { conflict: string };

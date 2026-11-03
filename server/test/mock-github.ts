@@ -21,6 +21,8 @@ export function startMockGitHub(root: string, login = "kevin") {
   ];
   // Every issue a merge or an issue PATCH closed, in order: `{ ref: "owner/name#n", by: "merge" | "api" }`.
   const closed: { ref: string; by: "merge" | "api" }[] = [];
+  // Issues (`owner/name#n`) that the token may not close: their PATCH answers 403, as GitHub does.
+  const lockedIssues = new Set<string>();
   const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
   /**
    * A pull's mergeable state: its `mergeable_state` switch when a test set one, else what git says
@@ -216,6 +218,7 @@ export function startMockGitHub(root: string, login = "kevin") {
       });
     }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/.exec(p)) && req.method === "PATCH") {
+      if (lockedIssues.has(`${m[1]}/${m[2]}#${m[3]}`)) return send(403, { message: "Resource not accessible by personal access token" });
       if (body.state === "closed") closeIssue(m[1], m[2], Number(m[3]), "api");
       return send(200, { number: Number(m[3]), state: body.state ?? "open" });
     }
@@ -271,7 +274,7 @@ export function startMockGitHub(root: string, login = "kevin") {
     send(404, { message: `mock has no ${req.method} ${p}` });
   });
 
-  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; checkRuns: typeof checkRuns; closed: typeof closed; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; close: () => Promise<void> }>((resolve) => {
+  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; checkRuns: typeof checkRuns; closed: typeof closed; lockedIssues: typeof lockedIssues; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; close: () => Promise<void> }>((resolve) => {
     server.listen(Number(process.env.MOCK_GH_PORT ?? 0), "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
       resolve({
@@ -281,6 +284,7 @@ export function startMockGitHub(root: string, login = "kevin") {
         comments,
         checkRuns,
         closed,
+        lockedIssues,
         createBare,
         seedSubIssues,
         close: () => new Promise((r) => server.close(() => r())),

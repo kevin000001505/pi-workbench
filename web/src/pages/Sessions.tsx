@@ -1,6 +1,6 @@
 import { useStore } from "../store.tsx";
 import { waitingOn } from "../types.ts";
-import { ago, Empty, PageHeader, StatusPill, issueUrl, parseIssueRef } from "../ui.tsx";
+import { ago, Empty, PageHeader, StatusPill, issueUrl, repoIssue } from "../ui.tsx";
 
 /** The direct-mode sessions: plain agent turns, which are no card on any board. */
 export function Sessions() {
@@ -39,7 +39,7 @@ export function Sessions() {
       </PageHeader>
       <div className="cards">
         {all.map((s) => {
-          const issue = parseIssueRef(s.issueRef);
+          const issue = repoIssue(s.issueRef);
           const pending = waitingOn(s);
           return (
             <a key={s.id} href={`#/session/${s.id}`} className={`card session-card ${pending.length || s.attention ? "card-attn" : ""}`}>

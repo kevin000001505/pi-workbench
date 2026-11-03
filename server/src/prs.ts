@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { issueNumberOf } from "../../shared/board.ts";
+import { issueNumberOf, parseIssueRef } from "../../shared/board.ts";
 import type { RepoRow, SessionRow } from "./db.ts";
 import { git, type GitEnv } from "./git.ts";
 import type { GitHub } from "./github.ts";
@@ -103,6 +103,22 @@ export function closedIssues(row: SessionRow, tickets: Ticket[]): number[] {
   const section = ticketsSection(tickets, row.repo_id);
   const lines = `${section}${originCloses(row.repo_id, row.issue_ref, section, row.spec_ref)}`;
   return [...new Set([...lines.matchAll(/Closes #(\d+)/g)].map((m) => Number(m[1])))];
+}
+
+/**
+ * The issues of other repos that the session's refs name (its origin issue, spec and tickets, as
+ * `owner/name#n` or an issue URL). GitHub's `Closes` lines close only issues of the PR's own repo,
+ * so these are closed through the API after the merge.
+ */
+export function foreignIssues(row: SessionRow, tickets: Ticket[]): { repo: string; number: number }[] {
+  const seen = new Map<string, { repo: string; number: number }>();
+  for (const ref of [row.issue_ref, row.spec_ref, ...tickets.map((t) => t.trackerRef ?? null)]) {
+    const issue = parseIssueRef(ref);
+    if (!issue?.repo || issue.repo.toLowerCase() === row.repo_id.toLowerCase()) continue;
+    const key = `${issue.repo.toLowerCase()}#${issue.number}`;
+    if (!seen.has(key)) seen.set(key, { repo: issue.repo, number: issue.number });
+  }
+  return [...seen.values()];
 }
 
 export async function openPr(
