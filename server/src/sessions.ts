@@ -41,7 +41,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { type Column, COLUMNS, columnOf, issueNumberOf } from "../../shared/board.ts";
+import { type Column, COLUMNS, columnOf, issueNumberOf, resolvedNote } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
   configureAutoApprove,
@@ -1524,7 +1524,7 @@ export class SessionManager extends EventEmitter {
       this.flag(id, `The merge conflict is resolved, but the push failed: ${(err as Error).message}. Push the branch, then approve again.`);
       return;
     }
-    this.flag(id, `The merge conflict with ${row.base_branch} is resolved and pushed${note ? ` (${note})` : ""}. Read the resolution, then approve again.`);
+    this.flag(id, resolvedNote(row.base_branch, note));
   }
 
   /**

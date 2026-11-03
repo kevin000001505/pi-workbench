@@ -161,3 +161,14 @@ export function unclaimedCards(specs: SpecIssue[], claims: (string | null)[], re
       specRef: s.url,
     }));
 }
+
+/**
+ * The card's note after a resolved merge conflict is pushed (SessionManager.pushResolved): it
+ * asks for a second Approve. `note` is the merge run's own word on the resolution, if any.
+ */
+export const resolvedNote = (base: string, note?: string | null) =>
+  `The merge conflict with ${base} is resolved and pushed${note ? ` (${note})` : ""}. Read the resolution, then approve again.`;
+
+/** Whether a card's note is the resolvedNote: not an error, so the UI shows it in the neutral style. */
+export const isResolvedNote = (text: string | null | undefined) =>
+  !!text && text.startsWith("The merge conflict with ") && text.includes(" is resolved and pushed");

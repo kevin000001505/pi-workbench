@@ -312,6 +312,15 @@ test("issue refs: parseIssueRef reads every form; a card id maps back to its spe
   assert.equal(unclaimedNumber("issue:x"), null);
 });
 
+test("the resolved-conflict note the server writes is the one the UI shows as resolved", async () => {
+  const { isResolvedNote, resolvedNote } = await import("../../shared/board.ts");
+  assert.ok(isResolvedNote(resolvedNote("main")));
+  assert.ok(isResolvedNote(resolvedNote("develop", "kept both sides' lines in work.txt")));
+  assert.ok(!isResolvedNote("The merge conflict was not resolved: the run was stopped. Resolve it on the branch, then approve again."));
+  assert.ok(!isResolvedNote("The merge conflict is resolved, but the push failed: no network. Push the branch, then approve again."));
+  assert.ok(!isResolvedNote(null));
+});
+
 test("requireTrackedRepo resolves tracked repos and rejects the rest", () => {
   const db = tmpDb();
   db.prepare("INSERT INTO repos (id, owner, name, default_branch, private, added_at) VALUES ('me/app','me','app','main',1,0)").run();
