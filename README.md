@@ -13,7 +13,7 @@ A self-hosted web UI for the [pi coding agent](https://github.com/earendil-works
 
 ## What you get
 
-- **A board per repo.** The start page is the selected repo's **Board**: one card per pipeline session in the columns To do, Issues, Doing, QA, Review and Done. A card shows its title, its ticket progress, and why it needs you. The sidebar lists the tracked repos and opens each one's board; the last one opens again next time. Direct-mode sessions are listed on the **Sessions** page.
+- **A board per repo.** The start page is the selected repo's **Board**: one card per session in the columns To do, Issues, Doing, QA, Review and Done — a pipeline card in the column its phase sets, and a direct session's card always in Doing. A card shows its title, its ticket progress, and why it needs you. The sidebar lists the tracked repos and opens each one's board; the last one opens again next time. Direct sessions are also listed on the **Sessions** page.
 - **Plan, then build, as the default.** A new session runs a pipeline (see [The pipeline](#the-pipeline)): `grill-with-docs` → `to-spec` → `to-tickets` → test-first build of each ticket → one code review. Pick **Direct** on the New session form to skip it for small fixes.
 - **Live sessions.** Every session streams text, thinking, and tool calls as they happen. Sessions keep running when you close the tab, and several can run in parallel, each in its own git worktree and branch.
 - **Permissions.** Before a risky tool call runs, the session waits for **Allow / Allow for this session / Deny**. Risky calls include `git push`, `gh`, `rm -r`, `sudo`, `curl`/`wget`, `ssh`, package installs, destructive git commands, and writes outside the worktree. You can edit the rules under Settings.

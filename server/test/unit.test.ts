@@ -330,6 +330,38 @@ test("unclaimed cards: plain and ticketed spec issues both sit in Issues; a sub-
   assert.deepEqual(boardCards([], cards).map((c) => c.id), ["issue:1", "issue:5"]);
 });
 
+test("a direct session is a card in Doing: with no PR, and even while it sets up", async () => {
+  const { cardOf, sessionColumn } = await import("../../shared/board.ts");
+  const session = (mode: string, phase: string, extra: Record<string, unknown> = {}) =>
+    ({ id: "s1", title: "T", mode, phase, attention: null, prNumber: null, prUrl: null, specRef: null, tickets: [], ...extra }) as any;
+  // The board column a session's card sits in; a direct card is in Doing in every phase it has.
+  assert.equal(sessionColumn("direct", "direct"), "doing");
+  assert.equal(sessionColumn("direct", "setup"), "doing");
+  assert.equal(sessionColumn("pipeline", "setup"), "todo");
+  assert.equal(sessionColumn("pipeline", "ready"), "issues");
+  assert.equal(sessionColumn("pipeline", "implement"), "doing");
+  assert.equal(sessionColumn("pipeline", "review"), "qa");
+  assert.equal(sessionColumn("pipeline", "pr"), "review");
+  assert.equal(sessionColumn("pipeline", "done"), "done");
+  assert.equal(sessionColumn("pipeline", "no-such-phase"), null);
+  assert.deepEqual(cardOf(session("direct", "direct")), {
+    id: "s1",
+    title: "T",
+    column: "doing",
+    tickets: { done: 0, total: 0 },
+    attention: null,
+    pr: null,
+    specRef: null,
+  });
+  assert.equal(cardOf(session("direct", "setup"))?.column, "doing", "a direct session in setup is in Doing, not To do");
+  // A PR on a direct session keeps the card in Doing, with its badge.
+  const pr = cardOf(session("direct", "direct", { prNumber: 7, prUrl: "https://github.com/me/app/pulls/7" }));
+  assert.equal(pr?.column, "doing");
+  assert.deepEqual(pr?.pr, { number: 7, url: "https://github.com/me/app/pulls/7", state: null });
+  // A pipeline card keeps its phase's column through cardOf as well.
+  assert.equal(cardOf(session("pipeline", "implement"))?.column, "doing");
+});
+
 test("isPlainUnclaimedCard follows the tickets count, not the column", async () => {
   const { isPlainUnclaimedCard } = await import("../../shared/board.ts");
   const card = (id: string, total: number) => ({ id, column: "issues" as const, tickets: { done: 0, total } });

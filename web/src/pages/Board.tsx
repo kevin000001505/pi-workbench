@@ -187,8 +187,8 @@ export function Board({ repoId }: { repoId?: string }) {
     if (repo) rememberBoardRepo(repo.id);
   }, [repo?.id]);
 
-  // Refetch the board when one of this repo's sessions changes what its card shows.
-  const mine = Object.values(sessions).filter((s) => s.repoId === repo?.id && s.mode === "pipeline");
+  // Refetch the board when one of this repo's sessions changes what its card shows (direct cards too).
+  const mine = Object.values(sessions).filter((s) => s.repoId === repo?.id);
   const key = mine
     .map((s) => `${s.id}:${s.phase}:${s.attention ?? ""}:${s.tickets.map((t) => t.status).join(",")}:${s.prNumber ?? ""}:${s.title}`)
     .sort()

@@ -146,7 +146,7 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
   const b = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Farewell", prompt: "add a farewell" })).json;
   await waitFor(async () => (await summary(b.id)).pending.some((p: any) => p.kind === "decision"));
   assert.equal((await summary(b.id)).phase, "grill");
-  // A direct session is no card, even while it sets up.
+  // A direct session is a card in Doing too, even while it sets up.
   const d = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Quick", prompt: "hello there", mode: "direct" })).json;
   assert.equal(d.phase, "setup");
   // The session cards, beside the plain issue cards, in column order.
@@ -156,6 +156,7 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
     [
       ["Farewell", "todo"],
       ["Greeting", "issues"],
+      ["Quick", "doing"],
     ],
   );
 
@@ -169,6 +170,54 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
   ]);
   // An untracked repo has no board.
   assert.equal((await api("GET", "/api/board?repo=kevin/nope")).status, 404);
+});
+
+test("a direct session is a card in Doing, even while it sets up: every drag is refused, and it claims no issue", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "direct");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/direct" })).status, 200);
+  const col = async (id: string) => (await board("kevin/direct")).find((c) => c.id === id)?.column;
+  const events = await boardEvents();
+  const before = events.seen.length;
+
+  // A fresh repo has no setup marker: the direct session runs setup first, and its card is in Doing all the while.
+  const d = await api("POST", "/api/sessions", { repoId: "kevin/direct", title: "Quick", prompt: "say hello", mode: "direct" });
+  assert.equal(d.status, 200, JSON.stringify(d.json));
+  const s = d.json;
+  assert.equal(s.mode, "direct");
+  assert.equal(s.phase, "setup");
+  assert.equal(await col(s.id), "doing", "the card is in Doing while it sets up");
+  // Every drag of the card is refused while it is in Doing — even while the session still sets up.
+  for (const column of ["todo", "issues", "qa", "review", "done"]) {
+    const r = await api("POST", `/api/sessions/${s.id}/move`, { column });
+    assert.equal(r.status, 409, `a drag to ${column} while it sets up: ${JSON.stringify(r.json)}`);
+  }
+  await waitFor(() => events.seen.length >= before + 1);
+  assert.equal(events.seen[before], "kevin/direct");
+
+  // The task goes out once setup commits its marker: the phase is `direct`, the card still in Doing.
+  await waitFor(async () => (await summary(s.id)).phase === "direct");
+  assert.equal(await col(s.id), "doing");
+
+  // The card detail reads the session: it has no spec and no tickets.
+  const sum = await summary(s.id);
+  assert.equal(sum.spec, null);
+  assert.equal(sum.specRef, null);
+  assert.deepEqual(sum.tickets, []);
+
+  // Every drag of the card is refused (409), so it snaps back in Doing.
+  for (const column of ["todo", "issues", "qa", "review", "done"]) {
+    const r = await api("POST", `/api/sessions/${s.id}/move`, { column });
+    assert.equal(r.status, 409, `a drag to ${column}: ${JSON.stringify(r.json)}`);
+  }
+  assert.equal(await col(s.id), "doing");
+
+  // A direct session that talks about an issue claims it not: the issue's unclaimed card stays on the board.
+  const t = await api("POST", "/api/sessions", { repoId: "kevin/direct", title: "Talk", prompt: "what is left?", issueRef: "kevin/direct#2", mode: "direct" });
+  assert.equal(t.status, 200, JSON.stringify(t.json));
+  assert.ok((await board("kevin/direct")).some((c) => c.id === "issue:2"), "issue #2 stays unclaimed");
+  events.close();
+  await api("POST", `/api/sessions/${t.json.id}/stop`, {});
+  await api("POST", `/api/sessions/${s.id}/stop`, {});
 });
 
 test("a card started from a spec's ticket issues skips Issues: Doing, then QA, then Review with the opened PR", { skip: !hasPi && "pi CLI not found" }, async () => {
@@ -204,7 +253,7 @@ test("a card started from a spec's ticket issues skips Issues: Doing, then QA, t
 
   // The newest session card still sorts by column, after the older ones in To do and Issues.
   const sessionCards = (await board()).filter((c) => !c.id.startsWith("issue:"));
-  assert.deepEqual(sessionCards.map((c) => c.column), ["todo", "issues", "review"]);
+  assert.deepEqual(sessionCards.map((c) => c.column), ["todo", "issues", "doing", "review"]);
 
   // The badge follows the PR on GitHub: every check passed, a check failed, then a merge conflict.
   gh.checkRuns.splice(1);
@@ -602,14 +651,13 @@ test("an unclaimed spec issue shows in Issues; its move to Doing solves its tick
   assert.equal((await summary(reworked.json.id)).spec, null);
   await waitFor(() => events.seen.length >= 2);
 
-  // A card made with New card announces itself too; a direct session is no card.
+  // A card made with New card announces itself; a direct session is a card too, and it announces itself.
   const before = events.seen.length;
   await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Quick two", prompt: "hi", mode: "direct" });
   const fresh = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Wave goodbye", prompt: "wave goodbye" })).json;
   assert.ok(fresh.id);
-  await waitFor(() => events.seen.length > before);
-  await new Promise((r) => setTimeout(r, 300));
-  assert.deepEqual(events.seen.slice(before), ["kevin/demo"]);
+  await waitFor(() => events.seen.length >= before + 2);
+  assert.deepEqual(events.seen.slice(before), ["kevin/demo", "kevin/demo"]);
   events.close();
   // Fewer live pi processes for the tests after this one.
   for (const s of (await api("GET", "/api/sessions")).json) await api("POST", `/api/sessions/${s.id}/stop`, {});
