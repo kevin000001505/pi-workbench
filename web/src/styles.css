@@ -172,12 +172,7 @@ code,
   width: 28px;
   height: 28px;
   border-radius: 8px;
-  display: grid;
-  place-items: center;
-  background: linear-gradient(135deg, var(--accent), #b06cff);
-  color: white;
-  font-family: Georgia, serif;
-  font-size: 17px;
+  object-fit: cover;
 }
 .conn {
   margin-left: auto;
