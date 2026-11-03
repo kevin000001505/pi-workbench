@@ -1,11 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type Card, type Column, COLUMNS, DONE_PAGE } from "../../../shared/board.ts";
-
-/** An unclaimed card's spec issue number (its id is `issue:<number>`); null for a session's card. */
-const unclaimedIssue = (card: Card) => {
-  const m = /^issue:(\d+)$/.exec(card.id);
-  return m ? Number(m[1]) : null;
-};
+import { type Card, type Column, COLUMNS, DONE_PAGE, unclaimedNumber } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import { approveQuestion, CardDetail } from "./CardDetail.tsx";
@@ -90,7 +84,7 @@ function Icon({ name }: { name: keyof typeof ICONS }) {
 }
 
 function BoardCard({ card, activity, onDrag, onOpen }: { card: Card; activity: string; onDrag: (card: Card | null) => void; onOpen: () => void }) {
-  const issue = unclaimedIssue(card);
+  const issue = unclaimedNumber(card.id);
   const unclaimed = issue !== null;
   // A string, not PrState: the badge styles every state the server sends, "merged" included.
   const prState: string | null = card.pr?.state ?? null;
@@ -192,7 +186,7 @@ export function Board({ repoId }: { repoId?: string }) {
     // Review → Done is Approve: it merges the PR, so it asks first.
     if (card.column === "review" && column === "done" && !confirm(approveQuestion(card))) return;
     // An unclaimed card's move creates its session; the server answers with that session.
-    const issue = unclaimedIssue(card);
+    const issue = unclaimedNumber(card.id);
     const url = issue !== null ? `/api/repos/${repo.id}/issues/${issue}/move` : `/api/sessions/${card.id}/move`;
     api.post(url, { column }).then(
       () => (setError(null), setRefetch((n) => n + 1)),
@@ -236,7 +230,7 @@ export function Board({ repoId }: { repoId?: string }) {
   }, [cards, filter]);
 
   // An unclaimed card has no session, so no card detail.
-  const open = openId ? (cards ?? []).find((c) => c.id === openId && unclaimedIssue(c) === null) : undefined;
+  const open = openId ? (cards ?? []).find((c) => c.id === openId && unclaimedNumber(c.id) === null) : undefined;
   const closeDetail = useCallback(() => setOpenId(null), []);
 
   if (repos && repos.length === 0) {
@@ -363,7 +357,7 @@ export function Board({ repoId }: { repoId?: string }) {
           onPick={(id) => {
             setSearching(false);
             const picked = (cards ?? []).find((c) => c.id === id);
-            if (picked && unclaimedIssue(picked) !== null) window.open(picked.specRef ?? undefined, "_blank", "noopener");
+            if (picked && unclaimedNumber(picked.id) !== null) window.open(picked.specRef ?? undefined, "_blank", "noopener");
             else setOpenId(id);
           }}
         />
