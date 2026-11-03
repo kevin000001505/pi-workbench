@@ -121,7 +121,8 @@ function textOf(content: unknown): string {
  *   merge → finish_merge resolved → done; a base side that says GIVEUP is left alone → finish_merge failed,
  *   and one that says NOFINISH ends the run with no finish_merge call; one that says HOLDMERGE asks
  *   the user first and leaves the run waiting on that decision; one that says FAKERESOLVE
- *   calls finish_merge resolved with the merge still half done, and ABORTRESOLVE after git merge --abort
+ *   calls finish_merge resolved with the merge still half done, ABORTRESOLVE after git merge --abort,
+ *   and MARKERRESOLVE after committing the merge with its conflict markers in work.txt
  */
 function pipelineScript(userText: string, step: number, lastResult: string, conversation = ""): Reply | undefined {
   if (userText.includes('<skill name="grill-with-docs"')) {
@@ -172,7 +173,7 @@ function pipelineScript(userText: string, step: number, lastResult: string, conv
   if (userText.includes('<skill name="resolving-merge-conflicts"')) {
     if (step === 0) {
       const keepBoth = "grep -v -e '^<<<<<<<' -e '^=======' -e '^>>>>>>>' work.txt > .resolved && mv .resolved work.txt && git add work.txt && git commit -q --no-edit && echo resolved";
-      return { tool: { name: "bash", args: { command: `if grep -q ABORTRESOLVE work.txt; then git merge --abort && echo "faked"; elif grep -q FAKERESOLVE work.txt; then echo "faked"; elif grep -q HOLDMERGE work.txt; then echo "hold on"; elif grep -q NOFINISH work.txt; then echo "wandered off"; elif grep -q GIVEUP work.txt; then echo "cannot reconcile"; else ${keepBoth}; fi` } } };
+      return { tool: { name: "bash", args: { command: `if grep -q MARKERRESOLVE work.txt; then git add work.txt && git commit -q --no-edit && echo "faked"; elif grep -q ABORTRESOLVE work.txt; then git merge --abort && echo "faked"; elif grep -q FAKERESOLVE work.txt; then echo "faked"; elif grep -q HOLDMERGE work.txt; then echo "hold on"; elif grep -q NOFINISH work.txt; then echo "wandered off"; elif grep -q GIVEUP work.txt; then echo "cannot reconcile"; else ${keepBoth}; fi` } } };
     }
     if (step === 1 && lastResult.includes("faked")) return { tool: { name: "finish_merge", args: { status: "resolved", note: "all good" } } };
     if (step === 1 && lastResult.includes("hold on")) return { tool: { name: "ask_user", args: { question: "Keep both sides of work.txt?", options: ["Yes", "No"] } } };

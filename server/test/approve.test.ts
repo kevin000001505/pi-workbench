@@ -432,8 +432,9 @@ test("Review → Issues undoes a half-done merge that no merge run holds (a serv
 for (const [word, spec, says] of [
   ["FAKERESOLVE", 87, /the merge is not committed/],
   ["ABORTRESOLVE", 97, /HEAD does not contain origin\/main/],
+  ["MARKERRESOLVE", 127, /work\.txt still has conflict markers/],
 ] as const)
-test(`a merge run that says resolved but ${word === "FAKERESOLVE" ? "leaves the merge half done" : "aborted the merge"} is not pushed: the card stays in Review with the reason`, { skip: !hasPi && "pi CLI not found" }, async () => {
+test(`a merge run that says resolved but ${{ FAKERESOLVE: "leaves the merge half done", ABORTRESOLVE: "aborted the merge", MARKERRESOLVE: "committed conflict markers" }[word]} is not pushed: the card stays in Review with the reason`, { skip: !hasPi && "pi CLI not found" }, async () => {
   const { id, pr, worktree, branch } = await toReview(spec);
   const tip = git(bare, "rev-parse", `refs/heads/${branch}`);
   pushToBase(`${word}: main changed this line`);

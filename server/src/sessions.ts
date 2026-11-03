@@ -1470,7 +1470,7 @@ export class SessionManager extends EventEmitter {
       await this.pushResolved(id, report.note);
       return;
     }
-    await git(row.worktree, ["merge", "--abort"], await this.gitEnv()).catch(() => {});
+    await this.undoMerge(row);
     const why = unfinished
       ? `the merge run called finish_merge "resolved", but ${unfinished}`
       : report
@@ -1481,12 +1481,38 @@ export class SessionManager extends EventEmitter {
     this.flag(id, `The merge conflict was not resolved: ${why}. Resolve it on the branch, then approve again.`);
   }
 
-  /** Why the worktree does not hold a finished merge of the base branch, or null when it does. */
+  /**
+   * Why the worktree does not hold a finished merge of the base branch, or null when it does. A
+   * file that differs from the base and still has a conflict-marker line is not finished either.
+   */
   private async unfinishedMerge(row: SessionRow): Promise<string | null> {
     const sh = (args: string[]) => git(row.worktree, args).then(() => true, () => false);
     if (await sh(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) return "the merge is not committed";
     if (!(await sh(["merge-base", "--is-ancestor", `origin/${row.base_branch}`, "HEAD"]))) return `HEAD does not contain origin/${row.base_branch}`;
+    const changed = (await git(row.worktree, ["diff", "--name-only", "-z", `origin/${row.base_branch}`, "HEAD"])).split("\0").filter(Boolean);
+    if (!changed.length) return null;
+    const marked = await git(row.worktree, ["grep", "-l", "-z", "-E", "^(<<<<<<<|>>>>>>>)( |$)|^=======$", "HEAD", "--", ...changed]).then(
+      (out) => out.split("\0").filter(Boolean).map((f) => f.replace(/^HEAD:/, "")),
+      () => [] as string[],
+    );
+    if (marked.length) return `${marked.join(", ")} still ${marked.length === 1 ? "has" : "have"} conflict markers`;
     return null;
+  }
+
+  /**
+   * Undo the merge run's merge: abort a half-done one, or drop a committed merge commit (HEAD's
+   * first parent is the tip `git merge` started from, ORIG_HEAD), so nothing of it is pushed later.
+   */
+  private async undoMerge(row: SessionRow) {
+    const env = await this.gitEnv();
+    const rev = (r: string) => git(row.worktree, ["rev-parse", "-q", "--verify", r]).then((x) => x.trim(), () => null);
+    if (await rev("MERGE_HEAD")) {
+      await git(row.worktree, ["merge", "--abort"], env).catch(() => {});
+      return;
+    }
+    const before = await rev("ORIG_HEAD");
+    const isMerge = !!(await rev("HEAD^2"));
+    if (before && isMerge && before === (await rev("HEAD^1"))) await git(row.worktree, ["reset", "-q", "--hard", before], env).catch(() => {});
   }
 
   /** Push the merge to the PR's branch; the card stays in Review for a second Approve. */
