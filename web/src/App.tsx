@@ -13,7 +13,7 @@ import { useStore } from "./store.tsx";
 export type Route =
   | { page: "board"; repoId?: string }
   | { page: "sessions" }
-  | { page: "session"; id: string }
+  | { page: "session"; id: string; /** `?run=`: the run tab to open on load; absent or unknown shows the live run */ run?: string }
   | {
       page: "new";
       repoId?: string;
@@ -35,7 +35,7 @@ function parse(hash: string): Route {
   const [page, a] = parts;
   switch (page) {
     case "session":
-      return a ? { page: "session", id: a } : { page: "sessions" };
+      return a ? { page: "session", id: a, run: params.get("run") ?? undefined } : { page: "sessions" };
     case "board":
       return { page: "board", repoId: a ? decodeURIComponent(a) : undefined };
     case "new":
@@ -87,7 +87,9 @@ export function App() {
       <main className="main">
         {route.page === "board" && <Board key={route.repoId ?? ""} repoId={route.repoId} />}
         {route.page === "sessions" && <Sessions />}
-        {route.page === "session" && <SessionView key={route.id} id={route.id} />}
+        {route.page === "session" && (
+          <SessionView key={`${route.id}|${route.run ?? ""}`} id={route.id} run={route.run} />
+        )}
         {route.page === "new" && (
           <NewSession
             key={JSON.stringify(route)}

@@ -128,7 +128,11 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
         </header>
 
         <div className="kz-detail-links">
-          {!plain && <a className="kz-btn" href={`#/session/${card.id}`}>Open the full transcript</a>}
+          {!plain && (
+            <a className="kz-btn" href={`#/session/${card.id}`} target="_blank" rel="noopener">
+              Open the full transcript
+            </a>
+          )}
           {plain && (
             <a className="kz-btn" href={card.specRef ?? undefined} target="_blank" rel="noopener">
               Open on GitHub

@@ -59,7 +59,7 @@ function AutoApproveControl({ s }: { s: SessionSummary }) {
   );
 }
 
-export function SessionView({ id }: { id: string }) {
+export function SessionView({ id, run }: { id: string; run?: string }) {
   const store = useStore();
   const { sessions, watch, toast, version } = store;
   const s = sessions[id];
@@ -78,6 +78,15 @@ export function SessionView({ id }: { id: string }) {
     watch(id);
     return () => watch(null);
   }, [id, watch]);
+
+  // The URL's run (?run=), applied once when the session summary arrives: a known run opens its tab;
+  // an unknown or absent one leaves the live run showing, so an old link never breaks the page.
+  const appliedRun = useRef(false);
+  useEffect(() => {
+    if (appliedRun.current || !s || !run) return;
+    appliedRun.current = true;
+    if (s.runs.some((r) => r.id === run)) viewRun(run);
+  }, [s, run]);
 
   const viewRun = (runId: string) => {
     if (!s || runId === s.activeRun) return setPast(null);
