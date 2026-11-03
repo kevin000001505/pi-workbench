@@ -50,8 +50,8 @@ export function Sidebar({ route, onClose }: { route: Route; onClose: () => void 
       <div className="nav-scrim" onClick={onClose} />
       <aside className="sidebar">
         <a className="brand" href="#/">
-          <span className="brand-mark">π</span>
-          <span>workbench</span>
+          <img className="brand-mark" src="/kermit-icon.jpg" alt="Kermit-Code" />
+          <span>Kermit-Code</span>
           <span className={`conn ${connected ? "on" : ""}`} title={connected ? "Live" : "Reconnecting…"} />
         </a>
         <a className="btn btn-primary btn-block" href="#/new">
