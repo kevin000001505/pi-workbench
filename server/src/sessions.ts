@@ -105,7 +105,7 @@ export type UiResponse = { value?: string; confirmed?: boolean; cancelled?: bool
 export type Run = { id: string; label: string };
 
 /** What POST /api/sessions (and an unclaimed card's move) asks SessionManager.create for. */
-export type CreateInput = { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: StartFrom; soloTicket?: number | null };
+export type CreateInput = { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: StartFrom; soloTicket?: number };
 
 export type SessionSummary = {
   id: string;

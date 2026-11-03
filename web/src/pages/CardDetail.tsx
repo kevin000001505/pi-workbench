@@ -13,6 +13,17 @@ import { CardActions, SOLVE, SPLIT } from "./CardActions.tsx";
 const TICKET_STATE: Record<Ticket["status"], string> = { ready: "Ready", running: "Running", done: "Done", blocked: "Blocked" };
 
 /**
+ * The issue behind a card's spec ref, split for the /api/repos routes; null when the ref is not
+ * an issue link (a file path, or nothing).
+ */
+const issueParts = (specRef: string | null) => {
+  const ref = parseIssueRef(specRef);
+  if (!ref?.repo) return null;
+  const [owner, name] = ref.repo.split("/");
+  return { owner, name, number: ref.number };
+};
+
+/**
  * One ticket row of a card detail: the state, a live dot on the running ticket, "waits on #n" for
  * blockers that are not done, Solve on a ticket the card can solve (disabled otherwise), and a link:
  * the run link for a ticket with a run, the GitHub issue for a tracker ref that names an issue of
@@ -109,14 +120,13 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
   const [specTickets, setSpecTickets] = useState<UnclaimedSpecTickets | null | undefined>(undefined);
   useEffect(() => {
     if (!unclaimedSpec) return;
-    const ref = parseIssueRef(card.specRef);
-    if (!ref?.repo) {
+    const part = issueParts(card.specRef);
+    if (!part) {
       setSpecTickets(null);
       return;
     }
-    const [owner, name] = ref.repo.split("/");
     let live = true;
-    api.get<UnclaimedSpecTickets>(`/api/repos/${owner}/${name}/issues/${ref.number}/tickets`).then(
+    api.get<UnclaimedSpecTickets>(`/api/repos/${part.owner}/${part.name}/issues/${part.number}/tickets`).then(
       (t) => live && setSpecTickets(t),
       () => live && setSpecTickets(null),
     );
@@ -129,14 +139,13 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
   const [issueBody, setIssueBody] = useState<string | null | undefined>(undefined);
   useEffect(() => {
     if (!plain) return;
-    const ref = parseIssueRef(card.specRef);
-    if (!ref?.repo) {
+    const part = issueParts(card.specRef);
+    if (!part) {
       setIssueBody(null);
       return;
     }
-    const [owner, name] = ref.repo.split("/");
     let live = true;
-    api.get<{ body: string | null }>(`/api/github/issues/${owner}/${name}/${ref.number}`).then(
+    api.get<{ body: string | null }>(`/api/github/issues/${part.owner}/${part.name}/${part.number}`).then(
       (i) => live && setIssueBody(i.body),
       () => live && setIssueBody(null),
     );
@@ -179,10 +188,10 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
   // A plain card's move creates its session: the unclaimed card goes, and this detail closes with it.
   const movePlain = async (column: "doing" | "todo") => {
     setBusy(true);
-    const ref = parseIssueRef(card.specRef);
+    const part = issueParts(card.specRef);
     try {
-      if (!ref?.repo) throw new Error("The card has no issue link to move");
-      await api.post(`/api/repos/${ref.repo}/issues/${ref.number}/move`, { column });
+      if (!part) throw new Error("The card has no issue link to move");
+      await api.post(`/api/repos/${part.owner}/${part.name}/issues/${part.number}/move`, { column });
       onClose();
     } catch (e) {
       toast((e as Error).message, "error");
@@ -195,11 +204,10 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
   // sub-issue as the solo ticket. The unclaimed card goes, and this detail closes with it.
   const solveUnclaimed = async (sub: number) => {
     setBusy(true);
-    const ref = parseIssueRef(card.specRef);
+    const part = issueParts(card.specRef);
     try {
-      if (!ref?.repo) throw new Error("The card has no issue link to solve");
-      const [owner, name] = ref.repo.split("/");
-      await api.post(`/api/repos/${owner}/${name}/issues/${ref.number}/tickets/${sub}/solve`, {});
+      if (!part) throw new Error("The card has no issue link to solve");
+      await api.post(`/api/repos/${part.owner}/${part.name}/issues/${part.number}/tickets/${sub}/solve`, {});
       onClose();
     } catch (e) {
       toast((e as Error).message, "error");

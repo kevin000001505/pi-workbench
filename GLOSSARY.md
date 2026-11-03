@@ -22,7 +22,11 @@ _Avoid_: solve all issues (that is the Start session flow, one session per issue
 
 **Solve one ticket**:
 The Solve button on a ticket row of a spec card's detail: the card's session runs only that ticket, in a fresh run, and when the ticket is done the card pauses back in Issues (for example 1/3 done). When the last ticket is done, the card goes on to the review and the PR. A Solve on a sub-issue row of an unclaimed spec card's detail creates the spec's session and runs only that sub-issue, as its solo ticket.
-_Avoid_: Solve all tickets (that runs every ticket of the spec in one go), Solve (that is for a plain issue)
+_Avoid_: Solve (that is for a plain issue), Solve all (that is the board card's button; it is the move that is **Solve all tickets**)
+
+**Solo ticket**:
+The one ticket a card runs on a Solve one ticket, kept in the session while it is set: when the ticket is done the card pauses back in Issues instead of going on to the next ticket. Solve all, a backward move, and Stop clear it.
+_Avoid_: single ticket, one ticket, solo run
 
 **SSH host**:
 A remote machine registered in the workbench's SSH config, addressed by an alias you can say ("Media"); the agent reaches it with `ssh <alias>` and works code on it from there.

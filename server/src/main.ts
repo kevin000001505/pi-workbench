@@ -226,6 +226,8 @@ const router = new Router()
     const sub = Number(params.sub);
     if (!Number.isInteger(sub) || sub < 1) throw new HttpError(400, "The sub-issue number must be a whole number");
     const seed = await github().listTicketSubIssues(repo.owner, repo.name, number);
+    // A sub-issue has no card: its spec's card owns it. A stale tab can still post its number.
+    if (seed.spec.hasParent) throw new HttpError(409, `Issue #${number} is a sub-issue of another issue; its spec's card owns it.`);
     const subSeed = seed.subIssues.find((s) => s.number === sub);
     if (!subSeed) throw new HttpError(409, `Issue #${sub} is not an open sub-issue of #${number}`);
     // A blocker outside the open set is dropped, as ticketsFromSubIssues does: an open blocker
