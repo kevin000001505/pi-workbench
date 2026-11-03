@@ -56,7 +56,7 @@ import {
   transcriptExcerpt,
   type ReviewContext,
 } from "./autoapprove.ts";
-import { createWorktree, getRepo, removeWorktree, slugify, worktreeNeedsSetup } from "./repos.ts";
+import { createWorktree, getRepo, listRepos, removeWorktree, slugify, worktreeNeedsSetup } from "./repos.ts";
 import { loadSshHosts } from "./ssh.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, getPipelineSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
@@ -1530,7 +1530,8 @@ export class SessionManager extends EventEmitter {
 
   /**
    * The PR is merged: close the issues when GitHub will not (a base that is not the default
-   * branch ignores `Closes`, and `Closes` never reaches another repo's issue), delete the branch on
+   * branch ignores `Closes`, and `Closes` never reaches another repo's issue, which closes only
+   * when the workbench tracks its repo), delete the branch on
    * GitHub and the worktree, and set `done`. A cleanup step that fails does not undo the merge; its
    * reason goes on the card.
    */
@@ -1541,7 +1542,14 @@ export class SessionManager extends EventEmitter {
     if (row.base_branch !== repo.default_branch) {
       await delivery.closeIssues(repo, closedIssues(row, this.tickets(id))).catch((err) => problems.push(`the issues did not close (${(err as Error).message})`));
     }
+    // An issue of another repo closes only when the workbench tracks that repo: a model-written ref
+    // must not close issues in any repo the token can write.
+    const tracked = new Set(listRepos(this.db).map((r) => r.id.toLowerCase()));
     for (const issue of foreignIssues(row, this.tickets(id))) {
+      if (!tracked.has(issue.repo.toLowerCase())) {
+        problems.push(`issue ${issue.repo}#${issue.number} was not closed (it is in a repo the workbench does not track)`);
+        continue;
+      }
       const [owner, name] = issue.repo.split("/");
       await delivery.closeIssues({ owner, name }, [issue.number]).catch((err) => problems.push(`issue ${issue.repo}#${issue.number} did not close (${(err as Error).message})`));
     }

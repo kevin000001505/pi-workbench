@@ -144,8 +144,10 @@ test("a board-created card's spec issue gets a Closes line, so Approve closes it
   assert.deepEqual(gh.closed.slice(before), [{ ref: "kevin/ship#40", by: "api" }]);
 });
 
-test("Approve closes the issues that name another repo on that repo; one that does not close is noted on the Done card", { skip: !hasPi && "pi CLI not found" }, async () => {
+test("Approve closes the issues that name another tracked repo on that repo; one that does not close is noted on the Done card", { skip: !hasPi && "pi CLI not found" }, async () => {
   await setup();
+  gh.createBare("kevin", "tracker");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/tracker" })).status, 200);
   // The origin issue and the spec issue live in another repo, so the PR's Closes lines cannot close them.
   gh.lockedIssues.add("kevin/tracker#13");
   const s = (await api("POST", "/api/sessions", { repoId: "kevin/ship", title: "Foreign", prompt: "add a greeting GHSPEC https://github.com/kevin/tracker/issues/13", issueRef: "kevin/tracker#12" })).json;
@@ -158,6 +160,23 @@ test("Approve closes the issues that name another repo on that repo; one that do
   assert.deepEqual(gh.closed.slice(before), [{ ref: "kevin/tracker#12", by: "api" }]);
   assert.match(r.json.attention, /^PR #\d+ is merged, but issue kevin\/tracker#13 did not close \(.*Resource not accessible by personal access token.*\)\.$/);
   assert.equal((await board()).find((c) => c.id === s.id).column, "done");
+});
+
+test("Approve leaves open the issues of repos the workbench does not track, and lists them on the Done card", { skip: !hasPi && "pi CLI not found" }, async () => {
+  await setup();
+  // A spec ref the model wrote names an upstream repo, and the origin issue is in an untracked repo.
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/ship", title: "Upstream", prompt: "add a wave GHSPEC https://github.com/nodejs/node/issues/123", issueRef: "kevin/elsewhere#5" })).json;
+  assert.ok(s.id, JSON.stringify(s));
+  await driveToReview(s.id);
+  const before = gh.closed.length;
+  const r = await approve(s.id);
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.phase, "done");
+  assert.deepEqual(gh.closed.slice(before).filter((c) => !c.ref.startsWith("kevin/ship#")), []);
+  assert.equal(
+    r.json.attention,
+    `PR #${r.json.prNumber} is merged, but issue kevin/elsewhere#5 was not closed (it is in a repo the workbench does not track), and issue nodejs/node#123 was not closed (it is in a repo the workbench does not track).`,
+  );
 });
 
 test("Approve refuses a card outside Review, and a request from another site", { skip: !hasPi && "pi CLI not found" }, async () => {
