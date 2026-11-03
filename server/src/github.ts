@@ -1,4 +1,5 @@
 import { parseIssueRef, type BoardIssue } from "../../shared/board.ts";
+import { type TicketSeed } from "./pipeline.ts";
 import { config } from "./config.ts";
 
 export type GhUser = { login: string; id: number; name: string | null };
@@ -21,7 +22,6 @@ export type GhIssueSummary = {
 };
 export type GhIssueDetail = GhIssueSummary & { body: string | null; assignees: string[] };
 export type GhIssueComment = { id: number; author: string; body: string | null; createdAt: string };
-export type GhTicketSeed = { spec: { number: number; title: string; body: string | null; htmlUrl: string }; subIssues: { number: number; title: string; body: string | null; blockedBy: number[] }[] };
 
 export class GitHubError extends Error {
   status: number;
@@ -134,7 +134,7 @@ export class GitHub {
    * true when the issue is itself a sub-issue of another issue (a ticket issue); the move route
    * refuses such numbers. Cap: 100.
    */
-  listTicketSubIssues(owner: string, name: string, number: number) {
+  listTicketSubIssues(owner: string, name: string, number: number): Promise<TicketSeed> {
     type GqIssue = {
       number: number;
       title: string;
@@ -164,7 +164,7 @@ export class GitHub {
           body: n.body,
           blockedBy: n.blockedBy.nodes.filter((b) => openNumbers.has(b.number)).map((b) => b.number),
         })),
-      } as GhTicketSeed;
+      };
     });
   }
 

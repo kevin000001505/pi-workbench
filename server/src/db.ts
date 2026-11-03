@@ -24,6 +24,8 @@ export type SessionRow = {
   pr_url: string | null;
   /** The user's first task, held back until setup-matt-pocock-skills has run. */
   held_prompt: string | null;
+  /** The phase a held prompt releases into: tickets for a split, grill for a rework or a task. */
+  held_phase: string | null;
   archived: number;
   /** "pipeline" (grill → tickets → implement) or "direct" (plain agent turns). */
   mode: string;
@@ -156,6 +158,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ["sessions", "merge_run", "TEXT"],
   ["sessions", "merge_files", "TEXT"],
   ["sessions", "rework_tickets", "INTEGER NOT NULL DEFAULT 0"],
+  ["sessions", "held_phase", "TEXT"],
   ["tickets", "start_commit", "TEXT"],
   ["tickets", "stop_reason", "TEXT"],
   ["tickets", "rescue_run_id", "TEXT"],
@@ -174,6 +177,14 @@ function migrate(db: DatabaseSync) {
   if (!getSetting(db, "migrated.donePr")) {
     db.exec("UPDATE sessions SET phase = 'pr' WHERE phase = 'done' AND pr_number IS NOT NULL");
     putSetting(db, "migrated.donePr", true);
+  }
+  // held_phase names the phase a held prompt releases into. Backfill the rows from before the
+  // column once: a split prompt (marked in its own pipeline header) goes to tickets, a rework
+  // or a task to grill, a direct session's task to direct.
+  if (!getSetting(db, "migrated.heldPhase")) {
+    db.exec(`UPDATE sessions SET held_phase = 'tickets' WHERE held_prompt LIKE '%pi-workbench pipeline: split%' AND held_phase IS NULL`);
+    db.exec(`UPDATE sessions SET held_phase = CASE WHEN mode = 'direct' THEN 'direct' ELSE 'grill' END WHERE held_prompt IS NOT NULL AND held_phase IS NULL`);
+    putSetting(db, "migrated.heldPhase", true);
   }
 }
 

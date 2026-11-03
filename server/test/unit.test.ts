@@ -468,6 +468,30 @@ test("the split prompt breaks the issue into sub-issues with blocking edges, and
   assert.match(prompt, /do not (change|close).*the issue itself/i, "does not change or close the issue itself");
 });
 
+test("the unclaimed-card starts pick phase, tickets, held prompt and spec in one table", async () => {
+  const { START_PLANS, isStartFrom, ticketFromIssue } = await import("../src/pipeline.ts");
+  assert.deepEqual(Object.keys(START_PLANS).sort(), ["issue", "spec", "split", "tickets"]);
+  assert.ok(isStartFrom("split"), "names the four starts");
+  assert.ok(!isStartFrom("grill"));
+  assert.ok(!isStartFrom(null));
+  assert.ok(!isStartFrom(3));
+  assert.equal(START_PLANS.tickets.phase, "implement", "Solve all starts at the tickets");
+  assert.equal(START_PLANS.issue.phase, "implement", "Solve starts at the one ticket");
+  assert.equal(START_PLANS.split.phase, "tickets", "Split starts at the to-tickets run");
+  assert.equal(START_PLANS.spec.phase, "grill", "rework starts at the grill");
+  assert.equal(START_PLANS.tickets.needsSubIssues, true, "Solve all needs the sub-issue tickets");
+  assert.equal(START_PLANS.spec.needsSubIssues, true, "rework needs the sub-issue tickets");
+  assert.equal(START_PLANS.issue.needsSubIssues, false, "Solve refuses a spec issue");
+  assert.equal(START_PLANS.split.needsSubIssues, false, "Split refuses a spec issue");
+  const seed = { spec: { number: 3, title: "A plain issue", body: "Fix it", htmlUrl: "https://github.com/a/b/issues/3", hasParent: false }, subIssues: [] };
+  assert.deepEqual(START_PLANS.issue.tickets!(seed), ticketFromIssue(seed.spec), "Solve records the issue as its only ticket");
+  assert.ok(START_PLANS.split.held!(seed).includes("https://github.com/a/b/issues/3"), "Split holds the split prompt");
+  assert.ok(START_PLANS.spec.held!(seed).startsWith("/skill:grill-with-docs"), "rework holds the rework prompt");
+  assert.ok(START_PLANS.tickets.tickets, "Solve all derives its tickets from the sub-issues");
+  assert.equal(START_PLANS.split.spec, true, "a split takes the issue body as its spec");
+  assert.equal(START_PLANS.spec.spec, false, "a rework re-saves its spec in the to-spec step");
+});
+
 test("the glossary records the board's columns and card actions", () => {
   const glossary = fs.readFileSync(new URL("../../GLOSSARY.md", import.meta.url), "utf8");
   for (const term of ["To do", "Unclaimed card", "Solve", "Split"]) {

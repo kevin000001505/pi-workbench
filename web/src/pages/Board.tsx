@@ -3,6 +3,7 @@ import { type Card, type Column, COLUMNS, DONE_PAGE, isPlainUnclaimedCard, uncla
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import { approveQuestion, CardDetail } from "./CardDetail.tsx";
+import { CardActions, SOLVE, SOLVE_ALL, SPLIT } from "./CardActions.tsx";
 import { matches, NewCard, Search, typingIn, wordsOf } from "./BoardDialogs.tsx";
 import { isResolvedNote, type Repo } from "../types.ts";
 import "../board.css";
@@ -144,51 +145,7 @@ function BoardCard({
       </div>
       {line && <span className={`desc ${card.attention && !isResolvedNote(card.attention) ? "attention" : ""}`}>{line}</span>}
       {(solveAll || plain) && (
-        <span className="kz-card-actions">
-          {solveAll && (
-            <button
-              className="kz-btn"
-              disabled={busy}
-              title="Move the card to Doing: start or resume its ticket runs"
-              onClick={(e) => {
-                // The button does its move only: it stops the card's own click and its link to GitHub.
-                e.stopPropagation();
-                e.preventDefault();
-                onMove("doing");
-              }}
-            >
-              Solve all
-            </button>
-          )}
-          {plain && (
-            <button
-              className="kz-btn"
-              disabled={busy}
-              title="Make the issue the card's only ticket and start work: skips grill, spec and tickets"
-              onClick={(e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                onMove("doing");
-              }}
-            >
-              Solve
-            </button>
-          )}
-          {plain && (
-            <button
-              className="kz-btn"
-              disabled={busy}
-              title="Break the issue into ticket sub-issues with to-tickets, then approve the breakdown"
-              onClick={(e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                onMove("todo");
-              }}
-            >
-              Split
-            </button>
-          )}
-        </span>
+        <CardActions actions={[...(solveAll ? [SOLVE_ALL] : []), ...(plain ? [SOLVE, SPLIT] : [])]} busy={busy} onMove={(column) => onMove(column)} />
       )}
       {card.pr && (
         <span className="tags">
