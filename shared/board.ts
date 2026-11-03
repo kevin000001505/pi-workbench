@@ -144,8 +144,15 @@ export function issueNumberOf(ref: string | null, repoId: string): number | null
 }
 
 /**
- * The unclaimed cards: the spec issues (each has open tickets) that no session's ref (its issue ref or
- * spec ref) names. They show in Issues; a move to Doing or To do gives each its session.
+ * The refs (issue ref and spec ref) that the sessions claim. Only a pipeline card that is not Done
+ * claims its issues: a direct session or a merged card leaves them free for a new card.
+ */
+export function claimRefs(sessions: { mode: string; phase: string; issueRef: string | null; specRef: string | null }[]): (string | null)[] {
+  return sessions.filter((s) => s.mode === "pipeline" && s.phase !== "done").flatMap((s) => [s.issueRef, s.specRef]);
+}
+
+/**
+ * The unclaimed cards: the spec issues (each has open tickets) that no claim (see claimRefs) names. They show in Issues; a move to Doing or To do gives each its session.
  */
 export function unclaimedCards(specs: SpecIssue[], claims: (string | null)[], repoId: string): Card[] {
   const claimed = new Set(claims.map((r) => issueNumberOf(r, repoId)));

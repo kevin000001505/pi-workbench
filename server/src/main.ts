@@ -3,7 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import path from "node:path";
-import { boardCards, DONE_PAGE, limitDone, prState, unclaimedCards } from "../../shared/board.ts";
+import { boardCards, claimRefs, DONE_PAGE, limitDone, prState, unclaimedCards } from "../../shared/board.ts";
 import { config, TYPESAFE_SKILL } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { GitEnv } from "./git.ts";
@@ -100,7 +100,7 @@ async function unclaimedOf(repoId: string, mine: ReturnType<SessionManager["list
   const specs = await Promise.resolve()
     .then(() => github().listSpecIssues(owner, name))
     .catch(() => []);
-  return unclaimedCards(specs, mine.flatMap((s) => [s.issueRef, s.specRef]), repoId);
+  return unclaimedCards(specs, claimRefs(mine), repoId);
 }
 
 const router = new Router()
