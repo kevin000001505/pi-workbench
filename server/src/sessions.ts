@@ -1379,8 +1379,12 @@ export class SessionManager extends EventEmitter {
     this.resolving.delete(id);
     const row = this.row(id);
     if (merging) await this.undoMerge(row);
-    else if (await git(row.worktree, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).then(() => true, () => false))
-      await git(row.worktree, ["merge", "--abort"], await this.gitEnv()).catch(() => {});
+    else if (await this.mergeHalfDone(row.worktree)) await git(row.worktree, ["merge", "--abort"], await this.gitEnv()).catch(() => {});
+  }
+
+  /** Whether the worktree holds a merge that is not committed yet (git's MERGE_HEAD is there). */
+  private mergeHalfDone(worktree: string) {
+    return git(worktree, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).then(() => true, () => false);
   }
 
   /**
@@ -1498,7 +1502,7 @@ export class SessionManager extends EventEmitter {
    */
   private async unfinishedMerge(row: SessionRow): Promise<string | null> {
     const sh = (args: string[]) => git(row.worktree, args).then(() => true, () => false);
-    if (await sh(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) return "the merge is not committed";
+    if (await this.mergeHalfDone(row.worktree)) return "the merge is not committed";
     if (!(await sh(["merge-base", "--is-ancestor", `origin/${row.base_branch}`, "HEAD"]))) return `HEAD does not contain origin/${row.base_branch}`;
     const conflicted: string[] = JSON.parse(row.merge_files ?? "[]");
     if (!conflicted.length) return null;
@@ -1517,7 +1521,7 @@ export class SessionManager extends EventEmitter {
   private async undoMerge(row: SessionRow) {
     const env = await this.gitEnv();
     const rev = (r: string) => git(row.worktree, ["rev-parse", "-q", "--verify", r]).then((x) => x.trim(), () => null);
-    if (await rev("MERGE_HEAD")) {
+    if (await this.mergeHalfDone(row.worktree)) {
       await git(row.worktree, ["merge", "--abort"], env).catch(() => {});
       return;
     }
