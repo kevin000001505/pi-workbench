@@ -5,7 +5,7 @@ import { SkillPicker, useSkills } from "../session/Composer.tsx";
 import { useStore } from "../store.tsx";
 import { lastBoardRepo } from "./Board.tsx";
 import type { AutoApproveMode, Repo, SessionSummary, Skill } from "../types.ts";
-import { Empty, PageHeader, Spinner, issueUrl, parseIssueRef } from "../ui.tsx";
+import { Empty, PageHeader, Spinner, issueUrl, repoIssue } from "../ui.tsx";
 
 export function NewSession({
   repoId,
@@ -23,7 +23,7 @@ export function NewSession({
 }) {
   const { toast, upsert } = useStore();
   const [repos, setRepos] = useState<Repo[] | null>(null);
-  const fromIssue = parseIssueRef(issueRef); // the origin issue's repo id + number, or null
+  const fromIssue = repoIssue(issueRef); // the origin issue's repo id + number, or null
   const [repo, setRepo] = useState(fromIssue?.repoId ?? repoId ?? "");
   const [base, setBase] = useState(prefillBase ?? "");
   const [title, setTitle] = useState(prefillTitle ?? "");
