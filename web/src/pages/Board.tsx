@@ -82,18 +82,35 @@ function Icon({ name }: { name: keyof typeof ICONS }) {
   );
 }
 
-function BoardCard({ card, activity, onDrag, onOpen }: { card: Card; activity: string; onDrag: (card: Card | null) => void; onOpen: () => void }) {
+function BoardCard({
+  card,
+  activity,
+  onDrag,
+  onOpen,
+  onMove,
+  busy,
+}: {
+  card: Card;
+  activity: string;
+  onDrag: (card: Card | null) => void;
+  onOpen: () => void;
+  onMove: (column: Column) => void;
+  busy: boolean;
+}) {
   const issue = unclaimedNumber(card.id);
   const unclaimed = issue !== null;
   // A plain unclaimed card sits in To do; a spec unclaimed card sits in Issues.
   const plain = isPlainUnclaimedCard(card);
   const prState = card.pr?.state ?? null;
+  // Every card in Issues is a spec card: an unclaimed spec issue, or a session paused in `ready`.
+  // Both get Solve all: the move of the card to Doing.
+  const solveAll = card.column === "issues";
   const line =
     card.attention ??
     (unclaimed
       ? plain
         ? `Issue #${issue} has no tickets yet: it needs grilling. Drag it when starting work on it is available.`
-        : `Spec issue #${issue}: drag it to Doing to solve its tickets, or to To do to rework it`
+        : `Spec issue #${issue}: Solve all starts its tickets; drag it to To do to rework it`
       : activity);
   return (
     // A click opens the card detail; a modified click still opens the session in a new tab.
@@ -126,6 +143,23 @@ function BoardCard({ card, activity, onDrag, onOpen }: { card: Card; activity: s
         )}
       </div>
       {line && <span className={`desc ${card.attention && !isResolvedNote(card.attention) ? "attention" : ""}`}>{line}</span>}
+      {solveAll && (
+        <span className="kz-card-actions">
+          <button
+            className="kz-btn"
+            disabled={busy}
+            title="Move the card to Doing: start or resume its ticket runs"
+            onClick={(e) => {
+              // The button does its move only: it stops the card's own click and its link to GitHub.
+              e.stopPropagation();
+              e.preventDefault();
+              onMove("doing");
+            }}
+          >
+            Solve all
+          </button>
+        </span>
+      )}
       {card.pr && (
         <span className="tags">
           <span className={`kz-tag ${prState ? `pr-${prState}` : ""}`} title={card.pr.url ?? undefined}>
@@ -147,6 +181,7 @@ export function Board({ repoId }: { repoId?: string }) {
   const [error, setError] = useState<string | null>(null);
   const [dragged, setDragged] = useState<Card | null>(null);
   const [over, setOver] = useState<Column | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
   const [refetch, setRefetch] = useState(0);
   const [openId, setOpenId] = useState<string | null>(null);
   const [doneHidden, setDoneHidden] = useState(0);
@@ -207,22 +242,29 @@ export function Board({ repoId }: { repoId?: string }) {
     };
   }, []);
 
-  // A drop is a command to the server. The card changes column only when the server accepts it;
-  // a refused move leaves it where it was (it snaps back) and shows why.
-  const drop = (column: Column) => {
-    const card = dragged;
-    setDragged(null);
-    setOver(null);
-    if (!card || card.column === column || !repo) return;
-    // Review → Done is Approve: it merges the PR, so it asks first.
-    if (card.column === "review" && column === "done" && !confirm(approveQuestion(card))) return;
+  // A move is a command to the server. The card changes column only when the server accepts it;
+  // a refused move leaves it where it was (it snaps back) and shows why. A drag and a card button
+  // move the same way, through the same routes.
+  const moveCard = (card: Card, column: Column) => {
+    if (card.column === column || !repo) return;
+    setBusyId(card.id);
     // An unclaimed card's move creates its session; the server answers with that session.
     const issue = unclaimedNumber(card.id);
     const url = issue !== null ? `/api/repos/${repo.id}/issues/${issue}/move` : `/api/sessions/${card.id}/move`;
     api.post(url, { column }).then(
       () => (setError(null), setRefetch((n) => n + 1)),
       (e) => setError(e.message),
-    );
+    ).finally(() => setBusyId(null));
+  };
+
+  const drop = (column: Column) => {
+    const card = dragged;
+    setDragged(null);
+    setOver(null);
+    if (!card) return;
+    // Review → Done is Approve: it merges the PR, so it asks first.
+    if (card.column === "review" && column === "done" && !confirm(approveQuestion(card))) return;
+    moveCard(card, column);
   };
 
   // A board of another repo starts again with the first page of Done.
@@ -360,7 +402,15 @@ export function Board({ repoId }: { repoId?: string }) {
               </h2>
               <div className="kz-cards">
                 {list.map((c) => (
-                  <BoardCard key={c.id} card={c} activity={sessions[c.id]?.activity ?? ""} onDrag={setDragged} onOpen={() => setOpenId(c.id)} />
+                  <BoardCard
+                    key={c.id}
+                    card={c}
+                    activity={sessions[c.id]?.activity ?? ""}
+                    onDrag={setDragged}
+                    onOpen={() => setOpenId(c.id)}
+                    onMove={(column) => moveCard(c, column)}
+                    busy={busyId === c.id}
+                  />
                 ))}
                 {col.id === "done" && doneHidden > 0 && (
                   <button className="kz-more" onClick={() => setDoneLimit((n) => n + DONE_PAGE)}>
