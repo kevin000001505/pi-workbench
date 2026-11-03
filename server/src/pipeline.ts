@@ -140,6 +140,26 @@ call record_tickets with every ticket: its number, title, full body (what to bui
 Then stop. Do not start implementing.`;
 }
 
+/**
+ * A plain issue is too big for one ticket: break it into tickets with to-tickets, publishing each
+ * as a sub-issue of the issue with its blocking edges, so it becomes a spec issue that waits in
+ * Issues for Solve all. The issue itself is not changed or closed.
+ */
+export function splitPrompt(issueUrl: string) {
+  return `/skill:to-tickets Split the issue (${issueUrl}) into tickets: it is too big for one ticket.
+
+[pi-workbench pipeline: split of a plain issue]
+Present the breakdown and ask the user to approve it with ask_user before publishing. After approval,
+publish every ticket as a sub-issue of this issue, with its blocking edges. Do not change or close the issue itself.
+Call record_tickets with every ticket: its number, title, full body (what to build and acceptance criteria), blockedBy (ticket numbers) and trackerRef (the sub-issue's number or URL).
+Then stop. Do not start implementing.`;
+}
+
+/** A plain issue becomes the card's only ticket: its title, body (or a fallback) and number as the tracker ref. */
+export function ticketFromIssue(spec: { number: number; title: string; body: string | null }): TicketInput[] {
+  return [{ number: 1, title: spec.title.trim(), body: (spec.body ?? "").trim() || `No description for #${spec.number}`, blockedBy: [], trackerRef: String(spec.number) }];
+}
+
 function specSection(spec: string | null, specRef: string | null) {
   if (!spec) return specRef ? `Read the spec first: ${specRef}` : "(no spec recorded)";
   if (spec.length > SPEC_INLINE_LIMIT) return `The spec is long; read it at ${specRef ?? "the tracker"} before starting.`;

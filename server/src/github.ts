@@ -130,7 +130,9 @@ export class GitHub {
    * A spec issue and its open sub-issue tickets. The workbench's one GraphQL call: GitHub's REST
    * API gives no sub-issue list and no dependency edges, only counts. Only open sub-issues come
    * back (closed tickets are already solved), and a ticket's blockedBy keeps only blockers that
-   * are open sub-issues of this spec, so a stale edge cannot stall the frontier. Cap: 100.
+   * are open sub-issues of this spec, so a stale edge cannot stall the frontier. `hasParent` is
+   * true when the issue is itself a sub-issue of another issue (a ticket issue); the move route
+   * refuses such numbers. Cap: 100.
    */
   listTicketSubIssues(owner: string, name: string, number: number) {
     type GqIssue = {
@@ -138,13 +140,14 @@ export class GitHub {
       title: string;
       body: string | null;
       url: string;
+      parent: { number: number } | null;
       subIssues: {
         nodes: { number: number; title: string; body: string | null; state: string; blockedBy: { nodes: { number: number; state: string }[] } }[];
       };
     };
     const q = `query($owner: String!, $name: String!, $number: Int!) {
       repository(owner: $owner, name: $name) { issue(number: $number) {
-        number title body url
+        number title body url parent { number }
         subIssues(first: 100) { nodes { number title body state blockedBy(first: 100) { nodes { number state } } } }
       } }
     }`;
@@ -154,7 +157,7 @@ export class GitHub {
       const open = issue.subIssues.nodes.filter((n) => n.state === "OPEN");
       const openNumbers = new Set(open.map((n) => n.number));
       return {
-        spec: { number: issue.number, title: issue.title, body: issue.body, htmlUrl: issue.url },
+        spec: { number: issue.number, title: issue.title, body: issue.body, htmlUrl: issue.url, hasParent: issue.parent !== null },
         subIssues: open.map((n) => ({
           number: n.number,
           title: n.title,

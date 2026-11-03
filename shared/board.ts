@@ -99,8 +99,8 @@ export function limitDone(cards: Card[], limit: number): { cards: Card[]; doneHi
 }
 
 /**
- * The cards of these sessions in column order, then the unclaimed cards (which sit in Issues or
- * To do); inside a column, in the order given, except Done, which lists the newest first by when
+ * The cards of these sessions in column order, then the unclaimed cards (which sit in Issues);
+ * inside a column, in the order given, except Done, which lists the newest first by when
  * each card got there.
  */
 export function boardCards(sessions: CardSource[], unclaimed: Card[] = []): Card[] {
@@ -126,12 +126,12 @@ export function unclaimedNumber(id: string): number | null {
 }
 
 /**
- * A plain unclaimed card: an unclaimed card in To do, for an open issue without tickets. A spec
- * unclaimed card sits in Issues and gets no card detail.
+ * A plain unclaimed card: an unclaimed card for an open issue without tickets (`tickets.total === 0`);
+ * a spec unclaimed card has open ticket sub-issues. Both sit in Issues; a session card is never plain.
  */
-export const isPlainUnclaimedCard = (card: { id: string; column: Column }) => {
+export const isPlainUnclaimedCard = (card: { id: string; tickets: { total: number } }) => {
   const n = unclaimedNumber(card.id);
-  return n !== null && card.column === "todo";
+  return n !== null && card.tickets.total === 0;
 };
 
 /**
@@ -178,8 +178,8 @@ export function claimRefs(sessions: { mode: string; phase: string; issueRef: str
 /**
  * The unclaimed cards: the open issues that no claim (see claimRefs) names, minus sub-issues of
  * another issue (a ticket issue stays inside its spec's card). A spec issue (it has open tickets)
- * shows in Issues; a plain issue shows in To do, because it still needs grilling. A move of a spec
- * card to Doing or To do gives it its session; a plain card cannot move yet (409 on every move).
+ * and a plain issue (none) both show in Issues. A move of either card to Doing or To do gives it
+ * its session; a stale move of a sub-issue's number is refused (409), as its spec's card owns it.
  */
 export function unclaimedCards(issues: BoardIssue[], claims: (string | null)[], repoId: string): Card[] {
   const claimed = new Set(claims.map((r) => issueNumberOf(r, repoId)));
@@ -188,7 +188,7 @@ export function unclaimedCards(issues: BoardIssue[], claims: (string | null)[], 
     .map((i) => ({
       id: unclaimedId(i.number),
       title: i.title,
-      column: i.openTickets > 0 ? ("issues" as const) : ("todo" as const),
+      column: "issues" as const,
       tickets: { done: 0, total: i.openTickets },
       attention: null,
       pr: null,

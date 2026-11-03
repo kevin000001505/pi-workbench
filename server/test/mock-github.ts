@@ -200,15 +200,22 @@ export function startMockGitHub(root: string, login = "kevin") {
         return send(200, { data: { repository: { issues: { nodes } } } });
       }
       const seed = subIssueSeeds[`${variables.owner}/${variables.name}#${variables.number}`];
+      // A sub-issue of a seed: its own read has a parent, as GitHub gives, and no sub-issues of its own.
+      const subOfSeed = !seed
+        ? Object.entries(subIssueSeeds)
+            .filter(([k]) => k.startsWith(`${variables.owner}/${variables.name}#`))
+            .find(([, s]) => s.subs.some((x: any) => x.number === variables.number))?.[1]
+        : undefined;
+      const sub = subOfSeed?.subs.find((x: any) => x.number === variables.number);
       const all = repoIssues(variables.owner, variables.name) ?? [];
-      if (!seed) {
+      if (!seed && !sub) {
         // A plain issue (no ticket sub-issues) still resolves: its sub-issue list is empty.
         const feed = all.find((i) => i.number === variables.number && !i.pull_request);
         if (feed) {
           return send(200, {
             data: {
               repository: {
-                issue: { number: feed.number, title: feed.title, body: feed.body, url: feed.html_url, subIssues: { nodes: [] } },
+                issue: { number: feed.number, title: feed.title, body: feed.body, url: feed.html_url, parent: feed.parent_number ? { number: feed.parent_number } : null, subIssues: { nodes: [] } },
               },
             },
           });
@@ -218,16 +225,20 @@ export function startMockGitHub(root: string, login = "kevin") {
           errors: [{ type: "NOT_FOUND", message: `Could not resolve to an Issue with the number of ${variables.number}.` }],
         });
       }
+      const isSub = !!sub;
       return send(200, {
         data: {
           repository: {
             issue: {
-              number: seed.spec.number,
-              title: seed.spec.title,
-              body: seed.spec.body,
-              url: seed.spec.url ?? seed.spec.html_url ?? `https://github.com/${variables.owner}/${variables.name}/issues/${seed.spec.number}`,
+              number: isSub ? variables.number : seed.spec.number,
+              title: isSub ? sub.title : seed.spec.title,
+              body: isSub ? sub.body : seed.spec.body,
+              url: isSub
+                ? `https://github.com/${variables.owner}/${variables.name}/issues/${variables.number}`
+                : seed.spec.url ?? seed.spec.html_url ?? `https://github.com/${variables.owner}/${variables.name}/issues/${seed.spec.number}`,
+              parent: isSub ? { number: subOfSeed.spec.number } : seed.spec.parent_number ? { number: seed.spec.parent_number } : null,
               subIssues: {
-                nodes: seed.subs.map((s: any) => ({
+                nodes: (isSub ? [] : seed.subs).map((s: any) => ({
                   number: s.number,
                   title: s.title,
                   body: s.body,

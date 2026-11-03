@@ -20,10 +20,6 @@ _Avoid_: sub-issue
 The move of a card from Issues to Doing (for an unclaimed card, it creates the session): one pipeline session reads every open ticket sub-issue with its blocking edges from GitHub, skips grill/spec/tickets, implements the tickets one fresh run at a time in dependency order, and opens a PR whose merge closes the spec issue and every ticket issue.
 _Avoid_: solve all issues (that is the Start session flow, one session per issue)
 
-**Solve**:
-To work an issue through a session (grill → spec → tickets → implement → review) and open a PR whose merge closes the issue.
-_Avoid_: fix (a fix is one possible outcome; solving covers the whole flow)
-
 **SSH host**:
 A remote machine registered in the workbench's SSH config, addressed by an alias you can say ("Media"); the agent reaches it with `ssh <alias>` and works code on it from there.
 _Avoid_: server (that's the workbench's own server), VM (the transport is plain ssh; the target need not be a VM), machine (too generic; could mean the box the workbench runs on)
@@ -83,19 +79,27 @@ The kanban view of the workbench's features, with one column per stage of the pi
 _Avoid_: kanban (the style, not the thing), dashboard
 
 **Card**:
-One feature on the board: a plain issue that still needs grilling, or a spec issue with its open tickets, and the one session and one PR that deliver it.
+One feature on the board: a plain issue (solved or split), or a spec issue with its open tickets, and the one session and one PR that deliver it.
 _Avoid_: task (kanzo's word), ticket (a ticket is one part of a card)
 
 **To do**:
-The column for a feature that is still being grilled, specced, or cut into tickets, and for a plain issue card that no session claims yet.
+The column for a feature that is still being grilled, specced, or cut into tickets, and for a card whose breakdown waits on the user's approval (a split card).
 _Avoid_: backlog, draft
 
 **Issues** (column):
-The column for a feature whose spec issue and ticket issues are on GitHub and that waits for Solve all.
+The column for every unclaimed card — a plain issue and a spec issue with its open ticket sub-issues alike — and for a card that waits for Solve all.
 _Avoid_: ready (as a column name)
 
 **Unclaimed card**:
-A card for an open issue that no session claims yet. A plain issue (no open sub-issues, not itself a sub-issue) sits in To do and cannot move yet. A spec issue with open ticket sub-issues sits in Issues: a move to Doing starts Solve all; a move to To do grills on that spec issue to rework it.
+A card for an open issue that no session claims yet. A plain issue (no open sub-issues, not itself a sub-issue) and a spec issue with open ticket sub-issues both sit in Issues. A plain card's move to Doing is Solve; its move to To do is Split. A spec card's move to Doing starts Solve all; a move to To do grills on that spec issue to rework it.
+
+**Solve**:
+To work a plain issue through a session that skips grill, spec and tickets: the issue becomes the card's only ticket, and the PR's merge closes the issue.
+_Avoid_: solve all (that is for a spec card's tickets), fix (a fix is one possible outcome; solving covers the whole flow)
+
+**Split**:
+Breaking a plain issue into ticket sub-issues with `to-tickets`, so it becomes a spec issue that waits for Solve all.
+_Avoid_: rework (rework re-grills an existing spec; Split plans a plain issue for the first time)
 
 **Doing**:
 The column for a feature whose tickets are being implemented.
@@ -126,7 +130,8 @@ _Avoid_: stop (a stop pauses the card; the card can resume), delete, cancel
 - **Decisions** are never auto-approved
 - The **Reviewer's** settings drive the **Reviewer** as well as **Rescue runs** and **Retro runs**; an empty Reviewer model turns all three off
 - A **Card** moves through the columns as its session's phase changes; the user's drag outranks the pipeline
-- Dragging a **Card** from **Issues** to **Doing** starts **Solve all**; dragging it from **Review** to **Done** is **Approve**; any other forward drag is refused
+- Dragging a **Card** from **Issues** to **Doing** starts **Solve** (a plain issue) or **Solve all** (a spec issue or a ready session); dragging it from **Review** to **Done** is **Approve**; any other forward drag is refused
+- Dragging a plain **Card** in **Issues** to **To do** is **Split**: the issue is cut into ticket sub-issues before any work starts
 - Dragging a **Card** back to **Issues** stops its run; dragging it to **Doing** again resumes the same session, and finished tickets stay finished
 - Dragging a **Card** back to **To do** stops its run and opens the grill again, so the spec and tickets can change
 - A merge conflict at **Approve** gets resolved on the branch, and the **Card** stays in **Review** for a second **Approve**

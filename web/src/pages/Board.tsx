@@ -99,17 +99,17 @@ function BoardCard({
 }) {
   const issue = unclaimedNumber(card.id);
   const unclaimed = issue !== null;
-  // A plain unclaimed card sits in To do; a spec unclaimed card sits in Issues.
+  // A plain unclaimed card (no open ticket sub-issues) and a spec unclaimed card both sit in Issues.
   const plain = isPlainUnclaimedCard(card);
   const prState = card.pr?.state ?? null;
-  // Every card in Issues is a spec card: an unclaimed spec issue, or a session paused in `ready`.
-  // Both get Solve all: the move of the card to Doing.
-  const solveAll = card.column === "issues";
+  // Every Issues card that is not a plain unclaimed card gets Solve all: an unclaimed spec issue,
+  // or a session paused in `ready`.
+  const solveAll = card.column === "issues" && !plain;
   const line =
     card.attention ??
     (unclaimed
       ? plain
-        ? `Issue #${issue} has no tickets yet: it needs grilling. Drag it when starting work on it is available.`
+        ? `Issue #${issue}: Solve makes it the card's only ticket; Split breaks it into tickets when it is too big.`
         : `Spec issue #${issue}: Solve all starts its tickets; drag it to To do to rework it`
       : activity);
   return (
@@ -143,21 +143,51 @@ function BoardCard({
         )}
       </div>
       {line && <span className={`desc ${card.attention && !isResolvedNote(card.attention) ? "attention" : ""}`}>{line}</span>}
-      {solveAll && (
+      {(solveAll || plain) && (
         <span className="kz-card-actions">
-          <button
-            className="kz-btn"
-            disabled={busy}
-            title="Move the card to Doing: start or resume its ticket runs"
-            onClick={(e) => {
-              // The button does its move only: it stops the card's own click and its link to GitHub.
-              e.stopPropagation();
-              e.preventDefault();
-              onMove("doing");
-            }}
-          >
-            Solve all
-          </button>
+          {solveAll && (
+            <button
+              className="kz-btn"
+              disabled={busy}
+              title="Move the card to Doing: start or resume its ticket runs"
+              onClick={(e) => {
+                // The button does its move only: it stops the card's own click and its link to GitHub.
+                e.stopPropagation();
+                e.preventDefault();
+                onMove("doing");
+              }}
+            >
+              Solve all
+            </button>
+          )}
+          {plain && (
+            <button
+              className="kz-btn"
+              disabled={busy}
+              title="Make the issue the card's only ticket and start work: skips grill, spec and tickets"
+              onClick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                onMove("doing");
+              }}
+            >
+              Solve
+            </button>
+          )}
+          {plain && (
+            <button
+              className="kz-btn"
+              disabled={busy}
+              title="Break the issue into ticket sub-issues with to-tickets, then approve the breakdown"
+              onClick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                onMove("todo");
+              }}
+            >
+              Split
+            </button>
+          )}
         </span>
       )}
       {card.pr && (
@@ -441,7 +471,7 @@ export function Board({ repoId }: { repoId?: string }) {
             setSearching(false);
             const picked = (cards ?? []).find((c) => c.id === id);
             // A spec unclaimed card opens its issue on GitHub; a plain one opens its card detail.
-            if (picked && unclaimedNumber(picked.id) !== null && picked.column === "issues") window.open(picked.specRef ?? undefined, "_blank", "noopener");
+            if (picked && unclaimedNumber(picked.id) !== null && !isPlainUnclaimedCard(picked)) window.open(picked.specRef ?? undefined, "_blank", "noopener");
             else setOpenId(id);
           }}
         />
