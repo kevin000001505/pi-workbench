@@ -1,4 +1,4 @@
-import { parseIssueRef, type SpecIssue } from "../../shared/board.ts";
+import { parseIssueRef, type BoardIssue } from "../../shared/board.ts";
 import { config } from "./config.ts";
 
 export type GhUser = { login: string; id: number; name: string | null };
@@ -166,23 +166,33 @@ export class GitHub {
   }
 
   /**
-   * The repo's spec issues for the board's unclaimed cards: open issues with open sub-issues, from
-   * one GraphQL call over the open issues and their sub-issue counts. Cap: the 100 most recently
-   * updated open issues.
+   * The repo's open issues for the board's unclaimed cards, from one GraphQL call: each with its
+   * open sub-issue count and its parent, if it is a sub-issue of another issue. Cap: the 100 most
+   * recently updated open issues.
    */
-  listSpecIssues(owner: string, name: string): Promise<SpecIssue[]> {
-    type GqIssue = { number: number; title: string; url: string; subIssuesSummary: { total: number; completed: number } | null };
+  listBoardIssues(owner: string, name: string): Promise<BoardIssue[]> {
+    type GqIssue = {
+      number: number;
+      title: string;
+      url: string;
+      parent: { number: number } | null;
+      subIssuesSummary: { total: number; completed: number } | null;
+    };
     const q = `query($owner: String!, $name: String!) {
       repository(owner: $owner, name: $name) {
         issues(first: 100, states: OPEN, orderBy: { field: UPDATED_AT, direction: DESC }) {
-          nodes { number title url subIssuesSummary { total completed } }
+          nodes { number title url parent { number } subIssuesSummary { total completed } }
         }
       }
     }`;
     return this.gq<{ repository: { issues: { nodes: GqIssue[] } } | null }>(q, { owner, name }).then((d) =>
-      (d.repository?.issues.nodes ?? [])
-        .map((i) => ({ number: i.number, title: i.title, url: i.url, openTickets: (i.subIssuesSummary?.total ?? 0) - (i.subIssuesSummary?.completed ?? 0) }))
-        .filter((i) => i.openTickets > 0),
+      (d.repository?.issues.nodes ?? []).map((i) => ({
+        number: i.number,
+        title: i.title,
+        url: i.url,
+        openTickets: (i.subIssuesSummary?.total ?? 0) - (i.subIssuesSummary?.completed ?? 0),
+        hasParent: i.parent !== null,
+      })),
     );
   }
 

@@ -83,11 +83,11 @@ The kanban view of the workbench's features, with one column per stage of the pi
 _Avoid_: kanban (the style, not the thing), dashboard
 
 **Card**:
-One feature on the board: its spec issue, its tickets, and the one session and one PR that deliver it.
+One feature on the board: a plain issue that still needs grilling, or a spec issue with its open tickets, and the one session and one PR that deliver it.
 _Avoid_: task (kanzo's word), ticket (a ticket is one part of a card)
 
 **To do**:
-The column for a feature that is still being grilled, specced, or cut into tickets.
+The column for a feature that is still being grilled, specced, or cut into tickets, and for a plain issue card that no session claims yet.
 _Avoid_: backlog, draft
 
 **Issues** (column):
@@ -95,7 +95,7 @@ The column for a feature whose spec issue and ticket issues are on GitHub and th
 _Avoid_: ready (as a column name)
 
 **Unclaimed card**:
-A card in Issues for a spec issue on GitHub that has open ticket sub-issues and that no session claims yet. A move to Doing starts Solve all; a move to To do grills on that spec issue to rework it.
+A card for an open issue that no session claims yet. A plain issue (no open sub-issues, not itself a sub-issue) sits in To do and cannot move yet. A spec issue with open ticket sub-issues sits in Issues: a move to Doing starts Solve all; a move to To do grills on that spec issue to rework it.
 
 **Doing**:
 The column for a feature whose tickets are being implemented.

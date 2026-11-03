@@ -97,10 +97,10 @@ async function repoView(r: ReturnType<typeof listRepos>[number]) {
 /** The repo's unclaimed cards; none when GitHub cannot be read (no token, offline). */
 async function unclaimedOf(repoId: string, mine: ReturnType<SessionManager["list"]>) {
   const [owner, name] = repoId.split("/");
-  const specs = await Promise.resolve()
-    .then(() => github().listSpecIssues(owner, name))
+  const issues = await Promise.resolve()
+    .then(() => github().listBoardIssues(owner, name))
     .catch(() => []);
-  return unclaimedCards(specs, claimRefs(mine), repoId);
+  return unclaimedCards(issues, claimRefs(mine), repoId);
 }
 
 const router = new Router()
@@ -198,6 +198,9 @@ const router = new Router()
     const number = Number(params.number);
     const startFrom = body.column === "doing" ? "tickets" : body.column === "todo" ? "spec" : null;
     if (!startFrom) throw new HttpError(409, "An unclaimed card can move only to Doing or To do.");
+    // A plain issue card (no open ticket sub-issues) cannot start work yet; every move is refused.
+    const seed = await github().listTicketSubIssues(repo.owner, repo.name, number);
+    if (seed.subIssues.length === 0) throw new HttpError(409, "A plain issue card cannot move yet: it has no open ticket sub-issues.");
     // create() refuses a second session for a spec issue that a card works on already (409).
     return sessions.create({ repoId: repo.id, title: "", prompt: "", mode: "pipeline", issueRef: `${repo.id}#${number}`, startFrom });
   })

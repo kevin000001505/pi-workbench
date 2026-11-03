@@ -169,7 +169,7 @@ export function startMockGitHub(root: string, login = "kevin") {
         return send(200, { errors: [{ message: "Field 'html_url' doesn't exist on type 'Issue'" }] });
       }
       const { variables } = body;
-      // The board's repo-wide query: the open issues with their sub-issue counts.
+      // The board's repo-wide query: the open issues with their sub-issue counts and parents.
       if (variables.number === undefined) {
         const all = repoIssues(variables.owner, variables.name);
         if (!all) return send(200, { data: { repository: null }, errors: [{ type: "NOT_FOUND", message: "Could not resolve to a Repository" }] });
@@ -178,18 +178,41 @@ export function startMockGitHub(root: string, login = "kevin") {
           .map(([, seed]) => seed)
           .filter((seed) => (seed.spec.state ?? "OPEN") === "OPEN");
         const nodes = [
-          ...all.filter((i) => !i.pull_request && i.state === "open").map((i) => ({ number: i.number, title: i.title, url: i.html_url, subIssuesSummary: { total: 0, completed: 0 } })),
+          ...all.filter((i) => !i.pull_request && i.state === "open").map((i) => ({ number: i.number, title: i.title, url: i.html_url, parent: i.parent_number ? { number: i.parent_number } : null, subIssuesSummary: { total: 0, completed: 0 } })),
           ...specs.map((seed) => ({
             number: seed.spec.number,
             title: seed.spec.title,
             url: seed.spec.url ?? `https://github.com/${variables.owner}/${variables.name}/issues/${seed.spec.number}`,
+            parent: seed.spec.parent_number ? { number: seed.spec.parent_number } : null,
             subIssuesSummary: { total: seed.subs.length, completed: seed.subs.filter((x: any) => (x.state ?? "OPEN") !== "OPEN").length },
           })),
+          // Open ticket sub-issues sit in the repo's issue list too, with their spec as parent.
+          ...specs.flatMap((seed) =>
+            seed.subs.filter((s: any) => (s.state ?? "OPEN") === "OPEN").map((s: any) => ({
+              number: s.number,
+              title: s.title,
+              url: `https://github.com/${variables.owner}/${variables.name}/issues/${s.number}`,
+              parent: { number: seed.spec.number },
+              subIssuesSummary: { total: 0, completed: 0 },
+            })),
+          ),
         ];
         return send(200, { data: { repository: { issues: { nodes } } } });
       }
       const seed = subIssueSeeds[`${variables.owner}/${variables.name}#${variables.number}`];
+      const all = repoIssues(variables.owner, variables.name) ?? [];
       if (!seed) {
+        // A plain issue (no ticket sub-issues) still resolves: its sub-issue list is empty.
+        const feed = all.find((i) => i.number === variables.number && !i.pull_request);
+        if (feed) {
+          return send(200, {
+            data: {
+              repository: {
+                issue: { number: feed.number, title: feed.title, body: feed.body, url: feed.html_url, subIssues: { nodes: [] } },
+              },
+            },
+          });
+        }
         return send(200, {
           data: { repository: { issue: null } },
           errors: [{ type: "NOT_FOUND", message: `Could not resolve to an Issue with the number of ${variables.number}.` }],

@@ -312,6 +312,24 @@ test("issue refs: parseIssueRef reads every form; a card id maps back to its spe
   assert.equal(unclaimedNumber("issue:x"), null);
 });
 
+test("unclaimed cards: a plain open issue sits in To do, a ticketed spec in Issues, a sub-issue and a claimed issue are no cards", async () => {
+  const { unclaimedCards, claimRefs, boardCards } = await import("../../shared/board.ts");
+  const issues = [
+    { number: 1, title: "A plain issue", url: "https://github.com/me/app/issues/1", openTickets: 0, hasParent: false },
+    { number: 5, title: "A spec", url: "https://github.com/me/app/issues/5", openTickets: 2, hasParent: false },
+    { number: 7, title: "A ticket sub-issue", url: "https://github.com/me/app/issues/7", openTickets: 1, hasParent: true },
+    { number: 8, title: "Claimed by a card", url: "https://github.com/me/app/issues/8", openTickets: 3, hasParent: false },
+  ];
+  const sessions = [{ mode: "pipeline", phase: "ready", issueRef: "me/app#8", specRef: null }];
+  const cards = unclaimedCards(issues, claimRefs(sessions), "me/app");
+  assert.deepEqual(cards, [
+    { id: "issue:1", title: "A plain issue", column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/me/app/issues/1" },
+    { id: "issue:5", title: "A spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, pr: null, specRef: "https://github.com/me/app/issues/5" },
+  ]);
+  // On the board, the plain card sits in To do, ahead of the spec's Issues card.
+  assert.deepEqual(boardCards([], cards).map((c) => c.id), ["issue:1", "issue:5"]);
+});
+
 test("ref labels: an issue ref that names a repo keeps the repo's name, one that does not is #n, a file ref is its file name", async () => {
   const { refLabel } = await import("../../shared/board.ts");
   assert.equal(refLabel("me/app#12"), "app#12");

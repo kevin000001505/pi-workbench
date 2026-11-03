@@ -104,7 +104,12 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
   gh.createBare("kevin", "demo");
   assert.equal((await api("POST", "/api/repos", { id: "kevin/demo" })).status, 200);
 
-  assert.deepEqual(await board(), []);
+  // A fresh board shows the repo's plain open issues in To do; no sessions yet.
+  assert.deepEqual(await board(), [
+    { id: "issue:1", title: "Add dark mode", column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/1" },
+    { id: "issue:2", title: "Fix login Crash", column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/2" },
+    { id: "issue:3", title: "Docs: setup guide", column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/3" },
+  ]);
 
   // A feature runs grill → spec → tickets, then waits in Issues.
   const a = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Greeting", prompt: "add a greeting" })).json;
@@ -144,7 +149,8 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
   // A direct session is no card, even while it sets up.
   const d = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Quick", prompt: "hello there", mode: "direct" })).json;
   assert.equal(d.phase, "setup");
-  const cards = await board();
+  // The session cards, beside the plain issue cards, in column order.
+  const cards = (await board()).filter((c) => !c.id.startsWith("issue:"));
   assert.deepEqual(
     cards.map((c) => [c.title, c.column]),
     [
@@ -153,10 +159,14 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
     ],
   );
 
-  // Each repo has its own board.
+  // Each repo has its own board; its plain issues show too.
   gh.createBare("kevin", "other");
   assert.equal((await api("POST", "/api/repos", { id: "kevin/other" })).status, 200);
-  assert.deepEqual(await board("kevin/other"), []);
+  assert.deepEqual((await board("kevin/other")).map((c) => [c.title, c.column]), [
+    ["Add dark mode", "todo"],
+    ["Fix login Crash", "todo"],
+    ["Docs: setup guide", "todo"],
+  ]);
   // An untracked repo has no board.
   assert.equal((await api("GET", "/api/board?repo=kevin/nope")).status, 404);
 });
@@ -192,8 +202,9 @@ test("a card started from a spec's ticket issues skips Issues: Doing, then QA, t
   // The card detail reads the review's note from the session.
   assert.equal((await summary(s.id)).reviewNote, "Fixed one naming issue");
 
-  // The newest card still sorts by column, after the older ones in To do and Issues.
-  assert.deepEqual((await board()).map((c) => c.column), ["todo", "issues", "review"]);
+  // The newest session card still sorts by column, after the older ones in To do and Issues.
+  const sessionCards = (await board()).filter((c) => !c.id.startsWith("issue:"));
+  assert.deepEqual(sessionCards.map((c) => c.column), ["todo", "issues", "review"]);
 
   // The badge follows the PR on GitHub: every check passed, a check failed, then a merge conflict.
   gh.checkRuns.splice(1);
@@ -230,15 +241,19 @@ test("Done lists merged cards newest first, and a done limit hides the older one
   assert.equal((await api("POST", `/api/sessions/${ids[0]}/prompt`, { message: "one more thing" })).status, 200);
   assert.ok((await summary(ids[0])).updatedAt > touched, "the older card's session is now the latest updated");
   const all = await api("GET", "/api/board?repo=kevin/history");
-  assert.deepEqual(all.json.cards.map((c: any) => [c.title, c.column]), [["Third", "done"], ["Second", "done"], ["First", "done"]]);
+  const sessionTitles = (cards: any[]) => cards.filter((c) => !c.id.startsWith("issue:"));
+  assert.deepEqual(
+    sessionTitles(all.json.cards).map((c: any) => [c.title, c.column]),
+    [["Third", "done"], ["Second", "done"], ["First", "done"]],
+  );
   assert.equal(all.json.doneHidden, 0);
 
   const two = await api("GET", "/api/board?repo=kevin/history&done=2");
   assert.equal(two.status, 200);
-  assert.deepEqual(two.json.cards.map((c: any) => c.title), ["Third", "Second"]);
+  assert.deepEqual(sessionTitles(two.json.cards).map((c: any) => c.title), ["Third", "Second"]);
   assert.equal(two.json.doneHidden, 1);
   // "Show more" raises the limit.
-  assert.deepEqual((await api("GET", "/api/board?repo=kevin/history&done=3")).json.cards.length, 3);
+  assert.equal(sessionTitles((await api("GET", "/api/board?repo=kevin/history&done=3")).json.cards).length, 3);
   assert.equal((await api("GET", "/api/board?repo=kevin/history&done=nope")).status, 400);
 });
 
@@ -528,11 +543,17 @@ test("an unclaimed spec issue shows in Issues; its move to Doing solves its tick
   // A spec whose tickets are all closed is no card.
   gh.seedSubIssues("kevin", "demo", { number: 70, title: "All solved", body: "Done." }, [{ number: 71, title: "Solved", body: "x", state: "CLOSED" }]);
   const unclaimed = (await board()).filter((c) => c.id.startsWith("issue:"));
-  // The specs a session already claims (#7, #20, #30, #40), and plain issues, are left out.
+  // The specs a session already claims (#7, #20, #30, #40, #70) are left out; the plain open issues
+  // (#1-#3) show in To do; the ticketed specs show in Issues.
   assert.deepEqual(unclaimed, [
+    { id: "issue:1", title: "Add dark mode", column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/1" },
+    { id: "issue:2", title: "Fix login Crash", column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/2" },
+    { id: "issue:3", title: "Docs: setup guide", column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/3" },
     { id: "issue:50", title: "Old spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/50" },
     { id: "issue:60", title: "Rework me", column: "issues", tickets: { done: 0, total: 1 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/60" },
   ]);
+  // The ticket sub-issues (#51, #52) are never cards of their own.
+  assert.ok(!unclaimed.some((c) => c.id === "issue:51" || c.id === "issue:52"));
   const move = (number: number, column: string, headers: Record<string, string> = {}) =>
     fetch(`${base}/api/repos/kevin/demo/issues/${number}/move`, {
       method: "POST",
@@ -594,12 +615,58 @@ test("an unclaimed spec issue shows in Issues; its move to Doing solves its tick
   for (const s of (await api("GET", "/api/sessions")).json) await api("POST", `/api/sessions/${s.id}/stop`, {});
 });
 
+test("a plain open issue is a card in To do: a sub-issue is no card, a claimed one too, and every move of it is refused", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "plain");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/plain" })).status, 200);
+  // The mock seeds this repo's plain open issues #1-#3; a ticketed spec sits on top of them.
+  gh.seedSubIssues("kevin", "plain", { number: 4, title: "Plain spec", body: "## Solution\np.txt says P." }, [{ number: 5, title: "Write p.txt", body: "Create p.txt." }]);
+  const boardOf = async (repo: string) => {
+    const r = await api("GET", `/api/board?repo=${repo}`);
+    assert.equal(r.status, 200);
+    return r.json.cards as any[];
+  };
+  const move = (number: number, column: string) =>
+    fetch(`${base}/api/repos/kevin/plain/issues/${number}/move`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ column }),
+    }).then(async (r) => ({ status: r.status, json: (await r.json().catch(() => null)) as any }));
+
+  // A plain open issue shows in To do; a ticketed spec in Issues; no card for the ticket sub-issue.
+  const unclaimed = (await boardOf("kevin/plain")).filter((c) => c.id.startsWith("issue:"));
+  assert.deepEqual(unclaimed, [
+    { id: "issue:1", title: "Add dark mode", column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/plain/issues/1" },
+    { id: "issue:2", title: "Fix login Crash", column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/plain/issues/2" },
+    { id: "issue:3", title: "Docs: setup guide", column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/plain/issues/3" },
+    { id: "issue:4", title: "Plain spec", column: "issues", tickets: { done: 0, total: 1 }, attention: null, pr: null, specRef: "https://github.com/kevin/plain/issues/4" },
+  ]);
+  assert.ok(!unclaimed.some((c) => c.id === "issue:5"), "a ticket sub-issue is never a card of its own");
+
+  // Every move of a plain issue card is refused, and the card stays.
+  for (const column of ["todo", "doing", "qa", "review"]) assert.equal((await move(1, column)).status, 409);
+  assert.ok((await boardOf("kevin/plain")).some((c) => c.id === "issue:1"));
+
+  // A session that claims a plain issue takes its card off the board.
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/plain", title: "Claim 2", prompt: "work on 2", issueRef: "kevin/plain#2" })).json;
+  assert.ok(s.id);
+  assert.ok(!(await boardOf("kevin/plain")).filter((c) => c.id.startsWith("issue:")).some((c) => c.id === "issue:2"));
+
+  // A ticketed spec card still moves to Doing (Solve all) and to To do (rework).
+  assert.equal((await move(4, "doing")).status, 200);
+  assert.equal((await move(4, "todo")).status, 409, "a claimed spec card is refused");
+
+  await api("POST", `/api/sessions/${s.id}/stop`, {});
+  const solver = (await api("GET", "/api/sessions")).json.find((x: any) => x.issueRef === "kevin/plain#4");
+  assert.equal((await api("POST", `/api/sessions/${solver.id}/stop`, {})).status, 200);
+});
+
 test("a card's spec issue, in any ref form to-spec gives, is claimed: no unclaimed card for it", { skip: !hasPi && "pi CLI not found" }, async () => {
   for (const n of [80, 81, 82, 83, 84]) {
     gh.seedSubIssues("kevin", "demo", { number: n, title: `Spec ${n}`, body: "## Solution\nSomething." }, [{ number: n + 100, title: "Do it", body: "Do it." }]);
   }
   const unclaimed = async () => (await board()).filter((c) => c.id.startsWith("issue:")).map((c) => c.id);
-  assert.deepEqual(await unclaimed(), ["issue:80", "issue:81", "issue:82", "issue:83", "issue:84"]);
+  // The plain open issues of this repo (#1-#3) show too.
+  assert.deepEqual(await unclaimed(), ["issue:1", "issue:2", "issue:3", "issue:80", "issue:81", "issue:82", "issue:83", "issue:84"]);
   // A session made from an issue claims it by its issue ref.
   const fromIssue = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "From 84", prompt: "work on 84", issueRef: "kevin/demo#84" })).json;
   assert.ok(fromIssue.id);
@@ -615,8 +682,8 @@ test("a card's spec issue, in any ref form to-spec gives, is claimed: no unclaim
     await waitFor(async () => (await summary(s.id)).specRef === ref);
     assert.equal((await api("POST", `/api/sessions/${s.id}/stop`, {})).status, 200);
   }
-  // #83 is in another repo's ref, so this repo's #83 stays unclaimed.
-  assert.deepEqual(await unclaimed(), ["issue:83"]);
+  // #83 is in another repo's ref, so this repo's #83 stays unclaimed; the plain issues show too.
+  assert.deepEqual(await unclaimed(), ["issue:1", "issue:2", "issue:3", "issue:83"]);
 });
 
 test("a Done card and a direct session do not claim their issue: the unclaimed card shows, and a new pipeline session may take it", { skip: !hasPi && "pi CLI not found" }, async () => {

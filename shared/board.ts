@@ -1,7 +1,8 @@
 /**
- * The Board: one Card per pipeline session, in the columns To do → Issues → Doing → QA → Review → Done.
- * The column is computed from the session, never stored. The server (GET /api/board) and the web
- * board both use this module, like shared/transcript.ts. Keep it free of server and browser imports.
+ * The Board: one Card per pipeline session and one Card per unclaimed issue, in the columns
+ * To do → Issues → Doing → QA → Review → Done. The column is computed from the session, never
+ * stored. The server (GET /api/board) and the web board both use this module, like
+ * shared/transcript.ts. Keep it free of server and browser imports.
  */
 
 export type Column = "todo" | "issues" | "doing" | "qa" | "review" | "done";
@@ -98,9 +99,9 @@ export function limitDone(cards: Card[], limit: number): { cards: Card[]; doneHi
 }
 
 /**
- * The cards of these sessions in column order, then the unclaimed cards (which sit in Issues);
- * inside a column, in the order given, except Done, which lists the newest first by when each
- * card got there.
+ * The cards of these sessions in column order, then the unclaimed cards (which sit in Issues or
+ * To do); inside a column, in the order given, except Done, which lists the newest first by when
+ * each card got there.
  */
 export function boardCards(sessions: CardSource[], unclaimed: Card[] = []): Card[] {
   const order = new Map(COLUMNS.map((c, i) => [c.id, i]));
@@ -109,17 +110,29 @@ export function boardCards(sessions: CardSource[], unclaimed: Card[] = []): Card
     .sort((a, b) => order.get(a.column)! - order.get(b.column)! || (a.column === "done" ? doneAt.get(b.id)! - doneAt.get(a.id)! : 0));
 }
 
-/** A spec issue on GitHub: an open issue with open ticket sub-issues. */
-export type SpecIssue = { number: number; title: string; url: string; openTickets: number };
+/**
+ * An open issue on GitHub as the board reads it: a spec issue (it has open ticket sub-issues) or a
+ * plain issue. `hasParent` says whether it is a sub-issue of another issue, as a ticket issue is.
+ */
+export type BoardIssue = { number: number; title: string; url: string; openTickets: number; hasParent: boolean };
 
-/** An unclaimed card's id: `issue:<number>` of its spec issue, as it has no session yet. */
+/** An unclaimed card's id: `issue:<number>` of its issue, as it has no session yet. */
 export const unclaimedId = (number: number) => `issue:${number}`;
 
-/** The spec issue number of an unclaimed card's id (`issue:<number>`); null for a session's card. */
+/** The issue number of an unclaimed card's id (`issue:<number>`); null for a session's card. */
 export function unclaimedNumber(id: string): number | null {
   const m = /^issue:(\d+)$/.exec(id);
   return m ? Number(m[1]) : null;
 }
+
+/**
+ * A plain unclaimed card: an unclaimed card in To do, for an open issue without tickets. A spec
+ * unclaimed card sits in Issues and gets no card detail.
+ */
+export const isPlainUnclaimedCard = (card: { id: string; column: Column }) => {
+  const n = unclaimedNumber(card.id);
+  return n !== null && card.column === "todo";
+};
 
 /**
  * The issue an issue ref names: `owner/name#12` or the issue's GitHub URL (with its repo), or
@@ -163,20 +176,23 @@ export function claimRefs(sessions: { mode: string; phase: string; issueRef: str
 }
 
 /**
- * The unclaimed cards: the spec issues (each has open tickets) that no claim (see claimRefs) names. They show in Issues; a move to Doing or To do gives each its session.
+ * The unclaimed cards: the open issues that no claim (see claimRefs) names, minus sub-issues of
+ * another issue (a ticket issue stays inside its spec's card). A spec issue (it has open tickets)
+ * shows in Issues; a plain issue shows in To do, because it still needs grilling. A move of a spec
+ * card to Doing or To do gives it its session; a plain card cannot move yet (409 on every move).
  */
-export function unclaimedCards(specs: SpecIssue[], claims: (string | null)[], repoId: string): Card[] {
+export function unclaimedCards(issues: BoardIssue[], claims: (string | null)[], repoId: string): Card[] {
   const claimed = new Set(claims.map((r) => issueNumberOf(r, repoId)));
-  return specs
-    .filter((s) => !claimed.has(s.number))
-    .map((s) => ({
-      id: unclaimedId(s.number),
-      title: s.title,
-      column: "issues" as const,
-      tickets: { done: 0, total: s.openTickets },
+  return issues
+    .filter((i) => !claimed.has(i.number) && !i.hasParent)
+    .map((i) => ({
+      id: unclaimedId(i.number),
+      title: i.title,
+      column: i.openTickets > 0 ? ("issues" as const) : ("todo" as const),
+      tickets: { done: 0, total: i.openTickets },
       attention: null,
       pr: null,
-      specRef: s.url,
+      specRef: i.url,
     }));
 }
 
