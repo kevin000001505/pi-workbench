@@ -263,6 +263,29 @@ test("a board-created card's spec issue gets a Closes line, so Approve closes it
   assert.deepEqual(gh.closed.slice(before), [{ ref: "kevin/ship#40", by: "api" }]);
 });
 
+test("Approve closes the issues that name another repo on that repo; one that does not close is noted on the Done card", { skip: !hasPi && "pi CLI not found" }, async () => {
+  await setup();
+  // The origin issue and the spec issue live in another repo, so the PR's Closes lines cannot close them.
+  gh.lockedIssues.add("kevin/tracker#13");
+  const s = (await api("POST", "/api/sessions", { repoId: "kevin/ship", title: "Foreign", prompt: "add a greeting GHSPEC https://github.com/kevin/tracker/issues/13", issueRef: "kevin/tracker#12" })).json;
+  assert.ok(s.id, JSON.stringify(s));
+  await waitFor(async () => {
+    const x = await summary(s.id);
+    const req = x.pending.find((p: any) => p.kind === "decision" || p.kind === "permission");
+    if (req) await api("POST", `/api/sessions/${s.id}/respond`, { requestId: req.id, value: req.options[0] });
+    else if (x.phase === "ready" && x.status === "idle") await api("POST", `/api/sessions/${s.id}/move`, { column: "doing" });
+    else if (x.phase === "implement" && x.attention) await api("POST", `/api/sessions/${s.id}/pipeline`, { action: "skip" });
+    return x.phase === "pr" && x.status !== "running";
+  }, 180_000);
+  const before = gh.closed.length;
+  const r = await approve(s.id);
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.phase, "done");
+  assert.deepEqual(gh.closed.slice(before), [{ ref: "kevin/tracker#12", by: "api" }]);
+  assert.match(r.json.attention, /^PR #\d+ is merged, but issue kevin\/tracker#13 did not close \(.*Resource not accessible by personal access token.*\)\.$/);
+  assert.equal((await board()).find((c) => c.id === s.id).column, "done");
+});
+
 test("Approve refuses a card outside Review, and a request from another site", { skip: !hasPi && "pi CLI not found" }, async () => {
   await setup();
   const s = (await api("POST", "/api/sessions", { repoId: "kevin/ship", title: "Not yet", prompt: "add a farewell" })).json;

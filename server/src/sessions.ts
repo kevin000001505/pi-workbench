@@ -16,7 +16,7 @@ import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
 import type { Db, RepoRow, SessionRow, TicketRow } from "./db.ts";
 import { git, type GitEnv } from "./git.ts";
 import type { Delivery, MergeResult } from "./delivery.ts";
-import { closedIssues } from "./prs.ts";
+import { closedIssues, foreignIssues } from "./prs.ts";
 import {
   allDone,
   type Diagnosis,
@@ -1529,8 +1529,9 @@ export class SessionManager extends EventEmitter {
 
   /**
    * The PR is merged: close the issues when GitHub will not (a base that is not the default
-   * branch ignores `Closes`), delete the branch on GitHub and the worktree, and set `done`.
-   * A cleanup step that fails does not undo the merge; its reason goes on the card.
+   * branch ignores `Closes`, and `Closes` never reaches another repo's issue), delete the branch on
+   * GitHub and the worktree, and set `done`. A cleanup step that fails does not undo the merge; its
+   * reason goes on the card.
    */
   private async delivered(id: string, repo: RepoRow) {
     const row = this.row(id);
@@ -1538,6 +1539,10 @@ export class SessionManager extends EventEmitter {
     const problems: string[] = [];
     if (row.base_branch !== repo.default_branch) {
       await delivery.closeIssues(repo, closedIssues(row, this.tickets(id))).catch((err) => problems.push(`the issues did not close (${(err as Error).message})`));
+    }
+    for (const issue of foreignIssues(row, this.tickets(id))) {
+      const [owner, name] = issue.repo.split("/");
+      await delivery.closeIssues({ owner, name }, [issue.number]).catch((err) => problems.push(`issue ${issue.repo}#${issue.number} did not close (${(err as Error).message})`));
     }
     await delivery.deleteBranch(row, repo).catch((err) => problems.push(`the branch was not deleted (${(err as Error).message})`));
     await this.stop(id).catch(() => {});
