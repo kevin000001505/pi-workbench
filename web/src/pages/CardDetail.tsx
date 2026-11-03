@@ -51,6 +51,21 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
     }
   };
 
+  // Abandon drops the feature: the server closes the PR, deletes the branch, the worktree and the
+  // card, and a wb_board makes every board refetch, so this panel closes as the card goes.
+  const abandon = async () => {
+    if (!confirm(abandonQuestion(card))) return;
+    setBusy(true);
+    try {
+      await api.post(`/api/sessions/${card.id}/abandon`, {});
+      onClose();
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const column = COLUMNS.find((c) => c.id === card.column)?.label ?? card.column;
   const specRef = s?.specRef ?? card.specRef;
   const prUrl = card.pr?.url ?? s?.prUrl ?? null;
@@ -90,6 +105,9 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
               {busy ? <Spinner small /> : null} Approve
             </button>
           )}
+          <button className="kz-btn danger" disabled={busy} onClick={abandon} title="Stop the runs, close the PR, delete the branch, the worktree and the card; the issues stay open">
+            Abandon
+          </button>
         </div>
 
         {attention && (
@@ -187,6 +205,10 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
     </>
   );
 }
+
+/** The confirm text for Abandon. */
+const abandonQuestion = (card: Card) =>
+  `Abandon "${card.title}"? This stops its runs${card.pr ? `, closes PR #${card.pr.number} without merging it` : ""}, and deletes its branch, its worktree and the card. The GitHub issues stay open.`;
 
 /** The confirm text for Approve, the same from the drag and from the card detail. */
 export const approveQuestion = (card: Card) =>

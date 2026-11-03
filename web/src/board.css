@@ -155,6 +155,8 @@
 .kz-filter.on { background: var(--kz-active); color: var(--kz-text); }
 .kz-filter .icon svg { width: 14px; height: 14px; }
 .kz-filter input { border: 0; background: none; color: var(--kz-text); font: inherit; width: 140px; padding: 2px 0; }
+.kz-btn.danger, .kz-detail a.kz-btn.danger { color: var(--kz-danger); }
+.kz-btn.danger:hover, .kz-btn.danger:focus-visible { background: var(--kz-danger-bg); }
 .kz-btn:disabled { opacity: .5; cursor: default; }
 .kz-more {
   border: 0; background: none; color: var(--kz-muted); font-size: 13px; padding: 6px 4px; text-align: left;

@@ -1175,6 +1175,31 @@ export class SessionManager extends EventEmitter {
     this.emit("removed", id);
   }
 
+  /**
+   * Abandon a card: stop its runs, close its PR unmerged, delete its branch on GitHub and its
+   * worktree, then delete the session and its tickets. The GitHub issues stay open, so a spec
+   * issue with open tickets shows again as an unclaimed card. A GitHub step that fails keeps the card.
+   */
+  async abandon(id: string) {
+    const row = this.row(id);
+    const repo = getRepo(this.db, row.repo_id);
+    await this.stop(id);
+    if (repo && this.delivery) {
+      // A merged PR (a card in Done) is not closed again.
+      if (row.pr_number && row.phase !== "done") await this.delivery.closePr(row, repo);
+      await this.delivery.deleteBranch(row, repo);
+    }
+    if (repo && fs.existsSync(row.worktree)) await removeWorktree(repo, row.worktree);
+    clearTimeout(this.summaryTimers.get(id));
+    this.summaryTimers.delete(id);
+    this.db.prepare("DELETE FROM tickets WHERE session_id = ?").run(id);
+    this.db.prepare("DELETE FROM auto_decisions WHERE session_id = ?").run(id);
+    this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+    this.live.delete(id);
+    this.emit("removed", id);
+    this.emit("board", row.repo_id);
+  }
+
   rename(id: string, title: string) {
     this.update(id, { title: title.trim().slice(0, 120) || "Untitled" });
     this.emitSummary(id);

@@ -239,6 +239,11 @@ export class GitHub {
     return this.req<{ sha: string; merged: boolean; message: string }>("PUT", `/repos/${owner}/${name}/pulls/${number}/merge`, { merge_method: "merge" });
   }
 
+  /** Close a PR without merging it. */
+  closePull(owner: string, name: string, number: number) {
+    return this.req<{ number: number; state: string }>("PATCH", `/repos/${owner}/${name}/pulls/${number}`, { state: "closed" });
+  }
+
   /** Delete a branch on GitHub. */
   deleteBranch(owner: string, name: string, branch: string) {
     return this.req<void>("DELETE", `/repos/${owner}/${name}/git/refs/heads/${branch.split("/").map(encodeURIComponent).join("/")}`);

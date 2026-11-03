@@ -236,10 +236,18 @@ export function startMockGitHub(root: string, login = "kevin") {
       res.writeHead(204);
       return res.end();
     }
+    // Close (or reopen) a PR: `state` on the pull records it.
+    if ((m = /^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(p)) && req.method === "PATCH") {
+      const pr = pulls[Number(m[1]) - 1];
+      if (!pr) return send(404, { message: "Not Found" });
+      if (pr.merged) return send(422, { message: "Validation Failed" });
+      if (body.state) pr.state = body.state;
+      return send(200, { number: pr.number, state: pr.state ?? "open", html_url: pr.html_url });
+    }
     if ((m = /^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(p))) {
       const pr = pulls[Number(m[1]) - 1];
       return pr
-        ? send(200, { state: pr.merged ? "closed" : "open", merged: !!pr.merged, draft: !!pr.draft, mergeable_state: pr.mergeable_state ?? "clean", html_url: pr.html_url, head: { sha: "abc" }, comments: 0, review_comments: 1 })
+        ? send(200, { state: pr.merged ? "closed" : (pr.state ?? "open"), merged: !!pr.merged, draft: !!pr.draft, mergeable_state: pr.mergeable_state ?? "clean", html_url: pr.html_url, head: { sha: "abc" }, comments: 0, review_comments: 1 })
         : send(404, { message: "Not Found" });
     }
     if (/\/commits\/[^/]+\/check-runs$/.test(p)) {

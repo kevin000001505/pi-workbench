@@ -8,7 +8,7 @@ import type { ModelSettings } from "./settings.ts";
 /**
  * How a card's work reaches GitHub. `SessionManager` gets one from main.ts, so it holds no
  * GitHub client and no model settings itself. It opens the PR, merges it, deletes the branch
- * and closes the issues; closing the PR joins it later.
+ * and closes the issues, or closes the PR unmerged when a card is abandoned.
  */
 export type Delivery = {
   /**
@@ -22,7 +22,9 @@ export type Delivery = {
    * A PR that is merged already counts as merged.
    */
   merge(row: SessionRow, repo: RepoRow): Promise<MergeResult>;
-  /** Delete the session's branch on GitHub. */
+  /** Close the session's PR without merging it. */
+  closePr(row: SessionRow, repo: RepoRow): Promise<void>;
+  /** Delete the session's branch on GitHub. A branch that was never pushed counts as deleted. */
   deleteBranch(row: SessionRow, repo: RepoRow): Promise<void>;
   /** Close these issues of the repo. */
   closeIssues(repo: RepoRow, numbers: number[]): Promise<void>;
@@ -72,8 +74,18 @@ export function githubDelivery(deps: DeliveryDeps): Delivery {
       }
     },
 
+    async closePr(row, repo) {
+      if (!row.pr_number) return;
+      await deps.github().closePull(repo.owner, repo.name, row.pr_number);
+    },
+
     async deleteBranch(row, repo) {
-      await deps.github().deleteBranch(repo.owner, repo.name, row.branch);
+      try {
+        await deps.github().deleteBranch(repo.owner, repo.name, row.branch);
+      } catch (err) {
+        // 422 "Reference does not exist": the branch was never pushed, or is gone already.
+        if (!(err instanceof GitHubError && err.status === 422)) throw err;
+      }
     },
 
     async closeIssues(repo, numbers) {
