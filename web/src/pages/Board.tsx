@@ -162,8 +162,15 @@ export function Board({ repoId }: { repoId?: string }) {
     .map((s) => `${s.id}:${s.phase}:${s.attention ?? ""}:${s.tickets.map((t) => t.status).join(",")}:${s.prNumber ?? ""}:${s.title}`)
     .sort()
     .join("|");
+  // A drag or open dialog pauses refetching: a refetch would snap the dragged card back or reset
+  // the dialog. The ref keeps the effects' dep lists stable, so a drag or dialog never triggers a
+  // refetch of its own; it only stops the next one from running.
+  const paused = dragged !== null || openId !== null || creating || searching;
+  const pausedRef = useRef(false);
+  pausedRef.current = paused;
+
   useEffect(() => {
-    if (!repo) return;
+    if (!repo || pausedRef.current) return;
     let live = true;
     api.get<{ cards: Card[]; doneHidden: number }>(`/api/board?repo=${encodeURIComponent(repo.id)}&done=${doneLimit}`).then(
       (b) => live && (setCards(b.cards), setDoneHidden(b.doneHidden), setError(null)),
@@ -173,6 +180,23 @@ export function Board({ repoId }: { repoId?: string }) {
       live = false;
     };
   }, [repo?.id, key, doneLimit, refetch, repo ? boardChanges[repo.id] : 0]);
+
+  // Auto refetch: about every 30 seconds while the tab is visible, and at once when the tab comes
+  // back (window focus or visibilitychange). A hidden tab and a paused board make no GitHub calls.
+  useEffect(() => {
+    const auto = () => {
+      if (document.visibilityState !== "visible" || pausedRef.current) return;
+      setRefetch((n) => n + 1);
+    };
+    const timer = setInterval(auto, 30_000);
+    document.addEventListener("visibilitychange", auto);
+    window.addEventListener("focus", auto);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", auto);
+      window.removeEventListener("focus", auto);
+    };
+  }, []);
 
   // A drop is a command to the server. The card changes column only when the server accepts it;
   // a refused move leaves it where it was (it snaps back) and shows why.
