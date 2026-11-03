@@ -106,7 +106,7 @@ export function PipelinePanel({ s, viewRun, onView }: { s: SessionSummary; viewR
   const done = s.tickets.filter((t) => t.status === "done").length;
 
   const act = async (action: "retry" | "skip" | "stop") => {
-    if (action === "stop" && !confirm("Stop the pipeline? Remaining tickets stay as they are; messages become plain follow-ups.")) return;
+    if (action === "stop" && !confirm("Stop the pipeline? The card pauses in Issues with its tickets as they are; Solve all (a move to Doing) continues it.")) return;
     setBusy(true);
     try {
       await api.post(`/api/sessions/${s.id}/pipeline`, { action });
