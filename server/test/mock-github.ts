@@ -23,6 +23,10 @@ export function startMockGitHub(root: string, login = "kevin") {
   const closed: { ref: string; by: "merge" | "api" }[] = [];
   // Issues (`owner/name#n`) that the token may not close: their PATCH answers 403, as GitHub does.
   const lockedIssues = new Set<string>();
+  // A test sets them to make a PR read fail, or a PR read and an issue close slow (a board load
+  // overlaps an in-flight Approve delivery, so the guards can be seen to hold).
+  let pullFailures = false;
+  let slowMs = 0;
   const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
   /**
    * A pull's mergeable state: its `mergeable_state` switch when a test set one, else what git says
@@ -268,6 +272,7 @@ export function startMockGitHub(root: string, login = "kevin") {
       });
     }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/.exec(p)) && req.method === "PATCH") {
+      if (slowMs) await new Promise((r) => setTimeout(r, slowMs));
       if (lockedIssues.has(`${m[1]}/${m[2]}#${m[3]}`)) return send(403, { message: "Resource not accessible by personal access token" });
       if (body.state === "closed") closeIssue(m[1], m[2], Number(m[3]), "api");
       return send(200, { number: Number(m[3]), state: body.state ?? "open" });
@@ -313,6 +318,8 @@ export function startMockGitHub(root: string, login = "kevin") {
       return send(200, { number: pr.number, state: pr.state ?? "open", html_url: pr.html_url });
     }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)$/.exec(p))) {
+      if (pullFailures) return send(500, { message: "internal error" });
+      if (slowMs) await new Promise((r) => setTimeout(r, slowMs));
       const pr = pulls[Number(m[3]) - 1];
       return pr
         ? send(200, { state: pr.merged ? "closed" : (pr.state ?? "open"), merged: !!pr.merged, draft: !!pr.draft, mergeable_state: mergeableState(m[1], m[2], pr), html_url: pr.html_url, head: { sha: "abc" }, comments: 0, review_comments: 1 })
@@ -324,7 +331,7 @@ export function startMockGitHub(root: string, login = "kevin") {
     send(404, { message: `mock has no ${req.method} ${p}` });
   });
 
-  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; checkRuns: typeof checkRuns; closed: typeof closed; lockedIssues: typeof lockedIssues; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; close: () => Promise<void> }>((resolve) => {
+  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; checkRuns: typeof checkRuns; closed: typeof closed; lockedIssues: typeof lockedIssues; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; close: () => Promise<void>; pullFailures: boolean; slowMs: number }>((resolve) => {
     server.listen(Number(process.env.MOCK_GH_PORT ?? 0), "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
       resolve({
@@ -338,6 +345,18 @@ export function startMockGitHub(root: string, login = "kevin") {
         createBare,
         seedSubIssues,
         close: () => new Promise((r) => server.close(() => r())),
+        set pullFailures(v: boolean) {
+          pullFailures = v;
+        },
+        get pullFailures() {
+          return pullFailures;
+        },
+        set slowMs(v: number) {
+          slowMs = v;
+        },
+        get slowMs() {
+          return slowMs;
+        },
       });
     });
   });

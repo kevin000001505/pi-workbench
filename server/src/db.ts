@@ -136,6 +136,11 @@ CREATE TABLE IF NOT EXISTS issues_done (
   closed_at INTEGER NOT NULL, parent INTEGER, session_id TEXT, not_planned INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (repo_id, number)
 );
+-- The spec issues the board showed as unclaimed cards; a board load's checks read their state on GitHub.
+-- A spec issue a session claims, or that lands in issues_done, leaves the watch list.
+CREATE TABLE IF NOT EXISTS spec_watch (
+  repo_id TEXT NOT NULL, number INTEGER NOT NULL, PRIMARY KEY (repo_id, number)
+);
 `;
 
 export function openDb(file: string) {
@@ -253,4 +258,21 @@ export function doneIssuesOf(db: Db, repoId: string): { number: number; title: s
     not_planned: number | null;
   }[];
   return rows.map((r) => ({ number: r.number, title: r.title, url: r.url, closedAt: r.closed_at, parent: r.parent, sessionId: r.session_id, notPlanned: !!r.not_planned }));
+}
+
+/** The spec issues the board watches for this repo (the unclaimed spec cards it showed; see the spec_watch table). */
+export function specWatchOf(db: Db, repoId: string): number[] {
+  return (db.prepare("SELECT number FROM spec_watch WHERE repo_id = ?").all(repoId) as { number: number }[]).map((r) => r.number);
+}
+
+/** Watch these spec issues of the repo: the unclaimed spec cards a board load showed. */
+export function specWatchAdd(db: Db, repoId: string, numbers: number[]) {
+  const ins = db.prepare("INSERT OR IGNORE INTO spec_watch (repo_id, number) VALUES (?, ?)");
+  for (const n of numbers) ins.run(repoId, n);
+}
+
+/** Unwatch these issues of the repo: a session claimed them, or a delivery recorded them as done. */
+export function specWatchRemove(db: Db, repoId: string, numbers: number[]) {
+  const del = db.prepare("DELETE FROM spec_watch WHERE repo_id = ? AND number = ?");
+  for (const n of numbers) del.run(repoId, n);
 }

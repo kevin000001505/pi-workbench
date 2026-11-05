@@ -131,6 +131,10 @@ _Avoid_: Allow (that answers a permission), accept
 Dropping a feature: it stops the card's runs, closes its PR, deletes its branch, and takes the card off the board; its GitHub issues stay open.
 _Avoid_: stop (a stop pauses the card; the card can resume), delete, cancel
 
+**Reconcile**:
+The GitHub checks a board load runs for a repo: a PR merged on GitHub delivers the card as Approve delivers it, and a spec issue closed on GitHub moves its card to Done. At most one runs at a time per repo; an overlapping board load waits for the run in progress, and a moved card sends a board event to every open board.
+_Avoid_: sync, poll, catch up
+
 ## Relationships
 
 - Under **Auto-approve**, every **Permission** goes to the **Risk judge** first; a safe rating allows it, any other rating goes to the **Reviewer** with the rating attached

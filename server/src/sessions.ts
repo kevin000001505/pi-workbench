@@ -13,7 +13,7 @@ import {
   withMessages,
 } from "../../shared/transcript.ts";
 import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
-import { recordIssueDone, type Db, type RepoRow, type SessionRow, type TicketRow } from "./db.ts";
+import { recordIssueDone, specWatchRemove, type Db, type RepoRow, type SessionRow, type TicketRow } from "./db.ts";
 import { git, type GitEnv } from "./git.ts";
 import type { Delivery, MergeResult } from "./delivery.ts";
 import { closedIssues, foreignIssues } from "./prs.ts";
@@ -44,7 +44,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { claimRefs, type Column, COLUMNS, issueNumberOf, resolvedNote, sessionColumn } from "../../shared/board.ts";
+import { claimRefs, type Column, COLUMNS, issueNumberOf, type PrState, resolvedNote, sessionColumn } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
   configureAutoApprove,
@@ -66,6 +66,26 @@ import { getModelSettings, getPipelineSettings, LLM_KEY_ENV, rulesFile } from ".
 import { describeStopReason, type StopReason, StopRule } from "./stop-rule.ts";
 import { type RpcRecord, RpcProcess } from "./rpc.ts";
 import { isRescueyRun, RESCUE_PROVIDER_ID, RESCUE_TOKEN_ENV, type RescueProxy } from "./rescue-proxy.ts";
+
+/**
+ * What a board load reads on GitHub for a repo's checks, as it passes them to
+ * SessionManager.reconcile. The open-issue numbers and the unclaimed spec issues feed the
+ * spec-closed checks; the PR states the PR-merged check reads.
+ */
+export type ReconcileFacts = {
+  /** The PR state of each session that has a PR, as the board read it; null when GitHub could not read it; no entry for a session with no PR. */
+  prStates: Map<number, PrState | null>;
+  /** The numbers of the open issues the board shows as unclaimed spec cards. */
+  unclaimedSpecs: number[];
+  /** The numbers in the open-issue list; null when that list could not be read. */
+  openIssueNumbers: number[] | null;
+};
+
+/** A board load's checks moved a card (a board event went out), and the issues they recorded as done in the repo. */
+export type ReconcileResult = {
+  moved: boolean;
+  doneNumbers: number[];
+};
 
 export type SessionStatus = "stopped" | "starting" | "running" | "waiting" | "idle" | "error";
 
@@ -253,6 +273,8 @@ export class SessionManager extends EventEmitter {
   private approving = new Set<string>();
   /** Sessions whose merge run resolves a conflict now; Approve waits for it to finish. */
   private resolving = new Set<string>();
+  /** A repo's board-load GitHub checks in flight; an overlapping board load waits for the run. */
+  private reconciling = new Map<string, Promise<ReconcileResult>>();
   /** Issues (`owner/name#n`) whose new session is being created now. */
   private claiming = new Set<string>();
 
@@ -444,7 +466,10 @@ export class SessionManager extends EventEmitter {
     // Held from the check until the session row exists, so a second create for the issue is refused.
     this.claiming.add(claim);
     try {
-      return await this.createSession(input, repo);
+      const s = await this.createSession(input, repo);
+      // A session claims the issue: the board watches it no more.
+      specWatchRemove(this.db, repo.id, [number]);
+      return s;
     } finally {
       this.claiming.delete(claim);
     }
@@ -1488,6 +1513,45 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Reconcile: the board load's GitHub checks for the repo, one at a time. An overlapping board
+   * load waits for the run in progress. A card in phase `pr` whose PR merged on GitHub is
+   * delivered as Approve delivers it; a card already in `approving` (a click in flight) or
+   * `resolving` (a merge run) is left to that work. When a card moves, a board event goes out
+   * for the repo, and the issues recorded as done leave the spec watch list.
+   */
+  async reconcile(repo: RepoRow, facts: ReconcileFacts): Promise<ReconcileResult> {
+    const inFlight = this.reconciling.get(repo.id);
+    if (inFlight) return inFlight;
+    const run = this.reconcileRun(repo, facts).finally(() => this.reconciling.delete(repo.id));
+    this.reconciling.set(repo.id, run);
+    return run;
+  }
+
+  private async reconcileRun(repo: RepoRow, facts: ReconcileFacts): Promise<ReconcileResult> {
+    const doneNumbers: number[] = [];
+    let moved = false;
+    const rows = this.db
+      .prepare("SELECT * FROM sessions WHERE repo_id = ? AND archived = 0 AND phase = 'pr' AND pr_number IS NOT NULL")
+      .all(repo.id) as SessionRow[];
+    for (const row of rows) {
+      const state = facts.prStates.get(row.pr_number!);
+      if (state !== "merged" || this.approving.has(row.id) || this.resolving.has(row.id)) continue;
+      this.approving.add(row.id);
+      try {
+        await this.delivered(row.id, repo, (n) => doneNumbers.push(n));
+        moved = true;
+      } finally {
+        this.approving.delete(row.id);
+      }
+    }
+    if (moved) {
+      specWatchRemove(this.db, repo.id, doneNumbers);
+      this.emit("board", repo.id);
+    }
+    return { moved, doneNumbers };
+  }
+
+  /**
    * Approve: merge the card's PR with a merge commit, then deliver it (`delivered`). A merge
    * conflict goes to `mergeConflict`; any other refusal keeps `pr` with GitHub's message.
    */
@@ -1625,7 +1689,7 @@ export class SessionManager extends EventEmitter {
    * GitHub and the worktree, and set `done`. A cleanup step that fails does not undo the merge; its
    * reason goes on the card.
    */
-  private async delivered(id: string, repo: RepoRow) {
+  private async delivered(id: string, repo: RepoRow, recorded?: (number: number) => void) {
     const row = this.row(id);
     const delivery = this.delivery!;
     const problems: string[] = [];
@@ -1641,6 +1705,8 @@ export class SessionManager extends EventEmitter {
       const specN = issueNumberOf(row.spec_ref, repoId);
       const parent = specN !== null && specN !== n && tickets.some((t) => issueNumberOf(t.trackerRef, repoId) === n) ? specN : null;
       recordIssueDone(this.db, repoId, n, info.title, info.url, now, { sessionId: id, parent });
+      // The collector hears only the card's own repo: its numbers drop out of this load's unclaimed cards.
+      if (repoId === repo.id) recorded?.(n);
     };
     const ownNumbers = closedIssues(row, tickets);
     let ownClosed = row.base_branch === repo.default_branch;
