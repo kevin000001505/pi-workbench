@@ -16,7 +16,7 @@ const TICKET_STATE: Record<Ticket["status"], string> = { ready: "Ready", running
  * The issue behind a card's spec ref, split for the /api/repos routes; null when the ref is not
  * an issue link (a file path, or nothing).
  */
-const issueParts = (specRef: string | null) => {
+export const issueParts = (specRef: string | null) => {
   const ref = parseIssueRef(specRef);
   if (!ref?.repo) return null;
   const [owner, name] = ref.repo.split("/");

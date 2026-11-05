@@ -155,7 +155,22 @@ export function startMockGitHub(root: string, login = "kevin") {
       const all = repoIssues(m[1], m[2]);
       if (!all) return send(404, { message: "Not Found" });
       const issue = all.find((i) => i.number === Number(m[3]));
-      return issue ? send(200, issue) : send(404, { message: "Not Found" });
+      if (issue) return send(200, issue);
+      // A seeded spec or ticket sub-issue, not in the issues feed: its REST read resolves too, as GitHub's does.
+      const base = `https://github.com/${m[1]}/${m[2]}`;
+      const seed = subIssueSeeds[`${m[1]}/${m[2]}#${m[3]}`];
+      if (seed) {
+        const spec = seed.spec;
+        return send(200, { number: spec.number, title: spec.title, body: spec.body, labels: [], assignees: [], updated_at: "2025-01-01T00:00:00Z", html_url: `${base}/issues/${spec.number}`, state: (spec.state ?? "OPEN").toLowerCase() });
+      }
+      for (const [key, s] of Object.entries(subIssueSeeds)) {
+        if (!key.startsWith(`${m[1]}/${m[2]}#`)) continue; // a sub belongs to a spec of this repo
+        const sub = s.subs.find((x: any) => x.number === Number(m[3]));
+        if (sub) {
+          return send(200, { number: sub.number, title: sub.title, body: sub.body, labels: [], assignees: [], updated_at: "2025-01-01T00:00:00Z", html_url: `${base}/issues/${sub.number}`, state: (sub.state ?? "OPEN").toLowerCase() });
+        }
+      }
+      return send(404, { message: "Not Found" });
     }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)\/comments$/.exec(p)) && req.method === "GET") {
       const all = repoIssues(m[1], m[2]);

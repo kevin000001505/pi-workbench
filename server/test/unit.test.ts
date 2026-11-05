@@ -323,8 +323,8 @@ test("unclaimed cards: plain and ticketed spec issues both sit in Issues; a sub-
   const sessions = [{ mode: "pipeline", phase: "ready", issueRef: "me/app#8", specRef: null }];
   const cards = unclaimedCards(issues, claimRefs(sessions), "me/app");
   assert.deepEqual(cards, [
-    { id: "issue:1", title: "A plain issue", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/me/app/issues/1" },
-    { id: "issue:5", title: "A spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, pr: null, specRef: "https://github.com/me/app/issues/5" },
+    { id: "issue:1", title: "A plain issue", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/me/app/issues/1", doneAt: null },
+    { id: "issue:5", title: "A spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, pr: null, specRef: "https://github.com/me/app/issues/5", doneAt: null },
   ]);
   // On the board, the plain card sits in Issues, before the spec's Issues card.
   assert.deepEqual(boardCards([], cards).map((c) => c.id), ["issue:1", "issue:5"]);
@@ -352,6 +352,7 @@ test("a direct session is a card in Doing: with no PR, and even while it sets up
     attention: null,
     pr: null,
     specRef: null,
+    doneAt: null,
   });
   assert.equal(cardOf(session("direct", "setup"))?.column, "doing", "a direct session in setup is in Doing, not To do");
   // A PR on a direct session keeps the card in Doing, with its badge.
@@ -360,6 +361,36 @@ test("a direct session is a card in Doing: with no PR, and even while it sets up
   assert.deepEqual(pr?.pr, { number: 7, url: "https://github.com/me/app/pulls/7", state: null });
   // A pipeline card keeps its phase's column through cardOf as well.
   assert.equal(cardOf(session("pipeline", "implement"))?.column, "doing");
+});
+
+test("done cards: a merged card and the issues it closed sit in Done, newest first, and a done limit hides the older", async () => {
+  const { boardCards, cardOf, doneIssueCards, limitDone } = await import("../../shared/board.ts");
+  const doneSession = (id: string, doneAt: number) =>
+    ({ id, title: "T", mode: "pipeline", phase: "done", attention: null, prNumber: null, prUrl: null, specRef: null, doneAt, tickets: [] }) as any;
+  // cardOf carries when the card reached Done, for the board's Done order.
+  assert.equal(cardOf(doneSession("s1", 1000))?.doneAt, 1000);
+  assert.equal(cardOf({ ...doneSession("s2", 1), doneAt: null } as any)?.doneAt, null);
+  // The issues a merged card closes are Done cards too: one per issue, with the time they closed.
+  const issues = doneIssueCards([
+    { number: 5, title: "A spec", url: "https://github.com/me/app/issues/5", closedAt: 2000 },
+    { number: 7, title: "A ticket", url: "https://github.com/me/app/issues/7", closedAt: 500 },
+  ]);
+  assert.deepEqual(issues[0], {
+    id: "issue:5",
+    title: "A spec",
+    column: "done",
+    tickets: { done: 0, total: 0 },
+    attention: null,
+    pr: null,
+    specRef: "https://github.com/me/app/issues/5",
+    doneAt: 2000,
+  });
+  // In Done, the newest card sits first: the issue card, then the session card, then the older issue card.
+  assert.deepEqual(boardCards([doneSession("s1", 1000)], issues).map((c) => c.id), ["issue:5", "s1", "issue:7"]);
+  // A done limit hides the oldest Done cards, session and issue alike.
+  const limited = limitDone(boardCards([doneSession("s1", 1000)], issues), 2);
+  assert.deepEqual(limited.cards.map((c) => c.id), ["issue:5", "s1"]);
+  assert.equal(limited.doneHidden, 1);
 });
 
 test("isPlainUnclaimedCard follows the tickets count, not the column", async () => {

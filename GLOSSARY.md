@@ -99,7 +99,7 @@ The column for every unclaimed card — a plain issue and a spec issue with its 
 _Avoid_: ready (as a column name)
 
 **Unclaimed card**:
-A card for an open issue that no session claims yet. A plain issue (no open sub-issues, not itself a sub-issue) and a spec issue with open ticket sub-issues both sit in Issues. A plain card's move to Doing is Solve; its move to To do is Split. A spec card's move to Doing starts Solve all; a move to To do grills on that spec issue to rework it.
+A card for an open issue that no session claims yet. A plain issue (no open sub-issues, not itself a sub-issue) and a spec issue with open ticket sub-issues both sit in Issues. A plain card's move to Doing is Solve; its move to To do is Split. A spec card's move to Doing starts Solve all; a move to To do grills on that spec issue to rework it. A click on a spec card toggles its open ticket sub-issues as a row of cards under it, which collapses on the next click; each sub-card has a Solve.
 
 **Solve**:
 To work a plain issue through a session that skips grill, spec and tickets: the issue becomes the card's only ticket, and the PR's merge closes the issue.
@@ -121,7 +121,7 @@ The column for a feature whose PR is open and waits for the user's Approve.
 _Avoid_: code review (that happens in QA), Reviewer (that is the permission reviewer)
 
 **Done**:
-The column for a feature whose PR is merged.
+The column for a feature whose PR is merged. The issues a merged card closed — its ticket sub-issues, its spec issue, its origin issue — sit here as cards beside it, newest first.
 
 **Approve**:
 The user's go-ahead on a card in Review: it merges the PR with a merge commit and deletes the branch.

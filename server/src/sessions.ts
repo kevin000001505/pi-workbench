@@ -13,7 +13,7 @@ import {
   withMessages,
 } from "../../shared/transcript.ts";
 import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
-import type { Db, RepoRow, SessionRow, TicketRow } from "./db.ts";
+import { recordIssueDone, type Db, type RepoRow, type SessionRow, type TicketRow } from "./db.ts";
 import { git, type GitEnv } from "./git.ts";
 import type { Delivery, MergeResult } from "./delivery.ts";
 import { closedIssues, foreignIssues } from "./prs.ts";
@@ -1629,25 +1629,62 @@ export class SessionManager extends EventEmitter {
     const row = this.row(id);
     const delivery = this.delivery!;
     const problems: string[] = [];
-    if (row.base_branch !== repo.default_branch) {
-      await delivery.closeIssues(repo, closedIssues(row, this.tickets(id))).catch((err) => problems.push(`the issues did not close (${(err as Error).message})`));
+    const now = Date.now();
+    // The issues the PR closes move to Done on the board: record them, in their own repos,
+    // once they are closed. A title or URL the issue cannot be read for keeps the number.
+    const tickets = this.tickets(id);
+    const ownNumbers = closedIssues(row, tickets);
+    let ownClosed = row.base_branch === repo.default_branch;
+    if (!ownClosed && ownNumbers.length) {
+      // A base that is not the default branch ignores `Closes`: the workbench closes the issues itself.
+      ownClosed = await delivery.closeIssues(repo, ownNumbers).then(
+        () => true,
+        (err) => {
+          problems.push(`the issues did not close (${(err as Error).message})`);
+          return false;
+        },
+      );
+    }
+    if (ownClosed) {
+      for (const n of ownNumbers) {
+        const info = await this.issueInfoOrFallback(repo, n);
+        recordIssueDone(this.db, repo.id, n, info.title, info.url, now);
+      }
     }
     // An issue of another repo closes only when the workbench tracks that repo: a model-written ref
     // must not close issues in any repo the token can write.
     const tracked = new Set(listRepos(this.db).map((r) => r.id.toLowerCase()));
-    for (const issue of foreignIssues(row, this.tickets(id))) {
+    for (const issue of foreignIssues(row, tickets)) {
       if (!tracked.has(issue.repo.toLowerCase())) {
         problems.push(`issue ${issue.repo}#${issue.number} was not closed (it is in a repo the workbench does not track)`);
         continue;
       }
       const [owner, name] = issue.repo.split("/");
-      await delivery.closeIssues({ owner, name }, [issue.number]).catch((err) => problems.push(`issue ${issue.repo}#${issue.number} did not close (${(err as Error).message})`));
+      const closed = await delivery.closeIssues({ owner, name }, [issue.number]).then(
+        () => true,
+        (err) => {
+          problems.push(`issue ${issue.repo}#${issue.number} did not close (${(err as Error).message})`);
+          return false;
+        },
+      );
+      if (closed) {
+        const info = await this.issueInfoOrFallback({ owner, name }, issue.number);
+        recordIssueDone(this.db, issue.repo, issue.number, info.title, info.url, now);
+        // The issue's own board lists it in Done: open boards of that repo refetch.
+        this.emit("board", issue.repo);
+      }
     }
     await delivery.deleteBranch(row, repo).catch((err) => problems.push(`the branch was not deleted (${(err as Error).message})`));
     await this.stop(id).catch(() => {});
     if (fs.existsSync(row.worktree)) await removeWorktree(repo, row.worktree).catch((err) => problems.push(`the worktree was not removed (${(err as Error).message})`));
     this.update(id, { phase: "done", attention: problems.length ? `PR #${row.pr_number} is merged, but ${problems.join(", and ")}.` : null });
     this.emit("event", id, { type: "wb_notify", message: `PR #${row.pr_number} is merged.`, level: "info" });
+  }
+
+  /** One issue's title and URL for the board's Done card; a number the issue cannot be read for stays on. */
+  private async issueInfoOrFallback(repo: Pick<RepoRow, "owner" | "name">, number: number) {
+    const info = await this.delivery!.issueInfo(repo, number).catch(() => null);
+    return info ?? { title: `Issue #${number}`, url: `https://github.com/${repo.owner}/${repo.name}/issues/${number}` };
   }
 
   /**

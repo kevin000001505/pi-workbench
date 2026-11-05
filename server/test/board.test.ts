@@ -119,9 +119,9 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
 
   // A fresh board shows the repo's plain open issues in Issues; no sessions yet.
   assert.deepEqual(await board(), [
-    { id: "issue:1", title: "Add dark mode", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/1" },
-    { id: "issue:2", title: "Fix login Crash", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/2" },
-    { id: "issue:3", title: "Docs: setup guide", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/3" },
+    { id: "issue:1", title: "Add dark mode", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/1", doneAt: null },
+    { id: "issue:2", title: "Fix login Crash", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/2", doneAt: null },
+    { id: "issue:3", title: "Docs: setup guide", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/3", doneAt: null },
   ]);
 
   // A feature runs grill → spec → tickets, then waits in Issues.
@@ -144,6 +144,7 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
     attention: null,
     pr: null,
     specRef: ".scratch/greeting/spec.md",
+    doneAt: null,
   });
 
   // It is paused: the run settles and no ticket run starts.
@@ -608,11 +609,11 @@ test("an unclaimed spec issue shows in Issues; its move to Doing solves its tick
   // The specs a session already claims (#7, #20, #30, #40, #70) are left out; the plain open issues
   // (#1-#3) show in Issues; the ticketed specs show in Issues too.
   assert.deepEqual(unclaimed, [
-    { id: "issue:1", title: "Add dark mode", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/1" },
-    { id: "issue:2", title: "Fix login Crash", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/2" },
-    { id: "issue:3", title: "Docs: setup guide", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/3" },
-    { id: "issue:50", title: "Old spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/50" },
-    { id: "issue:60", title: "Rework me", column: "issues", tickets: { done: 0, total: 1 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/60" },
+    { id: "issue:1", title: "Add dark mode", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/1", doneAt: null },
+    { id: "issue:2", title: "Fix login Crash", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/2", doneAt: null },
+    { id: "issue:3", title: "Docs: setup guide", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/3", doneAt: null },
+    { id: "issue:50", title: "Old spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/50", doneAt: null },
+    { id: "issue:60", title: "Rework me", column: "issues", tickets: { done: 0, total: 1 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/60", doneAt: null },
   ]);
   // The ticket sub-issues (#51, #52) are never cards of their own.
   assert.ok(!unclaimed.some((c) => c.id === "issue:51" || c.id === "issue:52"));
@@ -815,10 +816,10 @@ test("a plain open issue is a card in Issues: a sub-issue is no card, a claimed 
   // A plain open issue shows in Issues; a ticketed spec in Issues too; no card for the ticket sub-issue.
   const unclaimed = (await boardOf("kevin/plain")).filter((c) => c.id.startsWith("issue:"));
   assert.deepEqual(unclaimed, [
-    { id: "issue:1", title: "Add dark mode", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/plain/issues/1" },
-    { id: "issue:2", title: "Fix login Crash", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/plain/issues/2" },
-    { id: "issue:3", title: "Docs: setup guide", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/plain/issues/3" },
-    { id: "issue:4", title: "Plain spec", column: "issues", tickets: { done: 0, total: 1 }, attention: null, pr: null, specRef: "https://github.com/kevin/plain/issues/4" },
+    { id: "issue:1", title: "Add dark mode", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/plain/issues/1", doneAt: null },
+    { id: "issue:2", title: "Fix login Crash", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/plain/issues/2", doneAt: null },
+    { id: "issue:3", title: "Docs: setup guide", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/plain/issues/3", doneAt: null },
+    { id: "issue:4", title: "Plain spec", column: "issues", tickets: { done: 0, total: 1 }, attention: null, pr: null, specRef: "https://github.com/kevin/plain/issues/4", doneAt: null },
   ]);
   assert.ok(!unclaimed.some((c) => c.id === "issue:5"), "a ticket sub-issue is never a card of its own");
 
@@ -1268,11 +1269,11 @@ test("a sub-issue's Solve on an unclaimed spec card creates one session, runs on
 
   await waitFor(async () => (await summary(s.id)).phase === "implement");
   assert.equal(await col(s.id), "doing");
+  // The ticket is running and the run switched to it: the switch follows the ticket's status.
   const running = await waitFor(async () => {
     const x = await summary(s.id);
-    return x.tickets[0].status === "running" ? x : undefined;
+    return x.tickets[0].status === "running" && x.activeRun === x.tickets[0].runId ? x : undefined;
   });
-  assert.equal(running.activeRun, running.tickets[0].runId);
 
   // Its `git push` waits on a permission; only when it is answered has the ticket's run reached the model.
   const perm = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "permission"));

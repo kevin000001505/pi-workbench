@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type Card, type Column, COLUMNS, DONE_PAGE, isPlainUnclaimedCard, unclaimedNumber } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
-import { approveQuestion, CardDetail } from "./CardDetail.tsx";
+import { approveQuestion, CardDetail, issueParts } from "./CardDetail.tsx";
 import { CardActions, SOLVE, SOLVE_ALL, SPLIT } from "./CardActions.tsx";
 import { matches, NewCard, Search, typingIn, wordsOf } from "./BoardDialogs.tsx";
-import { isResolvedNote, type Repo } from "../types.ts";
+import { isResolvedNote, type Repo, type UnclaimedSpecTickets } from "../types.ts";
+import { Spinner } from "../ui.tsx";
 import "../board.css";
 
 /** The repo whose board opened last; the start page opens it again. */
@@ -89,6 +90,7 @@ function BoardCard({
   onDrag,
   onOpen,
   onMove,
+  onToggleExpand,
   busy,
 }: {
   card: Card;
@@ -96,6 +98,8 @@ function BoardCard({
   onDrag: (card: Card | null) => void;
   onOpen: () => void;
   onMove: (column: Column) => void;
+  /** An unclaimed spec card's click toggles its row of ticket sub-issue cards instead of opening the detail. */
+  onToggleExpand?: () => void;
   busy: boolean;
 }) {
   const issue = unclaimedNumber(card.id);
@@ -106,6 +110,7 @@ function BoardCard({
   // Every Issues card that is not a plain unclaimed card gets Solve all: an unclaimed spec issue,
   // or a session paused in `ready`.
   const solveAll = card.column === "issues" && !plain;
+  const expandable = unclaimed && !plain;
   const line =
     card.attention ??
     (unclaimed
@@ -131,7 +136,8 @@ function BoardCard({
       onClick={(e) => {
         if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
         e.preventDefault();
-        onOpen();
+        if (expandable) onToggleExpand?.();
+        else onOpen();
       }}
     >
       <div className="head">
@@ -159,9 +165,96 @@ function BoardCard({
   );
 }
 
+/**
+ * One row of an unclaimed spec card's ticket sub-issues, as cards under the spec card. A sub-issue
+ * with an open blocker shows "waits on #n" and disables Solve; Solve creates the spec's session
+ * with that sub-issue as the solo ticket, and the row goes with the claimed card.
+ */
+function SpecSubcards({ card, toast, onSolved }: { card: Card; toast: (text: string, level?: "info" | "warning" | "error") => void; onSolved: () => void }) {
+  const part = issueParts(card.specRef);
+  const [subs, setSubs] = useState<UnclaimedSpecTickets["subIssues"] | null | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!part) {
+      setSubs(null);
+      return;
+    }
+    let live = true;
+    api.get<UnclaimedSpecTickets>(`/api/repos/${part.owner}/${part.name}/issues/${part.number}/tickets`).then(
+      (t) => live && setSubs(t.subIssues),
+      () => live && setSubs(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [part?.owner, part?.name, part?.number]);
+  if (!part) return null;
+  const solve = async (sub: number) => {
+    setBusy(true);
+    try {
+      await api.post(`/api/repos/${part.owner}/${part.name}/issues/${part.number}/tickets/${sub}/solve`, {});
+      onSolved();
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (subs === undefined) {
+    return (
+      <div className="kz-sublist">
+        <span className="kz-card kz-subcard muted">
+          <div className="head">
+            <div className="title">
+              <Spinner small /> Loading the tickets…
+            </div>
+          </div>
+        </span>
+      </div>
+    );
+  }
+  if (subs === null) {
+    return (
+      <div className="kz-sublist">
+        <span className="kz-card kz-subcard muted">
+          <div className="head">
+            <div className="title">The tickets could not be read from GitHub.</div>
+          </div>
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="kz-sublist">
+      {subs.map((s) => (
+        <a key={s.number} className="kz-card kz-subcard" href={s.url} target="_blank" rel="noopener">
+          <div className="head">
+            <div className="title">#{s.number} {s.title}</div>
+          </div>
+          {s.blockedBy.length > 0 && <span className="desc">waits on {s.blockedBy.map((b) => `#${b}`).join(", ")}</span>}
+          <span className="kz-card-actions">
+            <button
+              className="kz-btn"
+              disabled={busy || s.blockedBy.length > 0}
+              title={s.blockedBy.length === 0 ? "Create this spec's session and run only this ticket" : "Solve waits for the sub-issues that block it"}
+              onClick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                void solve(s.number);
+              }}
+            >
+              {busy ? <Spinner small /> : "Solve"}
+            </button>
+          </span>
+        </a>
+      ))}
+    </div>
+  );
+}
+
 /** The kanban view of one repo's features: one card per pipeline session, in kanzo's look. */
 export function Board({ repoId }: { repoId?: string }) {
-  const { sessions, boardChanges } = useStore();
+  const { sessions, boardChanges, toast } = useStore();
   const [repos, setRepos] = useState<Repo[] | null>(null);
   const [cards, setCards] = useState<Card[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -170,6 +263,8 @@ export function Board({ repoId }: { repoId?: string }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [refetch, setRefetch] = useState(0);
   const [openId, setOpenId] = useState<string | null>(null);
+  // The unclaimed spec card whose row of ticket sub-issues is open; a click toggles it.
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [doneHidden, setDoneHidden] = useState(0);
   const [doneLimit, setDoneLimit] = useState(DONE_PAGE);
   const [creating, setCreating] = useState(false);
@@ -385,15 +480,27 @@ export function Board({ repoId }: { repoId?: string }) {
               </h2>
               <div className="kz-cards">
                 {list.map((c) => (
-                  <BoardCard
-                    key={c.id}
-                    card={c}
-                    activity={sessions[c.id]?.activity ?? ""}
-                    onDrag={setDragged}
-                    onOpen={() => setOpenId(c.id)}
-                    onMove={(column) => moveCard(c, column)}
-                    busy={busyId === c.id}
-                  />
+                  <Fragment key={c.id}>
+                    <BoardCard
+                      card={c}
+                      activity={sessions[c.id]?.activity ?? ""}
+                      onDrag={setDragged}
+                      onOpen={() => setOpenId(c.id)}
+                      onMove={(column) => moveCard(c, column)}
+                      onToggleExpand={() => setExpandedId(expandedId === c.id ? null : c.id)}
+                      busy={busyId === c.id}
+                    />
+                    {expandedId === c.id && unclaimedNumber(c.id) !== null && !isPlainUnclaimedCard(c) && (
+                      <SpecSubcards
+                        card={c}
+                        toast={toast}
+                        onSolved={() => {
+                          setExpandedId(null);
+                          setRefetch((n) => n + 1);
+                        }}
+                      />
+                    )}
+                  </Fragment>
                 ))}
                 {col.id === "done" && doneHidden > 0 && (
                   <button className="kz-more" onClick={() => setDoneLimit((n) => n + DONE_PAGE)}>
