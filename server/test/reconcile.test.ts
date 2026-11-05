@@ -13,7 +13,7 @@ import { DatabaseSync } from "node:sqlite";
 import { WebSocket } from "ws";
 import { startReviewServer } from "./review-server.ts";
 
-const { hasPi, base, gh, api, board, summary, waitFor, toReview, hasRef, bare } = await startReviewServer("reconcile");
+const { hasPi, base, gh, api, board, summary, waitFor, toReview, hasRef, bare, setup } = await startReviewServer("reconcile");
 
 /**
  * Someone else changes the base branch on GitHub: a commit appends `line` to `file`.
@@ -340,4 +340,54 @@ test("a ticket issue closed by hand on GitHub changes nothing on its spec's card
   assert.equal(card.attention, null);
   assert.ok(fs.existsSync(worktree), "the worktree stays");
   await api("POST", `/api/sessions/${id}/stop`, {});
+});
+
+// --- the spec watch list and the 100 most recently updated -------------------------------------
+
+test("a watched spec that is still open but outside the 100 most recent stays watched", { skip: !hasPi && "pi CLI not found" }, async () => {
+  // A repo of its own: the 100 bulk issues would push this file's other specs out of the window.
+  await setup();
+  gh.createBare("kevin", "other");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/other" })).status, 200);
+  gh.seedSubIssues("kevin", "other", { number: 175, title: "Held", body: "## Solution\nh.txt says H." }, [
+    { number: 176, title: "Write h.txt", body: "Create h.txt containing H." },
+  ]);
+  await board("kevin/other"); // the board load shows the unclaimed spec card and watches the spec
+  assert.ok(watchedSpecs("kevin/other").includes(175), `watched: ${watchedSpecs("kevin/other")}`);
+  // 100 issues newer than the spec: the spec falls out of the 100 most recently updated.
+  gh.bulkSeedIssues("kevin", "other", 100, 300, "2026-01-01T00:00:00Z");
+  const cards = await board("kevin/other");
+  assert.ok(watchedSpecs("kevin/other").includes(175), "an open spec outside the 100 most recent stays watched");
+  assert.ok(!cards.some((c) => c.id === "issue:175"), "the cap keeps it out of this response's open list");
+  assert.ok(!issuesDone("kevin/other").some((i) => i.number === 175), "an open spec is not recorded done");
+  assert.ok(!gh.closed.some((c) => /#176$/.test(c.ref)), "an open spec's sub-issues are not closed");
+});
+
+test("a spec issue a session claimed is never treated as an unstarted close after its card merges", { skip: !hasPi && "pi CLI not found" }, async () => {
+  await setup();
+  gh.seedSubIssues("kevin", "ship", { number: 180, title: "Claimed", body: "## Solution\nc.txt says C." }, [
+    { number: 181, title: "Write c.txt", body: "Create c.txt containing C." },
+  ]);
+  await board(); // the board load shows the unclaimed spec card and watches the spec
+  assert.ok(watchedSpecs("kevin/ship").includes(180), `watched: ${watchedSpecs("kevin/ship")}`);
+  const { id } = await toReview(180); // the claim leaves the watch list, the card goes to Review
+  assert.ok(!watchedSpecs("kevin/ship").includes(180), "a claim leaves the watch list");
+  await approve(id); // the card merges: the spec and the ticket record in Done with the session id
+  await handClose(180); // a hand close of the spec on GitHub after the merge
+  await board(); // the next board load: the spec is not in the open list, but it is done, not unstarted
+  assert.deepEqual(
+    issuesDone("kevin/ship").filter((i) => i.number === 180).map((i) => [i.parent, i.sessionId, i.notPlanned]),
+    [[null, id, false]],
+    "the spec keeps its delivery record, never an unstarted-close record",
+  );
+  assert.deepEqual(
+    issuesDone("kevin/ship").filter((i) => i.number === 181).map((i) => [i.parent, i.sessionId, i.notPlanned]),
+    [[180, id, false]],
+  );
+  assert.deepEqual(
+    gh.closed.filter((c) => /#181$/.test(c.ref)).map((c) => [c.by, c.reason ?? null]),
+    [["merge", null]],
+    "the ticket closes by the merge, never as not planned",
+  );
+  assert.ok(!watchedSpecs("kevin/ship").includes(180), "the merged spec is not re-watched");
 });

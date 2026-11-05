@@ -108,6 +108,17 @@ export function startMockGitHub(root: string, login = "kevin") {
   const seedSubIssues = (owner: string, name: string, spec: any, subs: any[]) => {
     subIssueSeeds[`${owner}/${name}#${spec.number}`] = { spec, subs };
   };
+  /**
+   * Many plain open feed issues, all with the same updated time: to push a spec out of the 100
+   * most recently updated, as GitHub's `first: 100, orderBy: UPDATED_AT, DESC` would.
+   */
+  const bulkSeedIssues = (owner: string, name: string, count: number, start: number, updatedAt: string) => {
+    for (let i = 0; i < count; i++)
+      issues.push({
+        owner, name, number: start + i, title: `Bulk issue ${start + i}`, body: "", state: "open",
+        labels: [], assignees: [], updated_at: updatedAt, html_url: `https://github.com/${owner}/${name}/issues/${start + i}`,
+      });
+  };
   /** Drop a spec's seed: the issue no longer resolves, as a deleted issue does not. */
   const forgetSubIssues = (owner: string, name: string, number: number) => {
     delete subIssueSeeds[`${owner}/${name}#${number}`];
@@ -243,13 +254,14 @@ export function startMockGitHub(root: string, login = "kevin") {
           .map(([, seed]) => seed)
           .filter((seed) => (seed.spec.state ?? "OPEN") === "OPEN");
         const nodes = [
-          ...all.filter((i) => !i.pull_request && i.state === "open").map((i) => ({ number: i.number, title: i.title, url: i.html_url, parent: i.parent_number ? { number: i.parent_number } : null, subIssuesSummary: { total: 0, completed: 0 } })),
+          ...all.filter((i) => !i.pull_request && i.state === "open").map((i) => ({ number: i.number, title: i.title, url: i.html_url, parent: i.parent_number ? { number: i.parent_number } : null, subIssuesSummary: { total: 0, completed: 0 }, updated_at: i.updated_at })),
           ...specs.map((seed) => ({
             number: seed.spec.number,
             title: seed.spec.title,
             url: seed.spec.url ?? `https://github.com/${variables.owner}/${variables.name}/issues/${seed.spec.number}`,
             parent: seed.spec.parent_number ? { number: seed.spec.parent_number } : null,
             subIssuesSummary: { total: seed.subs.length, completed: seed.subs.filter((x: any) => (x.state ?? "OPEN") !== "OPEN").length },
+            updated_at: seed.spec.updated_at ?? "2025-01-05T00:00:00Z",
           })),
           // Open ticket sub-issues sit in the repo's issue list too, with their spec as parent.
           ...specs.flatMap((seed) =>
@@ -259,9 +271,14 @@ export function startMockGitHub(root: string, login = "kevin") {
               url: `https://github.com/${variables.owner}/${variables.name}/issues/${s.number}`,
               parent: { number: seed.spec.number },
               subIssuesSummary: { total: 0, completed: 0 },
+              updated_at: s.updated_at ?? "2025-01-05T00:00:00Z",
             })),
           ),
-        ];
+        ]
+          // The client asks for the 100 most recently updated open issues; the mock honours that.
+          .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
+          .slice(0, 100)
+          .map(({ updated_at: _updated, ...node }) => node);
         return send(200, { data: { repository: { issues: { nodes } } } });
       }
       const seed = subIssueSeeds[`${variables.owner}/${variables.name}#${variables.number}`];
@@ -381,7 +398,7 @@ export function startMockGitHub(root: string, login = "kevin") {
     send(404, { message: `mock has no ${req.method} ${p}` });
   });
 
-  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; checkRuns: typeof checkRuns; closed: typeof closed; lockedIssues: typeof lockedIssues; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; forgetSubIssues: typeof forgetSubIssues; close: () => Promise<void>; pullFailures: boolean; issueFailures: boolean; graphqlCalls: number; slowMs: number }>((resolve) => {
+  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; checkRuns: typeof checkRuns; closed: typeof closed; lockedIssues: typeof lockedIssues; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; bulkSeedIssues: typeof bulkSeedIssues; forgetSubIssues: typeof forgetSubIssues; close: () => Promise<void>; pullFailures: boolean; issueFailures: boolean; graphqlCalls: number; slowMs: number }>((resolve) => {
     server.listen(Number(process.env.MOCK_GH_PORT ?? 0), "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
       resolve({
@@ -394,6 +411,7 @@ export function startMockGitHub(root: string, login = "kevin") {
         lockedIssues,
         createBare,
         seedSubIssues,
+        bulkSeedIssues,
         forgetSubIssues,
         close: () => new Promise((r) => server.close(() => r())),
         set pullFailures(v: boolean) {
