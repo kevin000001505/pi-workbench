@@ -1,11 +1,11 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type Card, type Column, COLUMNS, DONE_PAGE, isPlainUnclaimedCard, unclaimedNumber } from "../../../shared/board.ts";
+import { type Card, type Column, type SubCard, COLUMNS, DONE_PAGE, isPlainUnclaimedCard, issueNumberOf, unclaimedNumber } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
-import { approveQuestion, CardDetail, issueParts } from "./CardDetail.tsx";
-import { CardActions, SOLVE, SOLVE_ALL, SPLIT } from "./CardActions.tsx";
+import { abandonQuestion, approveQuestion, issueParts, CardDetail, TICKET_STATE } from "./CardDetail.tsx";
+import { type CardAction, CardActions, SOLVE, SOLVE_ALL, SPLIT } from "./CardActions.tsx";
 import { matches, NewCard, Search, typingIn, wordsOf } from "./BoardDialogs.tsx";
-import { isResolvedNote, type Repo, type UnclaimedSpecTickets } from "../types.ts";
+import { isResolvedNote, type Repo, type SessionSummary, type UnclaimedSpecTickets, waitingOn } from "../types.ts";
 import { Spinner } from "../ui.tsx";
 import "../board.css";
 
@@ -86,46 +86,77 @@ function Icon({ name }: { name: keyof typeof ICONS }) {
 
 function BoardCard({
   card,
-  activity,
+  s,
   onDrag,
   onOpen,
   onMove,
   onToggleExpand,
+  onApprove,
+  onStop,
+  onRetry,
+  onAbandon,
   busy,
 }: {
   card: Card;
-  activity: string;
+  /** The session behind a session card; an unclaimed or done-issue card has none. */
+  s: SessionSummary | undefined;
   onDrag: (card: Card | null) => void;
   onOpen: () => void;
   onMove: (column: Column) => void;
-  /** An unclaimed spec card's click toggles its row of ticket sub-issue cards instead of opening the detail. */
+  /** A spec card's click toggles its row of ticket sub-cards instead of opening the detail. */
   onToggleExpand?: () => void;
+  onApprove?: () => void;
+  onStop?: () => void;
+  onRetry?: () => void;
+  onAbandon?: () => void;
   busy: boolean;
 }) {
   const issue = unclaimedNumber(card.id);
-  const unclaimed = issue !== null;
-  // A plain unclaimed card (no open ticket sub-issues) and a spec unclaimed card both sit in Issues.
-  const plain = isPlainUnclaimedCard(card);
+  // An unclaimed card and a done-issue card share the `issue:<number>` id; only the one in Issues
+  // is an open unclaimed card. Both link to their issue on GitHub, a session card to its session.
+  const byIssue = issue !== null;
+  const unclaimed = byIssue && card.column === "issues";
+  // A plain unclaimed card (no open ticket sub-issues) and a spec unclaimed card both sit in Issues;
+  // a Done card is never plain, and never gets Solve and Split.
+  const plain = isPlainUnclaimedCard(card) && unclaimed;
   const prState = card.pr?.state ?? null;
   // Every Issues card that is not a plain unclaimed card gets Solve all: an unclaimed spec issue,
-  // or a session paused in `ready`.
+  // or a session paused in `ready` (a plain issue card's single ticket included).
   const solveAll = card.column === "issues" && !plain;
-  const expandable = unclaimed && !plain;
+  // A plain click on any spec card toggles its row of ticket sub-cards (one row open at a time);
+  // a plain card (a plain issue, a card with no tickets yet) still opens the card detail.
+  const spec = card.specCard;
+  // The spec card keeps its whole-card actions on the card: each stops the card's own click.
+  const actions: CardAction[] = [];
+  if (solveAll) actions.push(SOLVE_ALL);
+  if (plain) actions.push(SOLVE, SPLIT);
+  if (spec && s) {
+    if (s.phase === "pr") actions.push({ label: "Approve", title: "Merge the PR, delete the branch and the worktree", run: onApprove });
+    // Stop only while the tickets, the review or the retro run is going; a stopped review or
+    // retro shows Retry instead, as a blocked ticket's sub-card does.
+    if ((s.phase === "implement" || s.phase === "review" || s.phase === "retro") && (s.status === "running" || s.status === "waiting"))
+      actions.push({ label: "Stop", title: "Stop the runs; the card pauses in Issues, where Solve all continues", danger: true, run: onStop });
+    if ((s.phase === "review" || s.phase === "retro") && s.attention)
+      actions.push({ label: "Retry", title: "Re-run the review or the retro", run: onRetry });
+    if (card.column !== "done")
+      actions.push({ label: "Abandon", title: "Stop the runs, close the PR, delete the branch, the worktree and the card; the issues stay open", danger: true, run: onAbandon });
+    if (waitingOn(s).length > 0) actions.push({ label: "Answer", title: "A decision or permission waits on the user; the card detail answers it", run: onOpen });
+  }
   const line =
     card.attention ??
     (unclaimed
       ? plain
         ? `Issue #${issue}: Solve makes it the card's only ticket; Split breaks it into tickets when it is too big.`
         : `Spec issue #${issue}: Solve all starts its tickets; drag it to To do to rework it`
-      : activity);
+      : s?.activity ?? "");
   return (
-    // A click opens the card detail; a modified click still opens the session in a new tab.
-    // An unclaimed card (plain or spec) opens its issue on GitHub with a modified click.
+    // A click opens the ticket sub-cards' row on a spec card, the card detail otherwise;
+    // a modified click still opens the session (or the issue on GitHub) in a new tab.
     <a
       className="kz-card"
-      href={unclaimed ? (card.specRef ?? undefined) : `#/session/${card.id}`}
-      target={unclaimed ? "_blank" : undefined}
-      rel={unclaimed ? "noopener" : undefined}
+      href={byIssue ? (card.specRef ?? undefined) : `#/session/${card.id}`}
+      target={byIssue ? "_blank" : undefined}
+      rel={byIssue ? "noopener" : undefined}
       draggable
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = "move";
@@ -136,7 +167,7 @@ function BoardCard({
       onClick={(e) => {
         if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
         e.preventDefault();
-        if (expandable) onToggleExpand?.();
+        if (spec) onToggleExpand?.();
         else onOpen();
       }}
     >
@@ -149,9 +180,7 @@ function BoardCard({
         )}
       </div>
       {line && <span className={`desc ${card.attention && !isResolvedNote(card.attention) ? "attention" : ""}`}>{line}</span>}
-      {(solveAll || plain) && (
-        <CardActions actions={[...(solveAll ? [SOLVE_ALL] : []), ...(plain ? [SOLVE, SPLIT] : [])]} busy={busy} onMove={(column) => onMove(column)} />
-      )}
+      {actions.length > 0 && <CardActions actions={actions} busy={busy} onMove={(column) => onMove(column)} />}
       {card.pr && (
         <span className="tags">
           <span className={`kz-tag ${prState ? `pr-${prState}` : ""}`} title={card.pr.url ?? undefined}>
@@ -252,6 +281,146 @@ function SpecSubcards({ card, toast, onSolved }: { card: Card; toast: (text: str
   );
 }
 
+/**
+ * One row of a started spec card's tickets, as cards under the card: the ticket's state, a live
+ * dot while it runs, the tickets it waits on, and a link to the ticket's own run (the session
+ * view's run tabs reach the spec's grill, review, retro and merge runs from it), or to its issue
+ * on GitHub when it has no run yet, or none at all. Solve runs one ticket while the card waits
+ * in Issues (disabled while a blocker is not done); Retry and Mark done act on a blocked ticket.
+ * In a Done card, a ticket that is not done shows "Not planned".
+ */
+function TicketSubcards({ s, toast, onSolved }: { s: SessionSummary; toast: (text: string, level?: "info" | "warning" | "error") => void; onSolved: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const done = new Set(s.tickets.filter((t) => t.status === "done").map((t) => t.num));
+  const act = async (action: "retry" | "skip") => {
+    setBusy(true);
+    try {
+      await api.post(`/api/sessions/${s.id}/pipeline`, { action });
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const solve = async (num: number) => {
+    setBusy(true);
+    try {
+      await api.post(`/api/sessions/${s.id}/tickets/${num}/solve`, {});
+      onSolved();
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const doneCard = s.phase === "done";
+  return (
+    <div className="kz-sublist">
+      {s.tickets.map((t) => {
+        const waitingOn = t.blockedBy.filter((b) => !done.has(b));
+        const issue = issueNumberOf(t.trackerRef, s.repoId);
+        const link = t.runId
+          ? `#/session/${s.id}?run=${t.runId}`
+          : issue !== null
+            ? `https://github.com/${s.repoId}/issues/${issue}`
+            : undefined;
+        const external = link?.startsWith("http") ?? false;
+        // A done card marks a ticket that is not done "Not planned".
+        const state = doneCard ? (t.status === "done" ? "done" : "not-planned") : t.status;
+        const label = doneCard ? (t.status === "done" ? "Done" : "Not planned") : TICKET_STATE[t.status];
+        const solveShown = s.phase === "ready" && (t.status === "ready" || t.status === "running");
+        const blocked = t.status === "blocked" && !doneCard;
+        return (
+          <a
+            key={t.num}
+            className="kz-card kz-subcard"
+            href={link}
+            target={external ? "_blank" : undefined}
+            rel={external ? "noopener" : undefined}
+          >
+            <div className="head">
+              <span className="sub-state">
+                <span className={`kz-substate ${state}`}>{label}</span>
+                {t.status === "running" && <span className="live-dot" />}
+              </span>
+              <div className="title">#{t.num} {t.title}</div>
+            </div>
+            {waitingOn.length > 0 && <span className="desc">waits on {waitingOn.map((b) => `#${b}`).join(", ")}</span>}
+            {(solveShown || blocked) && (
+              <span className="kz-card-actions">
+                {solveShown && (
+                  <button
+                    className="kz-btn"
+                    disabled={busy || waitingOn.length > 0}
+                    title={waitingOn.length === 0 ? "Run only this ticket; the card waits in Issues again when it is done" : "Solve waits for the tickets that block it"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      void solve(t.num);
+                    }}
+                  >
+                    {busy ? <Spinner small /> : "Solve"}
+                  </button>
+                )}
+                {blocked && (
+                  <>
+                    <button
+                      className="kz-btn"
+                      disabled={busy}
+                      title="Re-run this blocked ticket"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        void act("retry");
+                      }}
+                    >
+                      {busy ? <Spinner small /> : "Retry"}
+                    </button>
+                    <button
+                      className="kz-btn"
+                      disabled={busy}
+                      title="Mark this blocked ticket done and continue"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        void act("skip");
+                      }}
+                    >
+                      {busy ? <Spinner small /> : "Mark done"}
+                    </button>
+                  </>
+                )}
+              </span>
+            )}
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * One row of a done spec issue card's recorded sub-issues, as cards under the card: each links
+ * to its issue on GitHub, and "Not planned" marks a sub-issue the board closed as not planned
+ * when a hand-closed spec dropped it.
+ */
+function DoneSubcards({ subs }: { subs: SubCard[] }) {
+  return (
+    <div className="kz-sublist">
+      {subs.map((s) => (
+        <a key={s.number} className="kz-card kz-subcard" href={s.url} target="_blank" rel="noopener">
+          <div className="head">
+            <span className="sub-state">
+              <span className={`kz-substate ${s.notPlanned ? "not-planned" : "done"}`}>{s.notPlanned ? "Not planned" : "Done"}</span>
+            </span>
+            <div className="title">#{s.number} {s.title}</div>
+          </div>
+        </a>
+      ))}
+    </div>
+  );
+}
+
 /** The kanban view of one repo's features: one card per pipeline session, in kanzo's look. */
 export function Board({ repoId }: { repoId?: string }) {
   const { sessions, boardChanges, toast } = useStore();
@@ -263,7 +432,8 @@ export function Board({ repoId }: { repoId?: string }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [refetch, setRefetch] = useState(0);
   const [openId, setOpenId] = useState<string | null>(null);
-  // The unclaimed spec card whose row of ticket sub-issues is open; a click toggles it.
+  // The spec card whose row of ticket sub-cards is open; a click toggles it. Only one row opens
+  // at a time, as the unclaimed spec card's row works today.
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [doneHidden, setDoneHidden] = useState(0);
   const [doneLimit, setDoneLimit] = useState(DONE_PAGE);
@@ -336,6 +506,14 @@ export function Board({ repoId }: { repoId?: string }) {
       () => (setError(null), setRefetch((n) => n + 1)),
       (e) => setError(e.message),
     ).finally(() => setBusyId(null));
+  };
+
+  // A spec card's whole-card actions: the same routes as the card detail and the pipeline panel.
+  // Approve and Abandon ask a confirm first (the drag's, and the card detail's).
+  const actCard = (card: Card, act: () => Promise<unknown>, question?: string) => {
+    if (question && !confirm(question)) return;
+    setBusyId(card.id);
+    void act().catch((e) => setError(e.message)).finally(() => setBusyId(null));
   };
 
   const drop = (column: Column) => {
@@ -483,22 +661,39 @@ export function Board({ repoId }: { repoId?: string }) {
                   <Fragment key={c.id}>
                     <BoardCard
                       card={c}
-                      activity={sessions[c.id]?.activity ?? ""}
+                      s={sessions[c.id]}
                       onDrag={setDragged}
                       onOpen={() => setOpenId(c.id)}
                       onMove={(column) => moveCard(c, column)}
                       onToggleExpand={() => setExpandedId(expandedId === c.id ? null : c.id)}
+                      onApprove={() => actCard(c, () => api.post(`/api/sessions/${c.id}/approve`, {}), approveQuestion(c))}
+                      onStop={() => actCard(c, () => api.post(`/api/sessions/${c.id}/pipeline`, { action: "stop" }))}
+                      onRetry={() => actCard(c, () => api.post(`/api/sessions/${c.id}/pipeline`, { action: "retry" }))}
+                      onAbandon={() => actCard(c, () => api.post(`/api/sessions/${c.id}/abandon`, {}), abandonQuestion(c))}
                       busy={busyId === c.id}
                     />
-                    {expandedId === c.id && unclaimedNumber(c.id) !== null && !isPlainUnclaimedCard(c) && (
-                      <SpecSubcards
-                        card={c}
-                        toast={toast}
-                        onSolved={() => {
-                          setExpandedId(null);
-                          setRefetch((n) => n + 1);
-                        }}
-                      />
+                    {expandedId === c.id && c.specCard && (
+                      c.subs ? (
+                        <DoneSubcards subs={c.subs} />
+                      ) : unclaimedNumber(c.id) !== null ? (
+                        <SpecSubcards
+                          card={c}
+                          toast={toast}
+                          onSolved={() => {
+                            setExpandedId(null);
+                            setRefetch((n) => n + 1);
+                          }}
+                        />
+                      ) : sessions[c.id] ? (
+                        <TicketSubcards
+                          s={sessions[c.id]}
+                          toast={toast}
+                          onSolved={() => {
+                            setExpandedId(null);
+                            setRefetch((n) => n + 1);
+                          }}
+                        />
+                      ) : null
                     )}
                   </Fragment>
                 ))}
