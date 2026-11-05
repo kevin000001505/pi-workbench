@@ -128,6 +128,11 @@ CREATE TABLE IF NOT EXISTS secrets (
   scope TEXT NOT NULL, name TEXT NOT NULL, iv TEXT NOT NULL, tag TEXT NOT NULL,
   data TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (scope, name)
 );
+-- The issues a merged card closed, per repo: the board's Done column lists them beside the merged cards.
+CREATE TABLE IF NOT EXISTS issues_done (
+  repo_id TEXT NOT NULL, number INTEGER NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL,
+  closed_at INTEGER NOT NULL, PRIMARY KEY (repo_id, number)
+);
 `;
 
 export function openDb(file: string) {
@@ -201,4 +206,26 @@ export function putSetting(db: Db, key: string, value: unknown) {
     key,
     JSON.stringify(value),
   );
+}
+
+/** Record an issue a merged card closed: the board's Done lists it beside the card. One row per repo issue. */
+export function recordIssueDone(db: Db, repoId: string, number: number, title: string, url: string, closedAt: number) {
+  db.prepare("INSERT OR REPLACE INTO issues_done (repo_id, number, title, url, closed_at) VALUES (?, ?, ?, ?, ?)").run(
+    repoId,
+    number,
+    title,
+    url,
+    closedAt,
+  );
+}
+
+/** The issues a repo's merged cards closed: the board's Done cards (see doneIssueCards; Done orders them by close time). */
+export function doneIssuesOf(db: Db, repoId: string): { number: number; title: string; url: string; closedAt: number }[] {
+  const rows = db.prepare("SELECT number, title, url, closed_at FROM issues_done WHERE repo_id = ?").all(repoId) as {
+    number: number;
+    title: string;
+    url: string;
+    closed_at: number;
+  }[];
+  return rows.map((r) => ({ number: r.number, title: r.title, url: r.url, closedAt: r.closed_at }));
 }

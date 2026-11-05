@@ -3,9 +3,9 @@ import fs from "node:fs";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import path from "node:path";
-import { boardCards, claimRefs, DONE_PAGE, limitDone, prState, unclaimedCards } from "../../shared/board.ts";
+import { boardCards, claimRefs, DONE_PAGE, doneIssueCards, limitDone, prState, unclaimedCards } from "../../shared/board.ts";
 import { config, TYPESAFE_SKILL } from "./config.ts";
-import { openDb } from "./db.ts";
+import { doneIssuesOf, openDb } from "./db.ts";
 import type { GitEnv } from "./git.ts";
 import { GitHub, GitHubError } from "./github.ts";
 import { autoApproveView, getAutoApproveSettings, listModelsFor, localJudge, saveAutoApproveKey, saveReviewerKey, savedJudgeToken, savedReviewerKey, testJudge, testReviewer } from "./autoapprove.ts";
@@ -192,7 +192,9 @@ const router = new Router()
     const done = query.has("done") ? Number(query.get("done")) : DONE_PAGE;
     if (!Number.isInteger(done) || done < 0) throw new HttpError(400, "done must be a whole number of cards");
     const mine = sessions.list().filter((s) => s.repoId === repo.id);
-    const board = limitDone(boardCards(mine, await unclaimedOf(repo.id, mine)), done);
+    // The issues merged cards closed sit in Done beside the merged cards, newest first.
+    const extras = [...(await unclaimedOf(repo.id, mine)), ...doneIssueCards(doneIssuesOf(db, repo.id))];
+    const board = limitDone(boardCards(mine, extras), done);
     // The PR badge's state comes from GitHub; a card whose PR cannot be read keeps state null.
     await Promise.all(
       board.cards.map(async (c) => {

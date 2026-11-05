@@ -69,6 +69,8 @@ export type Card = {
   /** The card's PR; `state` is null until the workbench reads it from GitHub. */
   pr: { number: number; url: string | null; state: PrState | null } | null;
   specRef: string | null;
+  /** When the card reached Done (a session card's doneAt, a done issue's close time); null for any other card. */
+  doneAt: number | null;
 };
 
 /** The PR badge: open, checks (a check runs or failed), conflict (the branch does not merge), or merged. */
@@ -96,6 +98,7 @@ export function cardOf(s: CardSource): Card | null {
     attention: s.attention,
     pr: s.prNumber ? { number: s.prNumber, url: s.prUrl, state: null } : null,
     specRef: s.specRef,
+    doneAt: s.doneAt ?? null,
   };
 }
 
@@ -112,13 +115,12 @@ export function limitDone(cards: Card[], limit: number): { cards: Card[]; doneHi
 /**
  * The cards of these sessions in column order, then the unclaimed cards (which sit in Issues);
  * inside a column, in the order given, except Done, which lists the newest first by when
- * each card got there.
+ * each card got there (a session card's doneAt, a done issue card's close time).
  */
 export function boardCards(sessions: CardSource[], unclaimed: Card[] = []): Card[] {
   const order = new Map(COLUMNS.map((c, i) => [c.id, i]));
-  const doneAt = new Map(sessions.map((s) => [s.id, s.doneAt ?? 0]));
   return [...sessions.map(cardOf).filter((c): c is Card => c !== null), ...unclaimed]
-    .sort((a, b) => order.get(a.column)! - order.get(b.column)! || (a.column === "done" ? doneAt.get(b.id)! - doneAt.get(a.id)! : 0));
+    .sort((a, b) => order.get(a.column)! - order.get(b.column)! || (a.column === "done" ? (b.doneAt ?? 0) - (a.doneAt ?? 0) : 0));
 }
 
 /**
@@ -204,7 +206,29 @@ export function unclaimedCards(issues: BoardIssue[], claims: (string | null)[], 
       attention: null,
       pr: null,
       specRef: i.url,
+      doneAt: null,
     }));
+}
+
+/** An issue a merged card closed, as the board's Done column reads it. */
+export type DoneIssue = { number: number; title: string; url: string; closedAt: number };
+
+/**
+ * The issues a merged card closed, as cards in Done: one per issue, with the time it closed so
+ * Done lists them newest first, beside the merged cards. The id is the unclaimed card's id, so
+ * an issue reopened on GitHub keeps its card identity.
+ */
+export function doneIssueCards(issues: DoneIssue[]): Card[] {
+  return issues.map((i) => ({
+    id: unclaimedId(i.number),
+    title: i.title,
+    column: "done" as const,
+    tickets: { done: 0, total: 0 },
+    attention: null,
+    pr: null,
+    specRef: i.url,
+    doneAt: i.closedAt,
+  }));
 }
 
 /**

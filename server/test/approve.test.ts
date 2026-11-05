@@ -80,6 +80,47 @@ test("Approve merges the PR with a merge commit, deletes the branch and the work
   assert.equal(again.status, 409);
 });
 
+test("Approve moves the card's issues to Done on the board: the spec issue and every ticket issue", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id } = await toReview(217);
+  // Before the merge, the session's card claims the spec issue; no issue cards are on the board yet.
+  assert.equal((await board()).find((c) => c.id === id)?.specRef, "https://github.com/kevin/ship/issues/217");
+  assert.ok(!(await board()).some((c) => c.id === "issue:217" || c.id === "issue:218"));
+  await approve(id);
+  assert.equal((await summary(id)).phase, "done");
+  // After the merge, the closed issues sit in Done beside the merged card, with their titles and links.
+  const done = (await board()).filter((c) => c.column === "done");
+  assert.ok(done.some((c) => c.id === id && c.pr?.state === "merged"), "the merged card is in Done too");
+  const specCard = done.find((c) => c.id === "issue:217");
+  assert.ok(specCard, "the spec issue sits in Done after the merge");
+  assert.equal(specCard.title, "Spec 217");
+  assert.equal(specCard.specRef, "https://github.com/kevin/ship/issues/217");
+  assert.deepEqual(specCard.tickets, { done: 0, total: 0 });
+  assert.ok(specCard.doneAt, "the issue card says when it closed");
+  const ticketCard = done.find((c) => c.id === "issue:218");
+  assert.ok(ticketCard, "the ticket issue sits in Done after the merge");
+  assert.equal(ticketCard.title, "Write hello.txt");
+  assert.equal(ticketCard.specRef, "https://github.com/kevin/ship/issues/218");
+  // The closed issues are gone from Issues: no open card for them.
+  assert.ok(!(await board()).some((c) => (c.id === "issue:217" || c.id === "issue:218") && c.column === "issues"));
+});
+
+test("Approve moves a plain card's issue to Done on the board", { skip: !hasPi && "pi CLI not found" }, async () => {
+  await setup();
+  // A plain open issue of the demo feed, moved to Doing: the issue is the card's only ticket.
+  const r = await api("POST", "/api/repos/kevin/ship/issues/2/move", { column: "doing" });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const id = r.json.id;
+  assert.deepEqual(r.json.tickets.map((t: any) => t.trackerRef), ["2"], "the issue is the card's only ticket");
+  assert.ok(!(await board()).some((c) => c.id === "issue:2"), "the unclaimed card is claimed");
+  await driveToReview(id);
+  await approve(id);
+  assert.equal((await summary(id)).phase, "done");
+  const card = (await board()).find((c) => c.id === "issue:2");
+  assert.equal(card?.column, "done", "the closed issue sits in Done");
+  assert.equal(card?.title, "Fix login Crash");
+  assert.equal(card?.specRef, "https://github.com/kevin/ship/issues/2");
+});
+
 test("Review → Done is Approve; on a non-default base Approve closes the issues itself", { skip: !hasPi && "pi CLI not found" }, async () => {
   const { id, pr, worktree, branch } = await toReview(17, "develop");
   assert.equal(pr.base, "develop");
@@ -160,6 +201,10 @@ test("Approve closes the issues that name another tracked repo on that repo; one
   assert.deepEqual(gh.closed.slice(before), [{ ref: "kevin/tracker#12", by: "api" }]);
   assert.match(r.json.attention, /^PR #\d+ is merged, but issue kevin\/tracker#13 did not close \(.*Resource not accessible by personal access token.*\)\.$/);
   assert.equal((await board()).find((c) => c.id === s.id).column, "done");
+  // The closed foreign issue sits in Done on its own repo's board; the one that did not close does not.
+  const trackerBoard = (await api("GET", "/api/board?repo=kevin/tracker")).json.cards;
+  assert.ok(trackerBoard.some((c: any) => c.id === "issue:12" && c.column === "done"));
+  assert.ok(!trackerBoard.some((c: any) => c.id === "issue:13"));
 });
 
 test("Approve leaves open the issues of repos the workbench does not track, and lists them on the Done card", { skip: !hasPi && "pi CLI not found" }, async () => {
