@@ -332,6 +332,61 @@ test("listTicketSubIssues returns the spec and its open ticket sub-issues, with 
   await assert.rejects(new GitHub("nope").listTicketSubIssues("kevin", "ticketed", 7), (e) => e instanceof GitHubError && e.status === 401 && /Bad credentials/.test(e.message));
 });
 
+test("issueStates reads issues in one batched call; a number that does not resolve falls back to one read per number", async () => {
+  const { GitHub } = await import("../src/github.ts");
+  const client = new GitHub("ghp_test");
+  gh.createBare("kevin", "state-app");
+  // Feed issue #1 (open), spec #5 with one open and one not-planned-closed sub-issue; #8 does not exist.
+  gh.seedSubIssues(
+    "kevin",
+    "state-app",
+    { number: 5, title: "Spec five", body: "x", html_url: "https://github.com/kevin/state-app/issues/5" },
+    [
+      { number: 6, title: "Six", body: "s" },
+      { number: 7, title: "Seven", body: "s", state: "CLOSED", state_reason: "NOT_PLANNED" },
+    ],
+  );
+  const before = gh.graphqlCalls;
+  const states = await client.issueStates("kevin", "state-app", [5, 1, 8, 6]);
+  assert.equal(gh.graphqlCalls - before, 5, "the batch plus one read per number");
+  assert.equal(states.get(5)?.state, "OPEN");
+  assert.equal(states.get(5)?.title, "Spec five");
+  assert.equal(states.get(5)?.url, "https://github.com/kevin/state-app/issues/5");
+  assert.deepEqual(states.get(5)?.subIssues, [
+    { number: 6, state: "OPEN", stateReason: null },
+    { number: 7, state: "CLOSED", stateReason: "NOT_PLANNED" },
+  ]);
+  assert.equal(states.get(1)?.state, "OPEN", "a plain feed issue resolves in the batch too");
+  assert.deepEqual(states.get(1)?.subIssues, []);
+  assert.equal(states.get(6)?.state, "OPEN", "a sub-issue resolves in the batch too");
+  assert.deepEqual(states.get(6)?.subIssues, []);
+  assert.equal(states.get(8), null, "a number that does not resolve is null");
+  assert.ok(states.has(8));
+  // Every number resolves: one call only.
+  const clean = gh.graphqlCalls;
+  const again = await client.issueStates("kevin", "state-app", [5, 1]);
+  assert.equal(gh.graphqlCalls - clean, 1, "one batched call when every number resolves");
+  assert.equal(again.get(5)?.state, "OPEN");
+  assert.equal(again.get(1)?.state, "OPEN");
+  assert.deepEqual(await client.issueStates("kevin", "state-app", []), new Map());
+});
+
+test("closeIssue sends a state reason, and issueStates reads it back", async () => {
+  const { GitHub } = await import("../src/github.ts");
+  const client = new GitHub("ghp_test");
+  gh.createBare("kevin", "reason-app");
+  const closed = await client.closeIssue("kevin", "reason-app", 2, "not planned");
+  assert.equal(closed.state, "closed");
+  assert.equal(gh.issues.find((i) => i.owner === "kevin" && i.name === "reason-app" && i.number === 2)?.state_reason, "not planned", "the mock records the reason on the issue");
+  const entry = gh.closed.find((c) => c.ref === "kevin/reason-app#2");
+  assert.equal(entry?.reason, "not planned", "the close record carries the reason");
+  assert.equal((await client.issueStates("kevin", "reason-app", [2])).get(2)?.stateReason, "not planned");
+  // A close without a reason keeps no state reason.
+  await client.closeIssue("kevin", "reason-app", 1);
+  assert.equal(gh.issues.find((i) => i.owner === "kevin" && i.name === "reason-app" && i.number === 1)?.state_reason, undefined);
+  assert.equal((await client.issueStates("kevin", "reason-app", [1])).get(1)?.stateReason, null);
+});
+
 test("a bad token surfaces GitHub's message", async () => {
   const { GitHub, GitHubError } = await import("../src/github.ts");
   await assert.rejects(new GitHub("nope").user(), (e: any) => e instanceof GitHubError && e.status === 401 && /Bad credentials/.test(e.message));

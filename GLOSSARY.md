@@ -121,7 +121,7 @@ The column for a feature whose PR is open and waits for the user's Approve.
 _Avoid_: code review (that happens in QA), Reviewer (that is the permission reviewer)
 
 **Done**:
-The column for a feature whose PR is merged. The issues a merged card closed — its ticket sub-issues, its spec issue, its origin issue — are recorded with the card that closed them, and a ticket issue with the spec it belongs to as parent. They sit in the merged card's row, not as cards beside it. When the card's session is no longer listed, its spec issue is a card of its own in Done, and its sub-issues sit nested in its row. A done card's row shows its tickets; a ticket not done there is marked Not planned. Records from before this change stay flat cards.
+The column for a feature whose PR is merged, or whose spec issue was closed by hand on GitHub. The issues a merged card closed — its ticket sub-issues, its spec issue, its origin issue — are recorded with the card that closed them, and a ticket issue with the spec it belongs to as parent. They sit in the merged card's row, not as cards beside it. When the card's session is no longer listed, its spec issue is a card of its own in Done, and its sub-issues sit nested in its row. A done card's row shows its tickets; a ticket not done there is marked Not planned. A hand-closed spec's card keeps its branch and any open PR (a note on the card names them), and a hand-closed unstarted spec becomes a card of its own with its sub-issues in its row. Records from before this change stay flat cards.
 
 **Approve**:
 The user's go-ahead on a card in Review: it merges the PR with a merge commit and deletes the branch.
@@ -131,8 +131,12 @@ _Avoid_: Allow (that answers a permission), accept
 Dropping a feature: it stops the card's runs, closes its PR, deletes its branch, and takes the card off the board; its GitHub issues stay open.
 _Avoid_: stop (a stop pauses the card; the card can resume), delete, cancel
 
+**Not planned**:
+The mark on a ticket or sub-issue of a done card that will not be worked: the board closes the open sub-issues of a hand-closed spec as not planned, and a done card marks its not-done tickets as not planned. GitHub carries the close as the state reason `NOT_PLANNED`.
+_Avoid_: skipped, dropped, deferred
+
 **Reconcile**:
-The GitHub checks a board load runs for a repo: a PR merged on GitHub delivers the card as Approve delivers it, and a spec issue closed on GitHub moves its card to Done. At most one runs at a time per repo; an overlapping board load waits for the run in progress, and a moved card sends a board event to every open board.
+The GitHub checks a board load runs for a repo: a PR merged on GitHub delivers the card as Approve delivers it, and a spec issue closed by hand on GitHub moves its card to Done — the card's runs stop and its worktree is removed, but its branch and any open PR stay on GitHub (a note on the card names them), and the spec's open sub-issues and the card's not-done ticket issues close as **Not planned**. A hand-closed spec the board watched as an unclaimed card becomes a card of its own in Done with its sub-issues in its row. The checks skip a card the PR-merged rule delivered in the same pass, a card in `pr` whose PR is merged, a card in flight with Approve or a merge run, a card whose PR state cannot be read, and a plain card; a board load that cannot read the open-issue list skips them. At most one runs at a time per repo; an overlapping board load waits for the run in progress, and a moved card sends a board event to every open board.
 _Avoid_: sync, poll, catch up
 
 ## Relationships

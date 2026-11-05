@@ -19,14 +19,16 @@ export function startMockGitHub(root: string, login = "kevin") {
     { name: "ci", status: "completed", conclusion: "success" },
     { name: "lint", status: "in_progress", conclusion: null },
   ];
-  // Every issue a merge or an issue PATCH closed, in order: `{ ref: "owner/name#n", by: "merge" | "api" }`.
-  const closed: { ref: string; by: "merge" | "api" }[] = [];
+  // Every issue a merge or an issue PATCH closed, in order: `{ ref: "owner/name#n", by: "merge" | "api", reason? }`.
+  const closed: { ref: string; by: "merge" | "api"; reason?: string }[] = [];
   // Issues (`owner/name#n`) that the token may not close: their PATCH answers 403, as GitHub does.
   const lockedIssues = new Set<string>();
-  // A test sets them to make a PR read fail, or a PR read and an issue close slow (a board load
-  // overlaps an in-flight Approve delivery, so the guards can be seen to hold).
+  // A test sets them to make a PR read fail, a GraphQL read fail, or a PR read and an issue close slow
+  // (a board load overlaps an in-flight Approve delivery, so the guards can be seen to hold).
   let pullFailures = false;
+  let issueFailures = false;
   let slowMs = 0;
+  let graphqlCalls = 0;
   const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
   /**
    * A pull's mergeable state: its `mergeable_state` switch when a test set one, else what git says
@@ -106,16 +108,20 @@ export function startMockGitHub(root: string, login = "kevin") {
   const seedSubIssues = (owner: string, name: string, spec: any, subs: any[]) => {
     subIssueSeeds[`${owner}/${name}#${spec.number}`] = { spec, subs };
   };
+  /** Drop a spec's seed: the issue no longer resolves, as a deleted issue does not. */
+  const forgetSubIssues = (owner: string, name: string, number: number) => {
+    delete subIssueSeeds[`${owner}/${name}#${number}`];
+  };
 
   /** Close an issue wherever the mock knows it: the issues feed, the sub-issue seeds, and `closed`. */
-  const closeIssue = (owner: string, name: string, number: number, by: "merge" | "api") => {
-    for (const i of issues) if (i.owner === owner && i.name === name && i.number === number) i.state = "closed";
+  const closeIssue = (owner: string, name: string, number: number, by: "merge" | "api", reason?: string) => {
+    for (const i of issues) if (i.owner === owner && i.name === name && i.number === number) { i.state = "closed"; if (reason) i.state_reason = reason; }
     for (const [key, seed] of Object.entries(subIssueSeeds)) {
       if (!key.startsWith(`${owner}/${name}#`)) continue;
-      if (seed.spec.number === number) seed.spec.state = "CLOSED";
-      for (const sub of seed.subs) if (sub.number === number) sub.state = "CLOSED";
+      if (seed.spec.number === number) { seed.spec.state = "CLOSED"; if (reason) seed.spec.state_reason = reason; }
+      for (const sub of seed.subs) if (sub.number === number) { sub.state = "CLOSED"; if (reason) sub.state_reason = reason; }
     }
-    closed.push({ ref: `${owner}/${name}#${number}`, by });
+    closed.push({ ref: `${owner}/${name}#${number}`, by, ...(reason ? { reason } : {}) });
   };
 
   const server = http.createServer(async (req, res) => {
@@ -181,13 +187,53 @@ export function startMockGitHub(root: string, login = "kevin") {
       if (!all) return send(404, { message: "Not Found" });
       return send(200, comments.filter((c) => c.owner === m[1] && c.name === m[2] && c.issueNumber === Number(m[3])));
     }
-    // The workbench's GraphQL calls: an issue's sub-issues and their blockedBy edges, and the repo's open issues with sub-issue counts.
+    // The workbench's GraphQL calls: an issue's sub-issues and their blockedBy edges, the batched issue-state
+    // read (one aliased `issue(number:)` field per declared Int variable), and the repo's open issues.
     if (req.method === "POST" && p === "/graphql") {
+      graphqlCalls++;
+      if (issueFailures) return send(500, { message: "internal error" });
       // GitHub's GraphQL Issue type has `url`, not REST's `html_url`; reject `html_url` with HTTP 200 + errors like GitHub does.
       if (/\bhtml_url\b/.test(String(body.query ?? ""))) {
         return send(200, { errors: [{ message: "Field 'html_url' doesn't exist on type 'Issue'" }] });
       }
       const { variables } = body;
+      // The batched issue-state read: one field per declared Int variable. GitHub answers a missing
+      // issue with an `errors` entry (and partial data), as the client's fallback path expects.
+      const intVars = [...String(body.query ?? "").matchAll(/\$(\w+): Int!/g)].map((m) => m[1]);
+      if (variables.number === undefined && intVars.length) {
+        const base = `https://github.com/${variables.owner}/${variables.name}`;
+        const all = repoIssues(variables.owner, variables.name) ?? [];
+        const fields: Record<string, any> = {};
+        const errors: { type: string; message: string }[] = [];
+        for (const vn of intVars) {
+          const num = Number(variables[vn]);
+          const feed = all.find((i) => i.number === num && !i.pull_request);
+          const seed = subIssueSeeds[`${variables.owner}/${variables.name}#${num}`];
+          const subSeed = !feed && !seed
+            ? Object.entries(subIssueSeeds)
+                .filter(([k]) => k.startsWith(`${variables.owner}/${variables.name}#`))
+                .find(([, s]) => s.subs.some((x: any) => x.number === num))
+            : undefined;
+          if (feed) {
+            fields[vn] = { number: feed.number, title: feed.title, url: feed.html_url, state: feed.state === "open" ? "OPEN" : "CLOSED", stateReason: feed.state_reason ?? null, subIssues: { nodes: [] } };
+          } else if (seed) {
+            fields[vn] = {
+              number: seed.spec.number,
+              title: seed.spec.title,
+              url: seed.spec.url ?? seed.spec.html_url ?? `${base}/issues/${seed.spec.number}`,
+              state: seed.spec.state ?? "OPEN",
+              stateReason: seed.spec.state_reason ?? null,
+              subIssues: { nodes: seed.subs.map((s: any) => ({ number: s.number, state: s.state ?? "OPEN", stateReason: s.state_reason ?? null })) },
+            };
+          } else if (subSeed) {
+            const sub = subSeed[1].subs.find((x: any) => x.number === num);
+            fields[vn] = { number: sub.number, title: sub.title, url: `${base}/issues/${sub.number}`, state: sub.state ?? "OPEN", stateReason: sub.state_reason ?? null, subIssues: { nodes: [] } };
+          } else {
+            errors.push({ type: "NOT_FOUND", message: `Could not resolve to an Issue with the number of ${num}.` });
+          }
+        }
+        return send(200, { data: { repository: fields }, ...(errors.length ? { errors } : {}) });
+      }
       // The board's repo-wide query: the open issues with their sub-issue counts and parents.
       if (variables.number === undefined) {
         const all = repoIssues(variables.owner, variables.name);
@@ -234,7 +280,7 @@ export function startMockGitHub(root: string, login = "kevin") {
           return send(200, {
             data: {
               repository: {
-                issue: { number: feed.number, title: feed.title, body: feed.body, url: feed.html_url, parent: feed.parent_number ? { number: feed.parent_number } : null, subIssues: { nodes: [] } },
+                issue: { number: feed.number, title: feed.title, body: feed.body, url: feed.html_url, state: feed.state === "open" ? "OPEN" : "CLOSED", stateReason: feed.state_reason ?? null, parent: feed.parent_number ? { number: feed.parent_number } : null, subIssues: { nodes: [] } },
               },
             },
           });
@@ -255,6 +301,8 @@ export function startMockGitHub(root: string, login = "kevin") {
               url: isSub
                 ? `https://github.com/${variables.owner}/${variables.name}/issues/${variables.number}`
                 : seed.spec.url ?? seed.spec.html_url ?? `https://github.com/${variables.owner}/${variables.name}/issues/${seed.spec.number}`,
+              state: isSub ? sub.state ?? "OPEN" : seed.spec.state ?? "OPEN",
+              stateReason: isSub ? sub.state_reason ?? null : seed.spec.state_reason ?? null,
               parent: isSub ? { number: subOfSeed.spec.number } : seed.spec.parent_number ? { number: seed.spec.parent_number } : null,
               subIssues: {
                 nodes: (isSub ? [] : seed.subs).map((s: any) => ({
@@ -262,6 +310,7 @@ export function startMockGitHub(root: string, login = "kevin") {
                   title: s.title,
                   body: s.body,
                   state: s.state ?? "OPEN",
+                  stateReason: s.state_reason ?? null,
                   url: `https://github.com/${variables.owner}/${variables.name}/issues/${s.number}`,
                   blockedBy: { nodes: (s.blockedBy ?? []).map((n: number) => ({ number: n, state: "OPEN" })) },
                 })),
@@ -272,9 +321,10 @@ export function startMockGitHub(root: string, login = "kevin") {
       });
     }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/.exec(p)) && req.method === "PATCH") {
+      repoIssues(m[1], m[2]); // a close reaches a feed issue too; the feed seeds lazily on first read
       if (slowMs) await new Promise((r) => setTimeout(r, slowMs));
       if (lockedIssues.has(`${m[1]}/${m[2]}#${m[3]}`)) return send(403, { message: "Resource not accessible by personal access token" });
-      if (body.state === "closed") closeIssue(m[1], m[2], Number(m[3]), "api");
+      if (body.state === "closed") closeIssue(m[1], m[2], Number(m[3]), "api", body.state_reason);
       return send(200, { number: Number(m[3]), state: body.state ?? "open" });
     }
     // Merge a PR: a set `merge_refusal` (branch protection) or a "dirty" PR is refused with 405, as GitHub does.
@@ -331,7 +381,7 @@ export function startMockGitHub(root: string, login = "kevin") {
     send(404, { message: `mock has no ${req.method} ${p}` });
   });
 
-  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; checkRuns: typeof checkRuns; closed: typeof closed; lockedIssues: typeof lockedIssues; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; close: () => Promise<void>; pullFailures: boolean; slowMs: number }>((resolve) => {
+  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; checkRuns: typeof checkRuns; closed: typeof closed; lockedIssues: typeof lockedIssues; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; forgetSubIssues: typeof forgetSubIssues; close: () => Promise<void>; pullFailures: boolean; issueFailures: boolean; graphqlCalls: number; slowMs: number }>((resolve) => {
     server.listen(Number(process.env.MOCK_GH_PORT ?? 0), "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
       resolve({
@@ -344,12 +394,22 @@ export function startMockGitHub(root: string, login = "kevin") {
         lockedIssues,
         createBare,
         seedSubIssues,
+        forgetSubIssues,
         close: () => new Promise((r) => server.close(() => r())),
         set pullFailures(v: boolean) {
           pullFailures = v;
         },
         get pullFailures() {
           return pullFailures;
+        },
+        set issueFailures(v: boolean) {
+          issueFailures = v;
+        },
+        get issueFailures() {
+          return issueFailures;
+        },
+        get graphqlCalls() {
+          return graphqlCalls;
         },
         set slowMs(v: number) {
           slowMs = v;
