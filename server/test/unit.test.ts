@@ -323,11 +323,53 @@ test("unclaimed cards: plain and ticketed spec issues both sit in Issues; a sub-
   const sessions = [{ mode: "pipeline", phase: "ready", issueRef: "me/app#8", specRef: null }];
   const cards = unclaimedCards(issues, claimRefs(sessions), "me/app");
   assert.deepEqual(cards, [
-    { id: "issue:1", title: "A plain issue", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/me/app/issues/1", doneAt: null },
-    { id: "issue:5", title: "A spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, pr: null, specRef: "https://github.com/me/app/issues/5", doneAt: null },
+    { id: "issue:1", title: "A plain issue", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/me/app/issues/1", doneAt: null, specCard: false, subs: null },
+    { id: "issue:5", title: "A spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, pr: null, specRef: "https://github.com/me/app/issues/5", doneAt: null, specCard: true, subs: null },
   ]);
   // On the board, the plain card sits in Issues, before the spec's Issues card.
   assert.deepEqual(boardCards([], cards).map((c) => c.id), ["issue:1", "issue:5"]);
+});
+
+test("unclaimed cards: a spec issue is a spec card, a plain one is not, and done numbers are dropped", async () => {
+  const { unclaimedCards } = await import("../../shared/board.ts");
+  const issues = [
+    { number: 1, title: "A plain issue", url: "https://github.com/me/app/issues/1", openTickets: 0, hasParent: false },
+    { number: 5, title: "A spec", url: "https://github.com/me/app/issues/5", openTickets: 2, hasParent: false },
+  ];
+  const cards = unclaimedCards(issues, [], "me/app");
+  const plain = cards.find((c) => c.id === "issue:1")!;
+  assert.equal(plain.specCard, false, "a plain unclaimed card is not a spec card");
+  assert.equal(plain.subs, null);
+  const spec = cards.find((c) => c.id === "issue:5")!;
+  assert.equal(spec.specCard, true, "an unclaimed spec card is a spec card");
+  assert.equal(spec.subs, null, "an unclaimed card's row comes from GitHub, not from subs");
+  // Done numbers drop out of the unclaimed cards (this load's reconcile recorded them as done).
+  assert.deepEqual(unclaimedCards(issues, [], "me/app", [1]).map((c) => c.id), ["issue:5"]);
+});
+
+test("cardOf specCard: a plain issue card and a card with no tickets are not spec cards; more than one ticket, or one that is not the card's own issue, is", async () => {
+  const { cardOf } = await import("../../shared/board.ts");
+  const t = (trackerRef: string | null, status = "ready") => ({ status, trackerRef });
+  const src = (tickets: { status: string; trackerRef: string | null }[], extra: Record<string, unknown> = {}) =>
+    ({ id: "s1", title: "T", mode: "pipeline", phase: "ready", attention: null, prNumber: null, prUrl: null, specRef: null, doneAt: null, tickets, ...extra }) as any;
+  // A card with no tickets yet (still grilling) is not a spec card.
+  assert.equal(cardOf(src([]))?.specCard, false);
+  // More than one ticket is a spec card, whatever the refs.
+  assert.equal(cardOf(src([t("1"), t("2")]))?.specCard, true);
+  assert.equal(cardOf(src([t(".scratch/a/01.md"), t(".scratch/a/02.md")]))?.specCard, true);
+  // A plain issue card: the card's only ticket is its own spec issue (a bare number read in the card's repo, or the issue's ref in any form).
+  const own = src([t("2")], { specRef: "https://github.com/me/app/issues/2" });
+  assert.equal(cardOf(own)?.specCard, false);
+  assert.equal(cardOf(src([t("me/app#2")], { specRef: "https://github.com/me/app/issues/2" }))?.specCard, false);
+  assert.equal(cardOf(src([t("2")], { specRef: "me/app#2" }))?.specCard, false);
+  // One ticket that is not the card's own issue is a spec card.
+  assert.equal(cardOf(src([t("3")], { specRef: "https://github.com/me/app/issues/2" }))?.specCard, true);
+  assert.equal(cardOf(src([t("2")], { specRef: "https://github.com/other/repo/issues/3" }))?.specCard, true);
+  // A ticket with no tracker ref (a local ticket) is not the card's own issue, whatever the spec ref.
+  assert.equal(cardOf(src([t(null)]))?.specCard, true);
+  assert.equal(cardOf(src([t(".scratch/a/01.md")], { specRef: "https://github.com/me/app/issues/2" }))?.specCard, true);
+  // A direct session is never a spec card.
+  assert.equal(cardOf({ ...src([]), mode: "direct", phase: "direct" })?.specCard, false);
 });
 
 test("a direct session is a card in Doing: with no PR, and even while it sets up", async () => {
@@ -353,6 +395,8 @@ test("a direct session is a card in Doing: with no PR, and even while it sets up
     pr: null,
     specRef: null,
     doneAt: null,
+    specCard: false,
+    subs: null,
   });
   assert.equal(cardOf(session("direct", "setup"))?.column, "doing", "a direct session in setup is in Doing, not To do");
   // A PR on a direct session keeps the card in Doing, with its badge.
@@ -384,6 +428,8 @@ test("done cards: a merged card and the issues it closed sit in Done, newest fir
     pr: null,
     specRef: "https://github.com/me/app/issues/5",
     doneAt: 2000,
+    specCard: false,
+    subs: null,
   });
   // In Done, the newest card sits first: the issue card, then the session card, then the older issue card.
   assert.deepEqual(boardCards([doneSession("s1", 1000)], issues).map((c) => c.id), ["issue:5", "s1", "issue:7"]);
@@ -391,6 +437,43 @@ test("done cards: a merged card and the issues it closed sit in Done, newest fir
   const limited = limitDone(boardCards([doneSession("s1", 1000)], issues), 2);
   assert.deepEqual(limited.cards.map((c) => c.id), ["issue:5", "s1"]);
   assert.equal(limited.doneHidden, 1);
+});
+
+test("done issues group: hidden under a listed session, nested under a done spec, flat when the parent or session is gone", async () => {
+  const { doneIssueCards } = await import("../../shared/board.ts");
+  const issue = (n: number, extra: Record<string, unknown> = {}) => ({
+    number: n,
+    title: `I${n}`,
+    url: `https://github.com/me/app/issues/${n}`,
+    closedAt: 1000 + n,
+    ...extra,
+  });
+  const cards = doneIssueCards(
+    [
+      issue(1, { sessionId: "s1" }), // its closing session is on the board: not a card
+      issue(2), // a done spec with no session of its own
+      issue(3, { parent: 2 }), // a ticket of that spec
+      issue(4, { parent: 9 }), // a parent that is not a done issue here
+      issue(5, { sessionId: "s2" }), // a closing session the board does not list
+      issue(6), // an old row: no parent, no session
+      issue(7, { parent: 1 }), // a parent hidden by the listed session
+    ],
+    ["s1"],
+  );
+  assert.deepEqual(cards.map((c) => c.id), ["issue:2", "issue:4", "issue:5", "issue:6", "issue:7"]);
+  const specCard = cards.find((c) => c.id === "issue:2")!;
+  assert.equal(specCard.specCard, true, "a done spec with recorded sub-issues is a spec card");
+  assert.deepEqual(specCard.subs, [{ number: 3, title: "I3", url: "https://github.com/me/app/issues/3", notPlanned: false }]);
+  for (const id of ["issue:4", "issue:5", "issue:6", "issue:7"]) {
+    const c = cards.find((x) => x.id === id)!;
+    assert.equal(c.specCard, false, `${id} has no sub-issues`);
+    assert.equal(c.subs, null, `${id} carries no subs`);
+  }
+  // notPlanned rides on the sub-cards.
+  const planned = doneIssueCards([issue(2), issue(3, { parent: 2, notPlanned: true })]);
+  assert.deepEqual(planned[0].subs, [{ number: 3, title: "I3", url: "https://github.com/me/app/issues/3", notPlanned: true }]);
+  // No listed session: every done issue is a card of its own, still grouped by parent.
+  assert.deepEqual(doneIssueCards([issue(2), issue(3, { parent: 2 })]).map((c) => c.id), ["issue:2"]);
 });
 
 test("isPlainUnclaimedCard follows the tickets count, not the column", async () => {
@@ -457,6 +540,28 @@ test("old databases gain the pipeline columns", async () => {
   // The auto-approve audit trail's table is created too.
   db.prepare("INSERT INTO auto_decisions (session_id, run_id, request_id, event, created_at) VALUES ('s', 's', 'r1', '{}', 0)").run();
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM auto_decisions").get() as any).n, 1);
+});
+
+test("old databases gain the issues_done columns; a done issue records its parent and closing session", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wb-mig-")), "old.db");
+  const old = new DatabaseSync(file);
+  old.exec(
+    "CREATE TABLE issues_done (repo_id TEXT NOT NULL, number INTEGER NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL, closed_at INTEGER NOT NULL, PRIMARY KEY (repo_id, number))",
+  );
+  old.prepare("INSERT INTO issues_done (repo_id, number, title, url, closed_at) VALUES ('r', 1, 'Old', 'https://x/1', 100)").run();
+  old.close();
+  const db = openDb(file);
+  const oldRow = db.prepare("SELECT parent, session_id, not_planned FROM issues_done WHERE number = 1").get() as any;
+  assert.deepEqual({ ...oldRow }, { parent: null, session_id: null, not_planned: 0 }, "an old row has no parent, no session and is not not-planned");
+  const { recordIssueDone, doneIssuesOf } = await import("../src/db.ts");
+  recordIssueDone(db, "r", 2, "A ticket", "https://x/2", 200, { parent: 1, sessionId: "s9", notPlanned: true });
+  recordIssueDone(db, "r", 3, "A spec", "https://x/3", 300, { sessionId: "s9" });
+  assert.deepEqual(doneIssuesOf(db, "r"), [
+    { number: 1, title: "Old", url: "https://x/1", closedAt: 100, parent: null, sessionId: null, notPlanned: false },
+    { number: 2, title: "A ticket", url: "https://x/2", closedAt: 200, parent: 1, sessionId: "s9", notPlanned: true },
+    { number: 3, title: "A spec", url: "https://x/3", closedAt: 300, parent: null, sessionId: "s9", notPlanned: false },
+  ]);
 });
 
 test("old done pipeline rows with a PR number open as pr, once", async () => {

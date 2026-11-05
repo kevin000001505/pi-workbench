@@ -121,7 +121,7 @@ The column for a feature whose PR is open and waits for the user's Approve.
 _Avoid_: code review (that happens in QA), Reviewer (that is the permission reviewer)
 
 **Done**:
-The column for a feature whose PR is merged. The issues a merged card closed — its ticket sub-issues, its spec issue, its origin issue — sit here as cards beside it, newest first.
+The column for a feature whose PR is merged. The issues a merged card closed — its ticket sub-issues, its spec issue, its origin issue — are recorded with the card that closed them, and a ticket issue with the spec it belongs to as parent. They sit in the merged card's row, not as cards beside it. When the card's session is no longer listed, its spec issue is a card of its own in Done, and its sub-issues sit nested in its row. Records from before this change stay flat cards.
 
 **Approve**:
 The user's go-ahead on a card in Review: it merges the PR with a merge commit and deletes the branch.

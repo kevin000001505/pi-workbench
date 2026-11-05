@@ -1632,7 +1632,16 @@ export class SessionManager extends EventEmitter {
     const now = Date.now();
     // The issues the PR closes move to Done on the board: record them, in their own repos,
     // once they are closed. A title or URL the issue cannot be read for keeps the number.
+    // Every record carries the card that closed it; a ticket issue also carries its spec issue
+    // as parent (a ticket whose ref is its spec itself does not parent itself).
     const tickets = this.tickets(id);
+    const recordDone = async (r: Pick<RepoRow, "owner" | "name">, n: number) => {
+      const repoId = `${r.owner}/${r.name}`;
+      const info = await this.issueInfoOrFallback(r, n);
+      const specN = issueNumberOf(row.spec_ref, repoId);
+      const parent = specN !== null && specN !== n && tickets.some((t) => issueNumberOf(t.trackerRef, repoId) === n) ? specN : null;
+      recordIssueDone(this.db, repoId, n, info.title, info.url, now, { sessionId: id, parent });
+    };
     const ownNumbers = closedIssues(row, tickets);
     let ownClosed = row.base_branch === repo.default_branch;
     if (!ownClosed && ownNumbers.length) {
@@ -1646,10 +1655,7 @@ export class SessionManager extends EventEmitter {
       );
     }
     if (ownClosed) {
-      for (const n of ownNumbers) {
-        const info = await this.issueInfoOrFallback(repo, n);
-        recordIssueDone(this.db, repo.id, n, info.title, info.url, now);
-      }
+      for (const n of ownNumbers) await recordDone(repo, n);
     }
     // An issue of another repo closes only when the workbench tracks that repo: a model-written ref
     // must not close issues in any repo the token can write.
@@ -1668,8 +1674,7 @@ export class SessionManager extends EventEmitter {
         },
       );
       if (closed) {
-        const info = await this.issueInfoOrFallback({ owner, name }, issue.number);
-        recordIssueDone(this.db, issue.repo, issue.number, info.title, info.url, now);
+        await recordDone({ owner, name }, issue.number);
         // The issue's own board lists it in Done: open boards of that repo refetch.
         this.emit("board", issue.repo);
       }

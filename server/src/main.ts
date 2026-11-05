@@ -192,8 +192,11 @@ const router = new Router()
     const done = query.has("done") ? Number(query.get("done")) : DONE_PAGE;
     if (!Number.isInteger(done) || done < 0) throw new HttpError(400, "done must be a whole number of cards");
     const mine = sessions.list().filter((s) => s.repoId === repo.id);
-    // The issues merged cards closed sit in Done beside the merged cards, newest first.
-    const extras = [...(await unclaimedOf(repo.id, mine)), ...doneIssueCards(doneIssuesOf(db, repo.id))];
+    // The issues merged cards closed sit in Done beside the merged cards, newest first; an issue
+    // a listed session closed sits in that card's row, and a done spec nests its recorded
+    // sub-issues. The grouping sees every listed session, before the Done cut.
+    const doneIssues = doneIssuesOf(db, repo.id);
+    const extras = [...(await unclaimedOf(repo.id, mine)), ...doneIssueCards(doneIssues, mine.map((s) => s.id))];
     const board = limitDone(boardCards(mine, extras), done);
     // The PR badge's state comes from GitHub; a card whose PR cannot be read keeps state null.
     await Promise.all(
