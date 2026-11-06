@@ -53,7 +53,7 @@ test("Abandon closes the PR, deletes the branch, the worktree and the card, and 
   assert.ok(!(await api("GET", "/api/sessions")).json.some((s: any) => s.id === id));
   const cards = await board();
   assert.ok(!cards.some((c) => c.id === id), "the card is off the board");
-  assert.deepEqual(cards.find((c) => c.id === "issue:7"), { id: "issue:7", title: "Spec 7", column: "issues", tickets: { done: 0, total: 1 }, attention: null, pr: null, specRef: "https://github.com/kevin/ship/issues/7", doneAt: null });
+  assert.deepEqual(cards.find((c) => c.id === "issue:7"), { id: "issue:7", title: "Spec 7", column: "issues", tickets: { done: 0, total: 1 }, attention: null, pr: null, specRef: "https://github.com/kevin/ship/issues/7", doneAt: null, specCard: true, subs: null });
   await waitFor(() => events.seen.includes("kevin/ship"), 5_000);
   await waitFor(() => events.removed.includes(id), 5_000);
   events.close();

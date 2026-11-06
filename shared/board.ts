@@ -57,8 +57,13 @@ export type CardSource = {
   specRef: string | null;
   /** When the card reached Done; Done lists the newest first. */
   doneAt?: number | null;
-  tickets: { status: string }[];
+  /** Each ticket's status and tracker ref: the ref tells a plain card (its only ticket is its own
+   * spec issue) from a spec card. */
+  tickets: { status: string; trackerRef: string | null }[];
 };
+
+/** A sub-card of a done spec issue in Done, linking to the sub-issue on GitHub. */
+export type SubCard = { number: number; title: string; url: string; notPlanned: boolean };
 
 export type Card = {
   id: string;
@@ -71,6 +76,10 @@ export type Card = {
   specRef: string | null;
   /** When the card reached Done (a session card's doneAt, a done issue's close time); null for any other card. */
   doneAt: number | null;
+  /** A click on the card opens a row of ticket sub-cards. */
+  specCard: boolean;
+  /** The sub-cards of a done spec issue card in Done; null for every other card (a started card's row comes from its session's tickets). */
+  subs: SubCard[] | null;
 };
 
 /** The PR badge: open, checks (a check runs or failed), conflict (the branch does not merge), or merged. */
@@ -86,6 +95,18 @@ export function prState(s: PrStatus): PrState {
   return "open";
 }
 
+/**
+ * Whether a ticket's tracker ref names the card's own spec issue: both refs resolve to the same
+ * issue number, a bare number read in the card's own repo. A card whose only ticket is its own
+ * issue (Solve made the issue the card's only ticket) is a plain card, not a spec card.
+ */
+const isOwnIssue = (ticketRef: string | null, specRef: string | null): boolean => {
+  const t = parseIssueRef(ticketRef);
+  const s = parseIssueRef(specRef);
+  if (!t || !s) return false;
+  return t.number === s.number && (t.repo === null || (s.repo !== null && t.repo.toLowerCase() === s.repo.toLowerCase()));
+};
+
 /** The card for a session, or null for a pipeline phase that has no column. */
 export function cardOf(s: CardSource): Card | null {
   const column = sessionColumn(s.mode, s.phase);
@@ -99,6 +120,9 @@ export function cardOf(s: CardSource): Card | null {
     pr: s.prNumber ? { number: s.prNumber, url: s.prUrl, state: null } : null,
     specRef: s.specRef,
     doneAt: s.doneAt ?? null,
+    /** More than one ticket, or one ticket that is not the card's own issue, opens a row. */
+    specCard: s.tickets.length > 1 || (s.tickets.length === 1 && !isOwnIssue(s.tickets[0].trackerRef, s.specRef)),
+    subs: null,
   };
 }
 
@@ -190,14 +214,17 @@ export function claimRefs(sessions: { mode: string; phase: string; issueRef: str
 
 /**
  * The unclaimed cards: the open issues that no claim (see claimRefs) names, minus sub-issues of
- * another issue (a ticket issue stays inside its spec's card). A spec issue (it has open tickets)
- * and a plain issue (none) both show in Issues. A move of either card to Doing or To do gives it
- * its session; a stale move of a sub-issue's number is refused (409), as its spec's card owns it.
+ * another issue (a ticket issue stays inside its spec's card) and minus the numbers this board
+ * load recorded as done (they are on the board in Done, not in Issues). A spec issue (it has open
+ * tickets) and a plain issue (none) both show in Issues. A move of either card to Doing or To do
+ * gives it its session; a stale move of a sub-issue's number is refused (409), as its spec's card
+ * owns it.
  */
-export function unclaimedCards(issues: BoardIssue[], claims: (string | null)[], repoId: string): Card[] {
+export function unclaimedCards(issues: BoardIssue[], claims: (string | null)[], repoId: string, doneNumbers: number[] = []): Card[] {
   const claimed = new Set(claims.map((r) => issueNumberOf(r, repoId)));
+  const done = new Set(doneNumbers);
   return issues
-    .filter((i) => !claimed.has(i.number) && !i.hasParent)
+    .filter((i) => !claimed.has(i.number) && !i.hasParent && !done.has(i.number))
     .map((i) => ({
       id: unclaimedId(i.number),
       title: i.title,
@@ -207,28 +234,65 @@ export function unclaimedCards(issues: BoardIssue[], claims: (string | null)[], 
       pr: null,
       specRef: i.url,
       doneAt: null,
+      specCard: i.openTickets > 0,
+      subs: null,
     }));
 }
 
 /** An issue a merged card closed, as the board's Done column reads it. */
-export type DoneIssue = { number: number; title: string; url: string; closedAt: number };
+export type DoneIssue = {
+  number: number;
+  title: string;
+  url: string;
+  closedAt: number;
+  /** The spec issue this issue is a ticket of, when the delivery recorded one. */
+  parent?: number | null;
+  /** The card that closed this issue, when the delivery recorded one. */
+  sessionId?: string | null;
+  /** Closed as "not planned" by the board, when a hand-closed spec dropped it. */
+  notPlanned?: boolean;
+};
 
 /**
  * The issues a merged card closed, as cards in Done: one per issue, with the time it closed so
  * Done lists them newest first, beside the merged cards. The id is the unclaimed card's id, so
  * an issue reopened on GitHub keeps its card identity.
+ *
+ * An issue whose closing session is on the board is not a card: it sits in that card's row. An
+ * issue whose parent is a card of its own nests under it as a sub-card, and a done spec with
+ * recorded sub-issues is a spec card. Rows from before the parent and session columns are flat
+ * cards of their own, as before.
  */
-export function doneIssueCards(issues: DoneIssue[]): Card[] {
-  return issues.map((i) => ({
-    id: unclaimedId(i.number),
-    title: i.title,
-    column: "done" as const,
-    tickets: { done: 0, total: 0 },
-    attention: null,
-    pr: null,
-    specRef: i.url,
-    doneAt: i.closedAt,
-  }));
+export function doneIssueCards(issues: DoneIssue[], sessionIds: string[] = []): Card[] {
+  const listed = new Set(sessionIds);
+  const own = issues.filter((i) => !(i.sessionId && listed.has(i.sessionId)));
+  const numbers = new Set(own.map((i) => i.number));
+  const parentOf = (n: number) => own.find((i) => i.number === n)?.parent;
+  const nested = own.filter((i) => {
+    const p = i.parent;
+    return p !== null && p !== undefined && numbers.has(p) && !numbers.has(parentOf(p) ?? -1);
+  });
+  const nestedNumbers = new Set(nested.map((i) => i.number));
+  const cards = own.filter((i) => !nestedNumbers.has(i.number));
+  const subsOf = (n: number): SubCard[] | null => {
+    const subs = nested.filter((i) => i.parent === n);
+    return subs.length ? subs.map((i) => ({ number: i.number, title: i.title, url: i.url, notPlanned: !!i.notPlanned })) : null;
+  };
+  return cards.map((i) => {
+    const subs = subsOf(i.number);
+    return {
+      id: unclaimedId(i.number),
+      title: i.title,
+      column: "done" as const,
+      tickets: { done: 0, total: 0 },
+      attention: null,
+      pr: null,
+      specRef: i.url,
+      doneAt: i.closedAt,
+      specCard: !!subs,
+      subs,
+    };
+  });
 }
 
 /**

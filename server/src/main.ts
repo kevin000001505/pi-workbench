@@ -3,9 +3,9 @@ import fs from "node:fs";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import path from "node:path";
-import { boardCards, claimRefs, DONE_PAGE, doneIssueCards, limitDone, prState, unclaimedCards } from "../../shared/board.ts";
+import { boardCards, claimRefs, DONE_PAGE, doneIssueCards, limitDone, prState, type PrState, unclaimedCards, unclaimedNumber } from "../../shared/board.ts";
 import { config, TYPESAFE_SKILL } from "./config.ts";
-import { doneIssuesOf, openDb } from "./db.ts";
+import { doneIssuesOf, openDb, specWatchAdd } from "./db.ts";
 import type { GitEnv } from "./git.ts";
 import { GitHub, GitHubError } from "./github.ts";
 import { autoApproveView, getAutoApproveSettings, listModelsFor, localJudge, saveAutoApproveKey, saveReviewerKey, savedJudgeToken, savedReviewerKey, testJudge, testReviewer } from "./autoapprove.ts";
@@ -95,15 +95,6 @@ async function repoView(r: ReturnType<typeof listRepos>[number]) {
   };
 }
 
-/** The repo's unclaimed cards; none when GitHub cannot be read (no token, offline). */
-async function unclaimedOf(repoId: string, mine: ReturnType<SessionManager["list"]>) {
-  const [owner, name] = repoId.split("/");
-  const issues = await Promise.resolve()
-    .then(() => github().listBoardIssues(owner, name))
-    .catch(() => []);
-  return unclaimedCards(issues, claimRefs(mine), repoId);
-}
-
 const router = new Router()
   .on("GET", "/api/health", () => ({ ok: true }))
 
@@ -191,17 +182,45 @@ const router = new Router()
     // `done` is how many Done cards to list, newest first; the board's "show more" raises it.
     const done = query.has("done") ? Number(query.get("done")) : DONE_PAGE;
     if (!Number.isInteger(done) || done < 0) throw new HttpError(400, "done must be a whole number of cards");
-    const mine = sessions.list().filter((s) => s.repoId === repo.id);
-    // The issues merged cards closed sit in Done beside the merged cards, newest first.
-    const extras = [...(await unclaimedOf(repo.id, mine)), ...doneIssueCards(doneIssuesOf(db, repo.id))];
-    const board = limitDone(boardCards(mine, extras), done);
-    // The PR badge's state comes from GitHub; a card whose PR cannot be read keeps state null.
-    await Promise.all(
-      board.cards.map(async (c) => {
-        if (c.pr) c.pr.state = await github().pullStatus(repo.owner, repo.name, c.pr.number).then(prState, () => null);
+    const mine = () => sessions.list().filter((s) => s.repoId === repo.id);
+    let mineNow = mine();
+    // The open issues, read first: the unclaimed cards and the board load's GitHub checks share
+    // the read. One read per PR number, in parallel, reused for the badges; null when GitHub
+    // cannot be read.
+    const issuesP = github().listBoardIssues(repo.owner, repo.name).catch(() => null);
+    const prStates = new Map<number, PrState | null>();
+    await Promise.all([
+      issuesP,
+      ...mineNow.map(async (s) => {
+        if (s.prNumber !== null && !prStates.has(s.prNumber))
+          prStates.set(s.prNumber, await github().pullStatus(repo.owner, repo.name, s.prNumber).then(prState, () => null));
       }),
-    );
-    return board;
+    ]);
+    const issues = await issuesP;
+    // The spec issues the board shows as unclaimed cards are watched: the checks read their state on GitHub.
+    const unclaimedSpecNumbers = (issues ? unclaimedCards(issues, claimRefs(mineNow), repo.id) : [])
+      .filter((c) => c.specCard)
+      .map((c) => unclaimedNumber(c.id)!);
+    specWatchAdd(db, repo.id, unclaimedSpecNumbers);
+    // The board load's GitHub checks (SessionManager.reconcile); when they move a card, the
+    // sessions are listed again before the cards are built.
+    const rec = await sessions.reconcile(repo, {
+      prStates,
+      openIssueNumbers: issues ? issues.map((i) => i.number) : null,
+    });
+    if (rec.moved) mineNow = mine();
+    // The issues merged cards closed sit in Done beside the merged cards, newest first; an issue
+    // a listed session closed sits in that card's row, and a done spec nests its recorded
+    // sub-issues. The grouping sees every listed session, before the Done cut. A number this
+    // load's reconcile recorded as done is not an unclaimed card in the same response.
+    const doneIssues = doneIssuesOf(db, repo.id);
+    const extras = [
+      ...(issues ? unclaimedCards(issues, claimRefs(mineNow), repo.id, rec.doneNumbers) : []),
+      ...doneIssueCards(doneIssues, mineNow.map((s) => s.id)),
+    ];
+    const boardOut = limitDone(boardCards(mineNow, extras), done);
+    for (const c of boardOut.cards) if (c.pr) c.pr.state = prStates.get(c.pr.number) ?? null;
+    return boardOut;
   })
 
   // An unclaimed card (`issue:<number>`) has no session yet: its move creates one. A spec card
@@ -494,7 +513,8 @@ const broadcast = (msg: unknown, sessionId?: string) => {
 };
 sessions.on("summary", (session) => broadcast({ type: "summary", session }));
 sessions.on("removed", (id) => broadcast({ type: "removed", id }));
-// A card was created (or removed): open boards of that repo fetch GET /api/board again.
+// A card was created, removed, or delivered by a board load's reconcile: open boards of that
+// repo fetch GET /api/board again.
 sessions.on("board", (repoId) => broadcast({ type: "wb_board", repoId }));
 sessions.on("event", (sessionId, event) => broadcast({ type: "event", sessionId, event }, sessionId));
 

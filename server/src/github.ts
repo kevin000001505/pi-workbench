@@ -23,6 +23,16 @@ export type GhIssueSummary = {
 export type GhIssueDetail = GhIssueSummary & { body: string | null; assignees: string[] };
 export type GhIssueComment = { id: number; author: string; body: string | null; createdAt: string };
 
+/** The state of one issue and its sub-issues, as the board load's reconcile reads it. */
+export type GhIssueState = {
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  stateReason: string | null;
+  subIssues: { number: number; state: string; stateReason: string | null }[];
+};
+
 export class GitHubError extends Error {
   status: number;
   /** GitHub's own message, without the method, path and status; the message when there is none. */
@@ -33,6 +43,21 @@ export class GitHubError extends Error {
     this.detail = detail;
   }
 }
+
+/** The GraphQL shape of an issue with its sub-issues, as the board load's reconcile reads it. */
+type GqIssueState = {
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  stateReason: string | null;
+  subIssues: { nodes: { number: number; state: string; stateReason: string | null }[] };
+};
+
+const toIssueState = (i: GqIssueState | null): GhIssueState | null =>
+  i
+    ? { number: i.number, title: i.title, url: i.url, state: i.state, stateReason: i.stateReason, subIssues: i.subIssues.nodes.map((n) => ({ number: n.number, state: n.state, stateReason: n.stateReason })) }
+    : null;
 
 /** Minimal GitHub REST client over a personal access token. */
 export class GitHub {
@@ -267,8 +292,51 @@ export class GitHub {
     return this.req<void>("DELETE", `/repos/${owner}/${name}/git/refs/heads/${branch.split("/").map(encodeURIComponent).join("/")}`);
   }
 
-  closeIssue(owner: string, name: string, number: number) {
-    return this.req<{ number: number }>("PATCH", `/repos/${owner}/${name}/issues/${number}`, { state: "closed" });
+  closeIssue(owner: string, name: string, number: number, reason?: string) {
+    return this.req<{ number: number; state: string }>("PATCH", `/repos/${owner}/${name}/issues/${number}`, {
+      state: "closed",
+      ...(reason ? { state_reason: reason } : {}),
+    });
+  }
+
+  /** One issue's state, with its sub-issues: null when the issue does not resolve or the read fails. */
+  issueState(owner: string, name: string, number: number): Promise<GhIssueState | null> {
+    const q = `query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) { issue(number: $number) {
+        number title url state stateReason
+        subIssues(first: 100) { nodes { number state stateReason } }
+      } }
+    }`;
+    return this.gq<{ repository: { issue: GqIssueState | null } }>(q, { owner, name, number })
+      .then((d) => toIssueState(d.repository?.issue))
+      .catch(() => null);
+  }
+
+  /**
+   * The state of many issues in one GraphQL call: one aliased `issue(number:)` field per number, the
+   * numbers as declared Int variables. GitHub answers a missing issue with an `errors` entry (even
+   * when partial data came back) and the client throws on any `errors`, so a batch that cannot
+   * resolve every number is retried one read per number; a number whose read fails is null.
+   */
+  async issueStates(owner: string, name: string, numbers: number[]): Promise<Map<number, GhIssueState | null>> {
+    if (!numbers.length) return new Map();
+    const q = `query($owner: String!, $name: String!${numbers.map((_, i) => `, $n${i}: Int!`).join("")}) {
+      repository(owner: $owner, name: $name) {
+${numbers.map((_, i) => `        n${i}: issue(number: $n${i}) { number title url state stateReason subIssues(first: 100) { nodes { number state stateReason } } }`).join("\n")}
+      }
+    }`;
+    const vars: Record<string, unknown> = { owner, name };
+    numbers.forEach((n, i) => (vars[`n${i}`] = n));
+    try {
+      const d = await this.gq<{ repository: Record<string, GqIssueState | null> | null }>(q, vars);
+      const map = new Map<number, GhIssueState | null>();
+      numbers.forEach((n, i) => map.set(n, toIssueState(d.repository?.[`n${i}`] ?? null)));
+      return map;
+    } catch {
+      const map = new Map<number, GhIssueState | null>();
+      for (const n of numbers) map.set(n, await this.issueState(owner, name, n));
+      return map;
+    }
   }
 
   async pullStatus(owner: string, name: string, number: number) {

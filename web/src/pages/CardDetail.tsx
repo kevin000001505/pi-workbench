@@ -9,8 +9,8 @@ import { isResolvedNote, type SessionSummary, type Ticket, type UnclaimedSpecTic
 import { Markdown, Spinner } from "../ui.tsx";
 import { CardActions, SOLVE, SPLIT } from "./CardActions.tsx";
 
-/** The TICKET_STATE labels for a card's tickets. */
-const TICKET_STATE: Record<Ticket["status"], string> = { ready: "Ready", running: "Running", done: "Done", blocked: "Blocked" };
+/** The TICKET_STATE labels for a card's tickets; the board's ticket sub-cards use the same map. */
+export const TICKET_STATE: Record<Ticket["status"], string> = { ready: "Ready", running: "Running", done: "Done", blocked: "Blocked" };
 
 /**
  * The issue behind a card's spec ref, split for the /api/repos routes; null when the ref is not
@@ -413,8 +413,8 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
   );
 }
 
-/** The confirm text for Abandon. */
-const abandonQuestion = (card: Card) =>
+/** The confirm text for Abandon, the same from the board card and the card detail. */
+export const abandonQuestion = (card: Card) =>
   `Abandon "${card.title}"? This stops its runs${card.pr ? `, closes PR #${card.pr.number} without merging it` : ""}, and deletes its branch, its worktree and the card. The GitHub issues stay open.`;
 
 /** The confirm text for Approve, the same from the drag and from the card detail. */

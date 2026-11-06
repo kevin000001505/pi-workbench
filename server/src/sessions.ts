@@ -13,9 +13,10 @@ import {
   withMessages,
 } from "../../shared/transcript.ts";
 import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
-import { recordIssueDone, type Db, type RepoRow, type SessionRow, type TicketRow } from "./db.ts";
+import { doneIssuesOf, recordIssueDone, specWatchOf, specWatchRemove, type Db, type RepoRow, type SessionRow, type TicketRow } from "./db.ts";
 import { git, type GitEnv } from "./git.ts";
 import type { Delivery, MergeResult } from "./delivery.ts";
+import type { GhIssueState } from "./github.ts";
 import { closedIssues, foreignIssues } from "./prs.ts";
 import {
   allDone,
@@ -44,7 +45,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { claimRefs, type Column, COLUMNS, issueNumberOf, resolvedNote, sessionColumn } from "../../shared/board.ts";
+import { claimRefs, type Column, COLUMNS, issueNumberOf, type PrState, resolvedNote, sessionColumn } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
   configureAutoApprove,
@@ -66,6 +67,25 @@ import { getModelSettings, getPipelineSettings, LLM_KEY_ENV, rulesFile } from ".
 import { describeStopReason, type StopReason, StopRule } from "./stop-rule.ts";
 import { type RpcRecord, RpcProcess } from "./rpc.ts";
 import { isRescueyRun, RESCUE_PROVIDER_ID, RESCUE_TOKEN_ENV, type RescueProxy } from "./rescue-proxy.ts";
+
+/**
+ * What a board load reads on GitHub for a repo's checks, as it passes them to
+ * SessionManager.reconcile. The open-issue numbers feed the spec-closed checks (the unclaimed
+ * spec issues the board shows now are added to the spec_watch table before the call); the PR
+ * states the PR-merged check and its skips in the spec-closed check read.
+ */
+export type ReconcileFacts = {
+  /** The PR state of each session that has a PR, as the board read it; null when GitHub could not read it; no entry for a session with no PR. */
+  prStates: Map<number, PrState | null>;
+  /** The numbers in the open-issue list; null when that list could not be read. */
+  openIssueNumbers: number[] | null;
+};
+
+/** A board load's checks moved a card (a board event went out), and the issues they recorded as done in the repo. */
+export type ReconcileResult = {
+  moved: boolean;
+  doneNumbers: number[];
+};
 
 export type SessionStatus = "stopped" | "starting" | "running" | "waiting" | "idle" | "error";
 
@@ -253,6 +273,8 @@ export class SessionManager extends EventEmitter {
   private approving = new Set<string>();
   /** Sessions whose merge run resolves a conflict now; Approve waits for it to finish. */
   private resolving = new Set<string>();
+  /** A repo's board-load GitHub checks in flight; an overlapping board load waits for the run. */
+  private reconciling = new Map<string, Promise<ReconcileResult>>();
   /** Issues (`owner/name#n`) whose new session is being created now. */
   private claiming = new Set<string>();
 
@@ -444,7 +466,10 @@ export class SessionManager extends EventEmitter {
     // Held from the check until the session row exists, so a second create for the issue is refused.
     this.claiming.add(claim);
     try {
-      return await this.createSession(input, repo);
+      const s = await this.createSession(input, repo);
+      // A session claims the issue: the board watches it no more.
+      specWatchRemove(this.db, repo.id, [number]);
+      return s;
     } finally {
       this.claiming.delete(claim);
     }
@@ -1488,6 +1513,182 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Reconcile: the board load's GitHub checks for the repo, one at a time. An overlapping board
+   * load waits for the run in progress. A card in phase `pr` whose PR merged on GitHub is
+   * delivered as Approve delivers it; a card already in `approving` (a click in flight) or
+   * `resolving` (a merge run) is left to that work. When a card moves, a board event goes out
+   * for the repo, and the issues recorded as done leave the spec watch list.
+   */
+  async reconcile(repo: RepoRow, facts: ReconcileFacts): Promise<ReconcileResult> {
+    const inFlight = this.reconciling.get(repo.id);
+    if (inFlight) return inFlight;
+    const run = this.reconcileRun(repo, facts).finally(() => this.reconciling.delete(repo.id));
+    this.reconciling.set(repo.id, run);
+    return run;
+  }
+
+  private async reconcileRun(repo: RepoRow, facts: ReconcileFacts): Promise<ReconcileResult> {
+    const doneNumbers: number[] = [];
+    let moved = false;
+    const deliveredHere = new Set<string>();
+    const rows = this.db
+      .prepare("SELECT * FROM sessions WHERE repo_id = ? AND archived = 0 AND phase = 'pr' AND pr_number IS NOT NULL")
+      .all(repo.id) as SessionRow[];
+    for (const row of rows) {
+      const state = facts.prStates.get(row.pr_number!);
+      if (state !== "merged" || this.approving.has(row.id) || this.resolving.has(row.id)) continue;
+      this.approving.add(row.id);
+      try {
+        await this.delivered(row.id, repo, (n) => doneNumbers.push(n));
+        moved = true;
+        deliveredHere.add(row.id);
+      } finally {
+        this.approving.delete(row.id);
+      }
+    }
+    // The spec-closed rule runs after the PR-merged rule: a card that rule delivered in this pass
+    // is a merge, never a hand close.
+    if (facts.openIssueNumbers !== null) moved = moved || (await this.specClosed(repo, facts, deliveredHere, (n) => doneNumbers.push(n))) > 0;
+    if (moved) {
+      specWatchRemove(this.db, repo.id, doneNumbers);
+      this.emit("board", repo.id);
+    }
+    return { moved, doneNumbers };
+  }
+
+  /**
+   * A spec issue closed by hand on GitHub: its started card goes to Done (its runs stop, its
+   * worktree is removed, its branch and any open PR stay, and the spec's open sub-issues and the
+   * card's not-done ticket issues close as not planned), and a watched unstarted spec becomes a
+   * card of its own in Done with its sub-issues. It runs after the PR-merged rule, and skips a
+   * card that rule delivered in this pass, a card in `pr` whose PR is merged, a card in
+   * `approving` or `resolving`, a card with a PR whose state the board could not read, and a
+   * plain issue card (its issue is its only ticket; a hand close changes nothing). The check is
+   * skipped for this load when the open-issue list could not be read.
+   */
+  private async specClosed(repo: RepoRow, facts: ReconcileFacts, deliveredHere: Set<string>, recordDone: (n: number) => void): Promise<number> {
+    const open = new Set(facts.openIssueNumbers!);
+    const done = new Set(doneIssuesOf(this.db, repo.id).map((i) => i.number));
+    const toConfirm = new Map<number, { rows: SessionRow[]; unclaimed: boolean }>();
+    // Started cards: every pipeline card not in Done whose spec issue is not in the open list.
+    const rows = this.db
+      .prepare("SELECT * FROM sessions WHERE repo_id = ? AND archived = 0 AND mode = 'pipeline' AND phase != 'done'")
+      .all(repo.id) as SessionRow[];
+    for (const row of rows) {
+      if (deliveredHere.has(row.id) || this.approving.has(row.id) || this.resolving.has(row.id)) continue;
+      if (row.pr_number !== null) {
+        const state = facts.prStates.get(row.pr_number);
+        if (row.phase === "pr" && state === "merged") continue;
+        // A PR opened while the board load read its sessions has no entry: its state is unread too.
+        if (state == null) continue;
+      }
+      const n = issueNumberOf(row.spec_ref, repo.id) ?? issueNumberOf(row.issue_ref, repo.id);
+      if (n === null || open.has(n)) continue;
+      // A plain issue card: its one ticket is its own issue (the spec ref's, else the issue ref's).
+      const tickets = this.tickets(row.id);
+      if (tickets.length === 1 && issueNumberOf(tickets[0].trackerRef, repo.id) === n) continue;
+      const entry = toConfirm.get(n) ?? { rows: [], unclaimed: false };
+      entry.rows.push(row);
+      toConfirm.set(n, entry);
+    }
+    // Unstarted cards: the watched specs that fell out of the open list, are not claimed and are not done.
+    const mine = this.list().filter((s) => s.repoId === repo.id);
+    const claimed = new Set(
+      claimRefs(mine).map((r) => issueNumberOf(r, repo.id)).filter((n): n is number => n !== null),
+    );
+    for (const n of specWatchOf(this.db, repo.id)) {
+      if (open.has(n) || claimed.has(n) || done.has(n) || toConfirm.has(n)) continue;
+      toConfirm.set(n, { rows: [], unclaimed: true });
+    }
+    if (!toConfirm.size) return 0;
+    // One batched read confirms every spec's state; a number that does not resolve is null.
+    const states = await this.delivery!.issueStates(repo, [...toConfirm.keys()]);
+    let moved = 0;
+    for (const [n, entry] of toConfirm) {
+      const st = states.get(n);
+      if (entry.rows.length) {
+        // The batch read confirms the close (a null or open spec leaves the card alone).
+        if (st?.state !== "CLOSED") continue;
+        for (const row of entry.rows) await this.specHandClosed(row.id, repo, st, recordDone);
+        moved += entry.rows.length;
+      } else if (st?.state === "CLOSED") {
+        // A watched spec closed by hand: its open sub-issues close as not planned (one at a time,
+        // so a refusal skips only that issue), and it records in Done as a card of its own.
+        for (const sub of st.subIssues) {
+          if (sub.state === "OPEN") await this.delivery!.closeIssues(repo, [sub.number], "not planned").catch(() => {});
+        }
+        await this.recordSpecDone(repo, n, st, null, recordDone);
+        specWatchRemove(this.db, repo.id, [n]);
+        moved++;
+      } else if (st === null) {
+        // An issue that no longer resolves leaves the watch list too; an open one stays.
+        specWatchRemove(this.db, repo.id, [n]);
+      }
+    }
+    return moved;
+  }
+
+  /**
+   * A started card whose spec issue closed by hand: the card goes to Done, its runs stop, its
+   * worktree is removed, and its branch and any open PR stay on GitHub. The spec's open
+   * sub-issues and the card's not-done ticket issues close as not planned; the spec and its
+   * sub-issues record in Done with the card's session id, not planned on the ones closed now or
+   * already closed as not planned on GitHub. A cleanup step that fails keeps its reason on the card.
+   */
+  private async specHandClosed(id: string, repo: RepoRow, st: GhIssueState, recordDone: (n: number) => void): Promise<void> {
+    const row = this.row(id);
+    const problems: string[] = [];
+    // The phase changes first, so the stopped run's settle moves nothing.
+    this.update(id, { phase: "done", solo_ticket: null });
+    await this.stop(id);
+    // A ticket the stopped run left running is not running on a Done card.
+    for (const t of this.tickets(id)) if (t.status === "running") this.updateTicket(id, t.num, { status: "ready" });
+    // The spec's still-open sub-issues close on GitHub as not planned.
+    const openSubs = st.subIssues.filter((s) => s.state === "OPEN");
+    const subNumbers = new Set(st.subIssues.map((s) => s.number));
+    for (const sub of openSubs) {
+      await this.delivery!.closeIssues(repo, [sub.number], "not planned").catch((err) => {
+        problems.push(`issue #${sub.number} did not close (${(err as Error).message})`);
+      });
+    }
+    // A not-done ticket's issue too, when it is not one of the spec's sub-issues (those are closed above).
+    for (const t of this.tickets(id)) {
+      if (t.status === "done") continue;
+      const n = issueNumberOf(t.trackerRef, repo.id);
+      if (n === null || n === st.number || subNumbers.has(n)) continue;
+      await this.delivery!.closeIssues(repo, [n], "not planned").catch((err) => {
+        problems.push(`issue #${n} did not close (${(err as Error).message})`);
+      });
+    }
+    // The worktree goes; the branch and the PR stay on GitHub.
+    if (fs.existsSync(row.worktree)) {
+      await removeWorktree(repo, row.worktree).catch((err) => problems.push(`the worktree was not removed (${(err as Error).message})`));
+    }
+    await this.recordSpecDone(repo, st.number, st, id, recordDone);
+    let note = `The spec issue #${st.number} was closed on GitHub`;
+    if (row.pr_number) note += `, and PR #${row.pr_number} is still open on GitHub`;
+    if (problems.length) note += `, but ${problems.join(", and ")}`;
+    this.update(id, { attention: `${note}.` });
+  }
+
+  /**
+   * Record a hand-closed spec and its sub-issues in Done: the spec with no parent, the sub-issues
+   * with the spec as parent, and the closing session id for a started card. Not planned on a
+   * sub-issue closed now, or already closed as not planned on GitHub.
+   */
+  private async recordSpecDone(repo: RepoRow, n: number, st: GhIssueState, sessionId: string | null, recordDone: (m: number) => void): Promise<void> {
+    const now = Date.now();
+    recordIssueDone(this.db, repo.id, n, st.title, st.url, now, { sessionId });
+    recordDone(n);
+    for (const sub of st.subIssues) {
+      const notPlanned = sub.state === "OPEN" || sub.stateReason === "NOT_PLANNED";
+      const info = await this.issueInfoOrFallback(repo, sub.number);
+      recordIssueDone(this.db, repo.id, sub.number, info.title, info.url, now, { sessionId, parent: n, notPlanned });
+      recordDone(sub.number);
+    }
+  }
+
+  /**
    * Approve: merge the card's PR with a merge commit, then deliver it (`delivered`). A merge
    * conflict goes to `mergeConflict`; any other refusal keeps `pr` with GitHub's message.
    */
@@ -1625,14 +1826,25 @@ export class SessionManager extends EventEmitter {
    * GitHub and the worktree, and set `done`. A cleanup step that fails does not undo the merge; its
    * reason goes on the card.
    */
-  private async delivered(id: string, repo: RepoRow) {
+  private async delivered(id: string, repo: RepoRow, recorded?: (number: number) => void) {
     const row = this.row(id);
     const delivery = this.delivery!;
     const problems: string[] = [];
     const now = Date.now();
     // The issues the PR closes move to Done on the board: record them, in their own repos,
     // once they are closed. A title or URL the issue cannot be read for keeps the number.
+    // Every record carries the card that closed it; a ticket issue also carries its spec issue
+    // as parent (a ticket whose ref is its spec itself does not parent itself).
     const tickets = this.tickets(id);
+    const recordDone = async (r: Pick<RepoRow, "owner" | "name">, n: number) => {
+      const repoId = `${r.owner}/${r.name}`;
+      const info = await this.issueInfoOrFallback(r, n);
+      const specN = issueNumberOf(row.spec_ref, repoId);
+      const parent = specN !== null && specN !== n && tickets.some((t) => issueNumberOf(t.trackerRef, repoId) === n) ? specN : null;
+      recordIssueDone(this.db, repoId, n, info.title, info.url, now, { sessionId: id, parent });
+      // The collector hears only the card's own repo: its numbers drop out of this load's unclaimed cards.
+      if (repoId === repo.id) recorded?.(n);
+    };
     const ownNumbers = closedIssues(row, tickets);
     let ownClosed = row.base_branch === repo.default_branch;
     if (!ownClosed && ownNumbers.length) {
@@ -1646,10 +1858,7 @@ export class SessionManager extends EventEmitter {
       );
     }
     if (ownClosed) {
-      for (const n of ownNumbers) {
-        const info = await this.issueInfoOrFallback(repo, n);
-        recordIssueDone(this.db, repo.id, n, info.title, info.url, now);
-      }
+      for (const n of ownNumbers) await recordDone(repo, n);
     }
     // An issue of another repo closes only when the workbench tracks that repo: a model-written ref
     // must not close issues in any repo the token can write.
@@ -1668,8 +1877,7 @@ export class SessionManager extends EventEmitter {
         },
       );
       if (closed) {
-        const info = await this.issueInfoOrFallback({ owner, name }, issue.number);
-        recordIssueDone(this.db, issue.repo, issue.number, info.title, info.url, now);
+        await recordDone({ owner, name }, issue.number);
         // The issue's own board lists it in Done: open boards of that repo refetch.
         this.emit("board", issue.repo);
       }

@@ -1,6 +1,6 @@
 import type { RepoRow, SessionRow } from "./db.ts";
 import { git, type GitEnv } from "./git.ts";
-import { GitHubError, type GitHub } from "./github.ts";
+import { GitHubError, type GhIssueState, type GitHub } from "./github.ts";
 import type { Ticket } from "./pipeline.ts";
 import { draftPr, openPr } from "./prs.ts";
 import type { ModelSettings } from "./settings.ts";
@@ -27,7 +27,9 @@ export type Delivery = {
   /** Delete the session's branch on GitHub. A branch that was never pushed counts as deleted. */
   deleteBranch(row: SessionRow, repo: RepoRow): Promise<void>;
   /** Close these issues of the repo (the card's own repo, or another repo its refs name). */
-  closeIssues(repo: Pick<RepoRow, "owner" | "name">, numbers: number[]): Promise<void>;
+  closeIssues(repo: Pick<RepoRow, "owner" | "name">, numbers: number[], reason?: string): Promise<void>;
+  /** The state of many issues of the repo in one read; null for a number that does not resolve. */
+  issueStates(repo: Pick<RepoRow, "owner" | "name">, numbers: number[]): Promise<Map<number, GhIssueState | null>>;
   /** One issue's title and URL, for the board's Done cards; null when the issue cannot be read. */
   issueInfo(repo: Pick<RepoRow, "owner" | "name">, number: number): Promise<{ title: string; url: string } | null>;
 };
@@ -90,9 +92,13 @@ export function githubDelivery(deps: DeliveryDeps): Delivery {
       }
     },
 
-    async closeIssues(repo, numbers) {
+    async closeIssues(repo, numbers, reason) {
       const gh = deps.github();
-      for (const n of numbers) await gh.closeIssue(repo.owner, repo.name, n);
+      for (const n of numbers) await gh.closeIssue(repo.owner, repo.name, n, reason);
+    },
+
+    async issueStates(repo, numbers) {
+      return deps.github().issueStates(repo.owner, repo.name, numbers);
     },
 
     async issueInfo(repo, number) {

@@ -1,12 +1,21 @@
 import { Spinner } from "../ui.tsx";
 
-/** One action a card's buttons offers: Solve all on a spec card, Solve and Split on a plain one. */
+/**
+ * One action a card's buttons offers: a column move (Solve all on a spec card, Solve and Split on
+ * a plain one) or a direct action on the session (Approve, Stop, Retry, Abandon, Answer on a
+ * spec card). A `run` action outranks the move.
+ */
 export type CardAction = {
   label: string;
-  column: "doing" | "todo";
+  /** A column move; absent for a `run` action. */
+  column?: "doing" | "todo";
   title: string;
   /** Primary styling; the card detail wants it on Solve, the board card on none. */
   primary?: boolean;
+  /** Danger styling; the board card wants it on Stop and Abandon. */
+  danger?: boolean;
+  /** A direct action on the session; it outranks the move. */
+  run?: () => void;
 };
 
 export const SOLVE_ALL: CardAction = { label: "Solve all", column: "doing", title: "Move the card to Doing: start or resume its ticket runs" };
@@ -15,7 +24,7 @@ export const SPLIT: CardAction = { label: "Split", column: "todo", title: "Break
 
 /**
  * A card's action buttons, shared by the board card and the card detail. A click does only the
- * move: it stops the card's own click and its link to GitHub. A button is disabled while its
+ * action: it stops the card's own click and its link to GitHub. A button is disabled while its
  * request runs, so one click makes one session.
  */
 export function CardActions({ actions, busy, spinner, flat, onMove }: {
@@ -25,18 +34,19 @@ export function CardActions({ actions, busy, spinner, flat, onMove }: {
   spinner?: boolean;
   /** Render the buttons without the board card's action wrapper, inside the caller's own flex row. */
   flat?: boolean;
-  onMove: (column: CardAction["column"]) => void;
+  onMove: (column: "doing" | "todo") => void;
 }) {
   const buttons = actions.map((a) => (
     <button
       key={a.label}
-      className={`kz-btn${a.primary ? " primary" : ""}`}
+      className={`kz-btn${a.primary ? " primary" : ""}${a.danger ? " danger" : ""}`}
       disabled={busy}
       title={a.title}
       onClick={(e) => {
         e.stopPropagation();
         e.preventDefault();
-        onMove(a.column);
+        if (a.run) a.run();
+        else if (a.column) onMove(a.column);
       }}
     >
       {spinner && busy ? <Spinner small /> : a.label}

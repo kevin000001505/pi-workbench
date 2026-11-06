@@ -98,6 +98,13 @@
 .kz-sublist { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 2px; }
 .kz-subcard { flex: 1 1 240px; min-width: 200px; padding: 8px 10px; }
 .kz-subcard .desc { white-space: normal; }
+/* A ticket sub-card's state and live dot: done is green, running is blue, blocked is red, not planned is faint. */
+.kz-subcard .sub-state { display: inline-flex; align-items: center; gap: 5px; flex: none; margin-top: 2px; }
+.kz-substate { font-size: 12px; color: var(--kz-muted); }
+.kz-substate.done { color: #2f9e44; }
+.kz-substate.running { color: #3b82f6; }
+.kz-substate.blocked { color: var(--kz-danger); }
+.kz-substate.not-planned { color: var(--kz-faint); }
 .kz-tag {
   display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--kz-muted);
   background: var(--kz-hover); border-radius: 99px; padding: 1px 9px 1px 8px;

@@ -87,19 +87,13 @@ test("Approve moves the card's issues to Done on the board: the spec issue and e
   assert.ok(!(await board()).some((c) => c.id === "issue:217" || c.id === "issue:218"));
   await approve(id);
   assert.equal((await summary(id)).phase, "done");
-  // After the merge, the closed issues sit in Done beside the merged card, with their titles and links.
+  // After the merge, the closed issues sit in the merged card's row: Done shows only the card, no flat issue cards.
   const done = (await board()).filter((c) => c.column === "done");
   assert.ok(done.some((c) => c.id === id && c.pr?.state === "merged"), "the merged card is in Done too");
-  const specCard = done.find((c) => c.id === "issue:217");
-  assert.ok(specCard, "the spec issue sits in Done after the merge");
-  assert.equal(specCard.title, "Spec 217");
-  assert.equal(specCard.specRef, "https://github.com/kevin/ship/issues/217");
-  assert.deepEqual(specCard.tickets, { done: 0, total: 0 });
-  assert.ok(specCard.doneAt, "the issue card says when it closed");
-  const ticketCard = done.find((c) => c.id === "issue:218");
-  assert.ok(ticketCard, "the ticket issue sits in Done after the merge");
-  assert.equal(ticketCard.title, "Write hello.txt");
-  assert.equal(ticketCard.specRef, "https://github.com/kevin/ship/issues/218");
+  assert.ok(!done.some((c) => c.id.startsWith("issue:")), "no flat cards for the issues the card closed");
+  const card = done.find((c) => c.id === id)!;
+  assert.equal(card.specCard, true, "one ticket that is not the card's own issue is a spec card");
+  assert.equal(card.subs, null, "a started card's row comes from its session's tickets, not subs");
   // The closed issues are gone from Issues: no open card for them.
   assert.ok(!(await board()).some((c) => (c.id === "issue:217" || c.id === "issue:218") && c.column === "issues"));
 });
@@ -115,10 +109,26 @@ test("Approve moves a plain card's issue to Done on the board", { skip: !hasPi &
   await driveToReview(id);
   await approve(id);
   assert.equal((await summary(id)).phase, "done");
-  const card = (await board()).find((c) => c.id === "issue:2");
-  assert.equal(card?.column, "done", "the closed issue sits in Done");
-  assert.equal(card?.title, "Fix login Crash");
-  assert.equal(card?.specRef, "https://github.com/kevin/ship/issues/2");
+  // The closed issue sits in the merged card's row: no flat card beside it, and the card is not a spec card.
+  const done = (await board()).filter((c) => c.column === "done");
+  assert.ok(done.some((c) => c.id === id), "the merged card is in Done");
+  assert.equal(done.find((c) => c.id === id)?.specCard, false, "a plain card's only ticket is its own issue");
+  assert.ok(!done.some((c) => c.id.startsWith("issue:")), "no flat cards for the issues the card closed");
+});
+
+test("Approve records each closed issue with the card's session, and a ticket issue with its spec as parent: the done spec nests its tickets once the session is archived", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id } = await toReview(317);
+  const ok = await approve(id);
+  assert.equal(ok.json.phase, "done");
+  // While the session is listed, the closed issues sit in the merged card's row: no flat cards.
+  assert.ok(!(await board()).some((c) => c.id === "issue:317" || c.id === "issue:318"));
+  // Archive the session: the done issues come back, and the ticket issue nests under the spec.
+  assert.equal((await api("DELETE", `/api/sessions/${id}`)).status, 200);
+  const specCard = (await board()).find((c) => c.id === "issue:317");
+  assert.ok(specCard, "the closed spec sits in Done on its own");
+  assert.equal(specCard.specCard, true, "a done spec with recorded sub-issues is a spec card");
+  assert.deepEqual(specCard.subs, [{ number: 318, title: "Write hello.txt", url: "https://github.com/kevin/ship/issues/318", notPlanned: false }]);
+  assert.ok(!(await board()).some((c) => c.id === "issue:318"), "the ticket issue is not a flat card");
 });
 
 test("Review → Done is Approve; on a non-default base Approve closes the issues itself", { skip: !hasPi && "pi CLI not found" }, async () => {

@@ -129,9 +129,17 @@ CREATE TABLE IF NOT EXISTS secrets (
   data TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (scope, name)
 );
 -- The issues a merged card closed, per repo: the board's Done column lists them beside the merged cards.
+-- parent is the spec issue the closed issue is a ticket of, session_id the card that closed it,
+-- and not_planned a close the board did not deliver; rows from before these columns stay null.
 CREATE TABLE IF NOT EXISTS issues_done (
   repo_id TEXT NOT NULL, number INTEGER NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL,
-  closed_at INTEGER NOT NULL, PRIMARY KEY (repo_id, number)
+  closed_at INTEGER NOT NULL, parent INTEGER, session_id TEXT, not_planned INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (repo_id, number)
+);
+-- The spec issues the board showed as unclaimed cards; a board load's checks read their state on GitHub.
+-- A spec issue a session claims, or that lands in issues_done, leaves the watch list.
+CREATE TABLE IF NOT EXISTS spec_watch (
+  repo_id TEXT NOT NULL, number INTEGER NOT NULL, PRIMARY KEY (repo_id, number)
 );
 `;
 
@@ -173,6 +181,9 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ["tickets", "fix_run_id", "TEXT"],
   ["tickets", "rescue_state", "TEXT"],
   ["sessions", "solo_ticket", "INTEGER"],
+  ["issues_done", "parent", "INTEGER"],
+  ["issues_done", "session_id", "TEXT"],
+  ["issues_done", "not_planned", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 function migrate(db: DatabaseSync) {
@@ -208,24 +219,60 @@ export function putSetting(db: Db, key: string, value: unknown) {
   );
 }
 
-/** Record an issue a merged card closed: the board's Done lists it beside the card. One row per repo issue. */
-export function recordIssueDone(db: Db, repoId: string, number: number, title: string, url: string, closedAt: number) {
-  db.prepare("INSERT OR REPLACE INTO issues_done (repo_id, number, title, url, closed_at) VALUES (?, ?, ?, ?, ?)").run(
+/**
+ * Record an issue a merged card closed: the board's Done lists it beside the card. One row per repo
+ * issue. `parent` is the spec issue the closed issue is a ticket of, `sessionId` the card that
+ * closed it, and `notPlanned` a close the board did not deliver (a hand-closed spec). Rows written
+ * before these columns exist leave them null, so the board keeps them as flat cards.
+ */
+export function recordIssueDone(
+  db: Db,
+  repoId: string,
+  number: number,
+  title: string,
+  url: string,
+  closedAt: number,
+  extra: { parent?: number | null; sessionId?: string | null; notPlanned?: boolean } = {},
+) {
+  db.prepare("INSERT OR REPLACE INTO issues_done (repo_id, number, title, url, closed_at, parent, session_id, not_planned) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
     repoId,
     number,
     title,
     url,
     closedAt,
+    extra.parent ?? null,
+    extra.sessionId ?? null,
+    extra.notPlanned ? 1 : 0,
   );
 }
 
 /** The issues a repo's merged cards closed: the board's Done cards (see doneIssueCards; Done orders them by close time). */
-export function doneIssuesOf(db: Db, repoId: string): { number: number; title: string; url: string; closedAt: number }[] {
-  const rows = db.prepare("SELECT number, title, url, closed_at FROM issues_done WHERE repo_id = ?").all(repoId) as {
+export function doneIssuesOf(db: Db, repoId: string): { number: number; title: string; url: string; closedAt: number; parent: number | null; sessionId: string | null; notPlanned: boolean }[] {
+  const rows = db.prepare("SELECT number, title, url, closed_at, parent, session_id, not_planned FROM issues_done WHERE repo_id = ?").all(repoId) as {
     number: number;
     title: string;
     url: string;
     closed_at: number;
+    parent: number | null;
+    session_id: string | null;
+    not_planned: number | null;
   }[];
-  return rows.map((r) => ({ number: r.number, title: r.title, url: r.url, closedAt: r.closed_at }));
+  return rows.map((r) => ({ number: r.number, title: r.title, url: r.url, closedAt: r.closed_at, parent: r.parent, sessionId: r.session_id, notPlanned: !!r.not_planned }));
+}
+
+/** The spec issues the board watches for this repo (the unclaimed spec cards it showed; see the spec_watch table). */
+export function specWatchOf(db: Db, repoId: string): number[] {
+  return (db.prepare("SELECT number FROM spec_watch WHERE repo_id = ?").all(repoId) as { number: number }[]).map((r) => r.number);
+}
+
+/** Watch these spec issues of the repo: the unclaimed spec cards a board load showed. */
+export function specWatchAdd(db: Db, repoId: string, numbers: number[]) {
+  const ins = db.prepare("INSERT OR IGNORE INTO spec_watch (repo_id, number) VALUES (?, ?)");
+  for (const n of numbers) ins.run(repoId, n);
+}
+
+/** Unwatch these issues of the repo: a session claimed them, or a delivery recorded them as done. */
+export function specWatchRemove(db: Db, repoId: string, numbers: number[]) {
+  const del = db.prepare("DELETE FROM spec_watch WHERE repo_id = ? AND number = ?");
+  for (const n of numbers) del.run(repoId, n);
 }
