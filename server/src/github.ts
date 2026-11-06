@@ -44,6 +44,21 @@ export class GitHubError extends Error {
   }
 }
 
+/** The GraphQL shape of an issue with its sub-issues, as the board load's reconcile reads it. */
+type GqIssueState = {
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  stateReason: string | null;
+  subIssues: { nodes: { number: number; state: string; stateReason: string | null }[] };
+};
+
+const toIssueState = (i: GqIssueState | null): GhIssueState | null =>
+  i
+    ? { number: i.number, title: i.title, url: i.url, state: i.state, stateReason: i.stateReason, subIssues: i.subIssues.nodes.map((n) => ({ number: n.number, state: n.state, stateReason: n.stateReason })) }
+    : null;
+
 /** Minimal GitHub REST client over a personal access token. */
 export class GitHub {
   private token: string;
@@ -286,27 +301,14 @@ export class GitHub {
 
   /** One issue's state, with its sub-issues: null when the issue does not resolve or the read fails. */
   issueState(owner: string, name: string, number: number): Promise<GhIssueState | null> {
-    type GqIssue = {
-      number: number;
-      title: string;
-      url: string;
-      state: string;
-      stateReason: string | null;
-      subIssues: { nodes: { number: number; state: string; stateReason: string | null }[] };
-    };
     const q = `query($owner: String!, $name: String!, $number: Int!) {
       repository(owner: $owner, name: $name) { issue(number: $number) {
         number title url state stateReason
         subIssues(first: 100) { nodes { number state stateReason } }
       } }
     }`;
-    return this.gq<{ repository: { issue: GqIssue | null } }>(q, { owner, name, number })
-      .then((d) => {
-        const i = d.repository?.issue;
-        return i
-          ? { number: i.number, title: i.title, url: i.url, state: i.state, stateReason: i.stateReason, subIssues: i.subIssues.nodes.map((n) => ({ number: n.number, state: n.state, stateReason: n.stateReason })) }
-          : null;
-      })
+    return this.gq<{ repository: { issue: GqIssueState | null } }>(q, { owner, name, number })
+      .then((d) => toIssueState(d.repository?.issue))
       .catch(() => null);
   }
 
@@ -318,18 +320,6 @@ export class GitHub {
    */
   async issueStates(owner: string, name: string, numbers: number[]): Promise<Map<number, GhIssueState | null>> {
     if (!numbers.length) return new Map();
-    type GqIssue = {
-      number: number;
-      title: string;
-      url: string;
-      state: string;
-      stateReason: string | null;
-      subIssues: { nodes: { number: number; state: string; stateReason: string | null }[] };
-    };
-    const toState = (i: GqIssue | null): GhIssueState | null =>
-      i
-        ? { number: i.number, title: i.title, url: i.url, state: i.state, stateReason: i.stateReason, subIssues: i.subIssues.nodes.map((n) => ({ number: n.number, state: n.state, stateReason: n.stateReason })) }
-        : null;
     const q = `query($owner: String!, $name: String!${numbers.map((_, i) => `, $n${i}: Int!`).join("")}) {
       repository(owner: $owner, name: $name) {
 ${numbers.map((_, i) => `        n${i}: issue(number: $n${i}) { number title url state stateReason subIssues(first: 100) { nodes { number state stateReason } } }`).join("\n")}
@@ -338,9 +328,9 @@ ${numbers.map((_, i) => `        n${i}: issue(number: $n${i}) { number title url
     const vars: Record<string, unknown> = { owner, name };
     numbers.forEach((n, i) => (vars[`n${i}`] = n));
     try {
-      const d = await this.gq<{ repository: Record<string, GqIssue | null> | null }>(q, vars);
+      const d = await this.gq<{ repository: Record<string, GqIssueState | null> | null }>(q, vars);
       const map = new Map<number, GhIssueState | null>();
-      numbers.forEach((n, i) => map.set(n, toState(d.repository?.[`n${i}`] ?? null)));
+      numbers.forEach((n, i) => map.set(n, toIssueState(d.repository?.[`n${i}`] ?? null)));
       return map;
     } catch {
       const map = new Map<number, GhIssueState | null>();

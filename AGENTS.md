@@ -27,7 +27,7 @@ Self-hosted web UI that drives the pi coding agent (`@earendil-works/pi-coding-a
 ## Rules
 - The extension and the server share a protocol: a dialog title that is a JSON `{"wb": "permission" | "decision", ...}` envelope. Change both together, and keep `server/test/e2e.test.ts` passing.
 - Never return secret values from the API, and never log them. `SecretStore.envFor` is the only decrypting path to pi. The master key must stay out of child environments: `processEnv` and `git()` strip it.
-- The UI has no login. Every new write route goes through the JSON + Origin + Host check in `server/src/http.ts`. Don't add GET routes with side effects.
+- The UI has no login. Every new write route goes through the JSON + Origin + Host check in `server/src/http.ts`. Don't add GET routes with side effects — the one exception is `GET /api/board`: its load runs the repo's reconcile (see the pipeline section), which can deliver a hand-merged PR and stop a hand-closed spec's card.
 - Settings in the db are the source of truth. `writePiConfig` regenerates pi's agent dir from them, so don't hand-edit `/data/pi-agent`.
 - Read pi's stdout with the LF splitter in `rpc.ts`, not `readline`: `readline` also splits on U+2028/2029.
 

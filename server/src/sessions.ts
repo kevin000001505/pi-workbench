@@ -70,14 +70,13 @@ import { isRescueyRun, RESCUE_PROVIDER_ID, RESCUE_TOKEN_ENV, type RescueProxy } 
 
 /**
  * What a board load reads on GitHub for a repo's checks, as it passes them to
- * SessionManager.reconcile. The open-issue numbers and the unclaimed spec issues feed the
- * spec-closed checks; the PR states the PR-merged check reads.
+ * SessionManager.reconcile. The open-issue numbers feed the spec-closed checks (the unclaimed
+ * spec issues the board shows now are added to the spec_watch table before the call); the PR
+ * states the PR-merged check and its skips in the spec-closed check read.
  */
 export type ReconcileFacts = {
   /** The PR state of each session that has a PR, as the board read it; null when GitHub could not read it; no entry for a session with no PR. */
   prStates: Map<number, PrState | null>;
-  /** The numbers of the open issues the board shows as unclaimed spec cards. */
-  unclaimedSpecs: number[];
   /** The numbers in the open-issue list; null when that list could not be read. */
   openIssueNumbers: number[] | null;
 };
@@ -1570,7 +1569,7 @@ export class SessionManager extends EventEmitter {
   private async specClosed(repo: RepoRow, facts: ReconcileFacts, deliveredHere: Set<string>, recordDone: (n: number) => void): Promise<number> {
     const open = new Set(facts.openIssueNumbers!);
     const done = new Set(doneIssuesOf(this.db, repo.id).map((i) => i.number));
-    const confirm = new Map<number, { rows: SessionRow[]; unclaimed: boolean }>();
+    const toConfirm = new Map<number, { rows: SessionRow[]; unclaimed: boolean }>();
     // Started cards: every pipeline card not in Done whose spec issue is not in the open list.
     const rows = this.db
       .prepare("SELECT * FROM sessions WHERE repo_id = ? AND archived = 0 AND mode = 'pipeline' AND phase != 'done'")
@@ -1580,16 +1579,17 @@ export class SessionManager extends EventEmitter {
       if (row.pr_number !== null) {
         const state = facts.prStates.get(row.pr_number);
         if (row.phase === "pr" && state === "merged") continue;
-        if (state === null) continue;
+        // A PR opened while the board load read its sessions has no entry: its state is unread too.
+        if (state == null) continue;
       }
       const n = issueNumberOf(row.spec_ref, repo.id) ?? issueNumberOf(row.issue_ref, repo.id);
       if (n === null || open.has(n)) continue;
       // A plain issue card: its one ticket is its own issue (the spec ref's, else the issue ref's).
       const tickets = this.tickets(row.id);
       if (tickets.length === 1 && issueNumberOf(tickets[0].trackerRef, repo.id) === n) continue;
-      const entry = confirm.get(n) ?? { rows: [], unclaimed: false };
+      const entry = toConfirm.get(n) ?? { rows: [], unclaimed: false };
       entry.rows.push(row);
-      confirm.set(n, entry);
+      toConfirm.set(n, entry);
     }
     // Unstarted cards: the watched specs that fell out of the open list, are not claimed and are not done.
     const mine = this.list().filter((s) => s.repoId === repo.id);
@@ -1597,14 +1597,14 @@ export class SessionManager extends EventEmitter {
       claimRefs(mine).map((r) => issueNumberOf(r, repo.id)).filter((n): n is number => n !== null),
     );
     for (const n of specWatchOf(this.db, repo.id)) {
-      if (open.has(n) || claimed.has(n) || done.has(n) || confirm.has(n)) continue;
-      confirm.set(n, { rows: [], unclaimed: true });
+      if (open.has(n) || claimed.has(n) || done.has(n) || toConfirm.has(n)) continue;
+      toConfirm.set(n, { rows: [], unclaimed: true });
     }
-    if (!confirm.size) return 0;
+    if (!toConfirm.size) return 0;
     // One batched read confirms every spec's state; a number that does not resolve is null.
-    const states = await this.delivery!.issueStates(repo, [...confirm.keys()]);
+    const states = await this.delivery!.issueStates(repo, [...toConfirm.keys()]);
     let moved = 0;
-    for (const [n, entry] of confirm) {
+    for (const [n, entry] of toConfirm) {
       const st = states.get(n);
       if (entry.rows.length) {
         // The batch read confirms the close (a null or open spec leaves the card alone).

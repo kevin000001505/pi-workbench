@@ -508,6 +508,12 @@ export function Board({ repoId }: { repoId?: string }) {
     ).finally(() => setBusyId(null));
   };
 
+  // A sub-card's Solve finished: collapse the row and refetch.
+  const onSubSolved = useCallback(() => {
+    setExpandedId(null);
+    setRefetch((n) => n + 1);
+  }, []);
+
   // A spec card's whole-card actions: the same routes as the card detail and the pipeline panel.
   // Approve and Abandon ask a confirm first (the drag's, and the card detail's).
   const actCard = (card: Card, act: () => Promise<unknown>, question?: string) => {
@@ -676,23 +682,9 @@ export function Board({ repoId }: { repoId?: string }) {
                       c.subs ? (
                         <DoneSubcards subs={c.subs} />
                       ) : unclaimedNumber(c.id) !== null ? (
-                        <SpecSubcards
-                          card={c}
-                          toast={toast}
-                          onSolved={() => {
-                            setExpandedId(null);
-                            setRefetch((n) => n + 1);
-                          }}
-                        />
+                        <SpecSubcards card={c} toast={toast} onSolved={onSubSolved} />
                       ) : sessions[c.id] ? (
-                        <TicketSubcards
-                          s={sessions[c.id]}
-                          toast={toast}
-                          onSolved={() => {
-                            setExpandedId(null);
-                            setRefetch((n) => n + 1);
-                          }}
-                        />
+                        <TicketSubcards s={sessions[c.id]} toast={toast} onSolved={onSubSolved} />
                       ) : null
                     )}
                   </Fragment>

@@ -206,7 +206,6 @@ const router = new Router()
     // sessions are listed again before the cards are built.
     const rec = await sessions.reconcile(repo, {
       prStates,
-      unclaimedSpecs: unclaimedSpecNumbers,
       openIssueNumbers: issues ? issues.map((i) => i.number) : null,
     });
     if (rec.moved) mineNow = mine();
