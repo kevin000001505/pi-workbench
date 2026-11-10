@@ -33,8 +33,37 @@ export function StatusPill({ status }: { status: SessionStatus }) {
   );
 }
 
+// Line icons in the Lucide style (ISC licence), drawn in currentColor; they stand in for the emoji the UI used.
+const ICON_PATHS = {
+  menu: <path d="M4 6h16M4 12h16M4 18h16" />,
+  alert: (
+    <>
+      <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+      <path d="M12 9v4M12 17h.01" />
+    </>
+  ),
+  question: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01" />
+    </>
+  ),
+  external: <path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />,
+};
+
+export function Icon({ name, label }: { name: keyof typeof ICON_PATHS; label?: string }) {
+  return (
+    <span className="icon" role={label ? "img" : undefined} aria-label={label} aria-hidden={label ? undefined : true}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        {ICON_PATHS[name]}
+      </svg>
+    </span>
+  );
+}
+
+// A loader keeps turning under reduced motion (slower), so `keep-motion` exempts it from base.css's stop.
 export function Spinner({ small }: { small?: boolean }) {
-  return <span className={`spinner ${small ? "spinner-sm" : ""}`} aria-label="Loading" />;
+  return <span className={`spinner keep-motion ${small ? "spinner-sm" : ""}`} aria-label="Loading" />;
 }
 
 export function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {

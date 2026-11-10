@@ -1,0 +1,48 @@
+/* Hallmark tokens: Terrazzo (off-white) for light, a dark rendering re-derived from it (dark-mode.md). */
+:root {
+  color-scheme: light;
+  --space-3xs: 2px; --space-2xs: 4px; --space-xs: 8px; --space-sm: 12px; --space-md: 16px; --space-lg: 24px; --space-xl: 40px; --space-2xl: 64px; --space-3xl: 96px; --space-4xl: 144px;
+  --text-xs: 0.75rem; --text-sm: 0.875rem; --text-md: 1rem; --text-lg: 1.2rem; --text-xl: 1.44rem; --text-2xl: 1.728rem; --text-3xl: 2.074rem;
+  --text-display-s: 1.44rem; --text-display: 1.728rem; --text-section: 1.2rem; --text-title: 1rem; --text-lead: 1rem;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1); --ease-in: cubic-bezier(0.7, 0, 0.84, 0); --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms; --dur-short: 220ms; --dur-long: 420ms;
+  --container: 1440px; --gutter: 64px; --gap-columns: 32px; --section-gap-s: 120px; --section-gap: 144px; --section-gap-l: 176px;
+  --z-base: 1; --z-raised: 10; --z-dropdown: 100; --z-sticky: 200; --z-sticky-nav: 300; --z-modal: 400; --z-toast: 500; --z-tooltip: 600;
+  --color-paper: oklch(96% 0.009 82); --color-paper-2: oklch(92% 0.012 82); --color-paper-3: oklch(87.5% 0.014 80);
+  --color-plate: oklch(99.5% 0.003 82);
+  --color-ink: oklch(16% 0.006 60); --color-ink-2: oklch(27% 0.006 60); --color-muted: oklch(46% 0.01 60);
+  --color-rule: oklch(81% 0.012 80);
+  --color-accent: oklch(53% 0.15 38); --color-accent-soft: oklch(91% 0.035 45); --color-accent-ink: oklch(99.5% 0.003 82); --color-focus: oklch(50% 0.16 38);
+  /* The product's own states: an error, a success, a wait on the user, a merged PR (GitHub's plum). */
+  --color-error: oklch(50% 0.19 27); --color-error-soft: oklch(93% 0.03 27);
+  --color-success: oklch(47% 0.12 150); --color-success-soft: oklch(93% 0.035 150);
+  --color-warn: oklch(50% 0.11 70); --color-warn-soft: oklch(93% 0.045 85);
+  --color-merged: oklch(46% 0.15 310);
+  --color-scrim: oklch(16% 0.006 60 / 0.42);
+  --font-display: "Syne", ui-sans-serif, system-ui, sans-serif; --font-body: "Onest", ui-sans-serif, system-ui, sans-serif;
+  --font-outlier: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --radius-card: 0; --radius-pill: 0; --rule-hair: 1px; --rule-bar: 2px;
+  /* The theme's hard offset, at app scale: 4px on a card, 8px on a dialog. */
+  --shadow-card: 4px 4px 0 var(--color-paper-3); --shadow-card-hover: 4px 4px 0 var(--color-ink);
+  --shadow-dialog: 8px 8px 0 var(--color-ink);
+  --tracking-display: -0.025em; --display-weight: 700;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-mode="light"]) {
+    color-scheme: dark;
+    --color-paper: oklch(15% 0.008 60); --color-paper-2: oklch(18.5% 0.009 62); --color-paper-3: oklch(24% 0.01 65);
+    --color-plate: oklch(20.5% 0.009 64);
+    --color-ink: oklch(94% 0.01 80); --color-ink-2: oklch(84% 0.01 78); --color-muted: oklch(71% 0.012 75);
+    --color-rule: oklch(32% 0.012 70);
+    --color-accent: oklch(68% 0.14 40); --color-accent-soft: oklch(27% 0.05 40); --color-accent-ink: oklch(16% 0.006 60); --color-focus: oklch(72% 0.15 40);
+    --color-error: oklch(70% 0.16 27); --color-error-soft: oklch(25% 0.06 27);
+    --color-success: oklch(74% 0.13 150); --color-success-soft: oklch(24% 0.045 150);
+    --color-warn: oklch(80% 0.12 80); --color-warn-soft: oklch(26% 0.045 80);
+    --color-merged: oklch(74% 0.12 310);
+    --color-scrim: oklch(8% 0.005 60 / 0.6);
+    /* Shadows off in dark: elevation is lightness; the hover keeps a quiet offset in muted. */
+    --shadow-card: none; --shadow-card-hover: 4px 4px 0 var(--color-muted);
+    --shadow-dialog: 8px 8px 0 var(--color-paper-3);
+  }
+}

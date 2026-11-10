@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { type AgentMessage, type ContentBlock, describeTool, type ToolRun, type Transcript as T } from "../../../shared/transcript.ts";
 import { explainModelError } from "../../../shared/endpoint.ts";
-import { Markdown, Spinner } from "../ui.tsx";
+import { Icon, Markdown, Spinner } from "../ui.tsx";
 
 type ToolResult = AgentMessage & { role: "toolResult" };
 
@@ -49,7 +49,9 @@ function ToolCard({
     return (
       <div className="tool tool-ask">
         <div className="tool-head">
-          <span className="tool-icon">❓</span>
+          <span className="tool-icon">
+            <Icon name="question" />
+          </span>
           <span className="tool-title">{String(args.question ?? "Question")}</span>
         </div>
         {result && <div className="tool-answer">{details.answer ? `→ ${details.answer}` : "Dismissed"}</div>}
@@ -132,11 +134,17 @@ function AssistantBlocks({
 /** A failed model call. A web page in place of an API reply gets an explanation, not raw HTML. */
 function ModelError({ message }: { message?: string }) {
   const explained = explainModelError(message);
-  if (!explained) return <div className="msg-error">⚠ {message ?? "The model returned an error"}</div>;
+  if (!explained)
+    return (
+      <div className="msg-error">
+        <Icon name="alert" />
+        {message ?? "The model returned an error"}
+      </div>
+    );
   return (
     <div className="msg-error">
-      ⚠ {explained}{" "}
-      <a href="#/settings">Open Settings → Test</a>
+      <Icon name="alert" />
+      {explained} <a href="#/settings">Open Settings, then Test</a>
       <details>
         <summary className="muted small">Raw reply</summary>
         <pre className="code">{message}</pre>

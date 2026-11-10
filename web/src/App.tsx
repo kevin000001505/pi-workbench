@@ -9,6 +9,7 @@ import { Ssh } from "./pages/Ssh.tsx";
 import { SessionView } from "./session/SessionView.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { useStore } from "./store.tsx";
+import { Icon } from "./ui.tsx";
 
 export type Route =
   | { page: "board"; repoId?: string }
@@ -79,10 +80,11 @@ export function App() {
   useEffect(() => setNavOpen(false), [route]);
 
   return (
-    <div className={`shell ${navOpen ? "nav-open" : ""}`}>
+    // `js`: the script is running, so the phone layout may hide the sidebar behind the menu button.
+    <div className={`shell js ${navOpen ? "nav-open" : ""}`}>
       <Sidebar route={route} onClose={() => setNavOpen(false)} />
-      <button className="nav-toggle" aria-label="Menu" onClick={() => setNavOpen((o) => !o)}>
-        ☰
+      <button type="button" className="nav-toggle" aria-label="Menu" aria-expanded={navOpen} onClick={() => setNavOpen((o) => !o)}>
+        <Icon name="menu" />
       </button>
       <main className="main">
         {route.page === "board" && <Board key={route.repoId ?? ""} repoId={route.repoId} />}

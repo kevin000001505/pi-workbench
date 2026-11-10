@@ -3,7 +3,7 @@ import { refLabel } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import { isResolvedNote, type Phase, type SessionSummary, type Ticket } from "../types.ts";
-import { Markdown, Spinner } from "../ui.tsx";
+import { Icon, Markdown, Spinner } from "../ui.tsx";
 
 const STEPS: { phase: Phase; label: string }[] = [
   { phase: "setup", label: "Setup" },
@@ -130,7 +130,7 @@ export function PipelinePanel({ s, viewRun, onView }: { s: SessionSummary; viewR
         </ol>
         {s.tickets.length > 0 && (
           <div className="pipeline-progress" title={`${done} of ${s.tickets.length} tickets done`}>
-            <span style={{ width: `${(done / s.tickets.length) * 100}%` }} />
+            <span style={{ transform: `scaleX(${done / s.tickets.length})` }} />
           </div>
         )}
         {(s.tickets.length > 0 || s.grillSummary || s.spec) && (
@@ -148,7 +148,10 @@ export function PipelinePanel({ s, viewRun, onView }: { s: SessionSummary; viewR
 
       {s.attention && (
         <div className={`attention ${isResolvedNote(s.attention) ? "attention-ok" : ""}`}>
-          <span>{isResolvedNote(s.attention) ? "✓" : "⚠"} {s.attention}</span>
+          <span>
+            {isResolvedNote(s.attention) ? "✓ " : <Icon name="alert" />}
+            {s.attention}
+          </span>
           {(s.phase === "implement" || s.phase === "review") && (
             <div className="row gap">
               <button className="btn btn-sm" disabled={busy} onClick={() => act("retry")}>

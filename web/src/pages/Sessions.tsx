@@ -25,7 +25,13 @@ export function Sessions() {
     <div className="page">
       <PageHeader
         title="Sessions"
-        sub={`${running.length} working · ${waiting.length} waiting on you · ${direct.length} direct session${direct.length === 1 ? "" : "s"}`}
+        sub={
+          <span className="hint-keys">
+            <span>{running.length} working</span>
+            <span>{waiting.length} waiting on you</span>
+            <span>{`${direct.length} direct session${direct.length === 1 ? "" : "s"}`}</span>
+          </span>
+        }
       >
         <a className="btn btn-primary" href="#/new">
           + New session
@@ -65,7 +71,7 @@ export function Sessions() {
           <Empty title="No direct sessions">
             <p className="muted">
               Direct sessions skip the pipeline: pick <strong>Direct</strong> on the New session form. Each is a card in Doing on
-              its repo's <a href="#/">board</a>.
+              its repo’s <a href="#/">board</a>.
             </p>
             <a className="btn btn-primary" href="#/new">
               + New session
@@ -89,10 +95,10 @@ export function Sessions() {
                   <p className="card-activity ellipsis">
                     {pending.length > 0
                       ? pending[0].kind === "permission"
-                        ? `⚠ Wants to run: ${pending[0].subject}`
-                        : `❓ ${pending[0].title}`
+                        ? `Wants to run: ${pending[0].subject}`
+                        : pending[0].title
                       : s.attention
-                        ? `⚠ ${s.attention}`
+                        ? s.attention
                         : s.heldPrompt
                           ? "Setting up skills; your task is queued"
                           : s.activity || (s.error ? s.error : "Idle")}
