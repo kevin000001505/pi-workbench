@@ -56,7 +56,7 @@ export function Sidebar({ route, onClose }: { route: Route; onClose: () => void 
           <span>Kermit-Code</span>
           <span className={`conn ${connected ? "on" : ""}`} title={connected ? "Live" : "Reconnecting…"} />
         </a>
-        <a className="btn btn-primary btn-block" href="#/new">
+        <a className="btn btn-block" href="#/new">
           + New session
         </a>
 
