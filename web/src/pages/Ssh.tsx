@@ -23,7 +23,7 @@ export function Ssh() {
     <div className="page page-narrow">
       <PageHeader
         title="SSH"
-        sub="Keys and hosts for the agent to reach your machines. Keys are stored encrypted (a value is never shown again) and materialize as ~/.ssh/<name> in the agent’s home. Hosts become ssh aliases in the agent’s ~/.ssh/config: save a host and Test it, then just say the alias to the agent."
+        sub="Keys and hosts for the agent to reach your machines. Keys are stored encrypted (a value is never shown again) and materialize as ~/.ssh/<name> in the agent's home. Hosts become ssh aliases in the agent's ~/.ssh/config: save a host and Test it, then just say the alias to the agent."
       />
       <KeysCard view={view} reload={load} />
       <HostsCard view={view} reload={load} />

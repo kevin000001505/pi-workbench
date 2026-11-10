@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import type { GhRepo, Repo } from "../types.ts";
-import { Empty, Icon, Modal, PageHeader, Spinner } from "../ui.tsx";
+import { Empty, Modal, PageHeader, Spinner } from "../ui.tsx";
 
 function AddRepoModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const { toast } = useStore();
@@ -158,8 +158,7 @@ export function Repos() {
                   New session
                 </a>
                 <a className="btn btn-sm btn-ghost" href={`https://github.com/${r.id}`} target="_blank" rel="noopener">
-                  GitHub
-                  <Icon name="external" label="opens in a new tab" />
+                  GitHub ↗
                 </a>
                 <button
                   className="btn btn-sm btn-ghost danger"

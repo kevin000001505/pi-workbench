@@ -94,7 +94,8 @@ export function NewSession({
               <a className="mono" href={issueUrl(issueRef)}>
                 {fromIssue.repoId}#{fromIssue.number}
               </a>
-. The repository is locked to it.
+              {" "}
+              — the repository is locked to it.
             </div>
           )}
           <div className="grid2">
@@ -178,7 +179,7 @@ export function NewSession({
           <div className="row gap between">
             {mode === "direct" ? (
               <button className="btn btn-ghost btn-sm" onClick={() => setPicker((p) => !p)}>
-                Start with a skill
+                ✦ Start with a skill
               </button>
             ) : (
               <span />

@@ -58,7 +58,7 @@ export function PrModal({ session, onClose }: { session: SessionSummary; onClose
         <div className="form">
           <p className="muted small mono">
             {session.branch} → {session.baseBranch} · {draft.ahead} commit{draft.ahead === 1 ? "" : "s"}
-            {draft.dirty ? `, ${draft.changedFiles} uncommitted file${draft.changedFiles === 1 ? "" : "s"}` : ""}
+            {draft.dirty ? ` · ${draft.changedFiles} uncommitted file${draft.changedFiles === 1 ? "" : "s"}` : ""}
           </p>
           {draft.error && <div className="alert">{draft.error}. You can still write it yourself.</div>}
           <label>

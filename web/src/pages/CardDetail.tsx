@@ -283,8 +283,8 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
           {card.pr && (
             <a className={`kz-tag kz-pr ${card.pr.state ? `pr-${card.pr.state}` : ""}`} href={prUrl ?? undefined} target="_blank" rel="noopener">
               <span className="dot" />
-              <span className="pr-num">PR #{card.pr.number}</span>
-              {card.pr.state && <span className="pr-state">{card.pr.state}</span>}
+              PR #{card.pr.number}
+              {card.pr.state ? ` · ${card.pr.state}` : ""}
             </a>
           )}
           {s?.phase === "pr" && (
