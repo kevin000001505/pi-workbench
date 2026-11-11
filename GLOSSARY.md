@@ -87,7 +87,7 @@ The kanban view of the workbench's features, with one column per stage of the pi
 _Avoid_: kanban (the style, not the thing), dashboard
 
 **Card**:
-One feature on the board: a pipeline session, a direct session, or an unclaimed card (a plain issue or a spec issue with its open tickets), and the PR that delivers it. A click on a spec card toggles a row of ticket sub-cards under it, one row open at a time: a started card's row is its tickets, with their state, a done card's row is its recorded sub-issues. A spec card keeps its whole-card actions — Solve all, Approve, Stop, Retry, Abandon, Answer — on the card.
+One feature on the board: a pipeline session, a direct session, or an unclaimed card (a plain issue or a spec issue with its open tickets), and the PR that delivers it. A click on a spec card toggles a row of ticket sub-cards under it, one row open at a time: a started card's row is its tickets, with their state, a done card's row is its recorded sub-issues. Every session card keeps its whole-card actions on the card: **Approve** while it is in **Review** and **Abandon** until it is **Done**, on a direct card as on a spec card, and **Stop**, **Retry** and **Answer** on a pipeline card only. An unclaimed card's buttons are the column moves (**Solve all** on a spec card, **Solve** and **Split** on a plain one).
 _Avoid_: task (kanzo's word), ticket (a ticket is one part of a card)
 
 **To do**:

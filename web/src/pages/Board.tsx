@@ -1,11 +1,11 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type Card, type Column, type SubCard, COLUMNS, DONE_PAGE, isPlainUnclaimedCard, issueNumberOf, unclaimedNumber } from "../../../shared/board.ts";
+import { type BoardAction, type Card, type Column, type SubCard, boardCardActions, COLUMNS, DONE_PAGE, isApproveMove, isPlainUnclaimedCard, issueNumberOf, unclaimedNumber } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import { abandonQuestion, approveQuestion, issueParts, CardDetail, TICKET_STATE } from "./CardDetail.tsx";
 import { type CardAction, CardActions, SOLVE, SOLVE_ALL, SPLIT } from "./CardActions.tsx";
 import { matches, NewCard, Search, typingIn, wordsOf } from "./BoardDialogs.tsx";
-import { isResolvedNote, type Repo, type SessionSummary, type UnclaimedSpecTickets, waitingOn } from "../types.ts";
+import { isResolvedNote, type Repo, type SessionSummary, type UnclaimedSpecTickets } from "../types.ts";
 import { Spinner } from "../ui.tsx";
 import "../board.css";
 
@@ -23,6 +23,20 @@ function rememberBoardRepo(id: string) {
     localStorage.setItem(LAST_REPO_KEY, id);
   } catch {}
 }
+
+/**
+ * The board card's whole-card actions (shared/board.ts boardCardActions) with their button text.
+ * A card with no session gets none of them.
+ */
+const BOARD_ACTION: Record<BoardAction, { label: string; title: string; danger?: boolean }> = {
+  approve: { label: "Approve", title: "Merge the PR, delete the branch and the worktree" },
+  // Stop only while the tickets, the review or the retro run is going; a stopped review or retro
+  // shows Retry instead, as a blocked ticket's sub-card does.
+  stop: { label: "Stop", title: "Stop the runs; the card pauses in Issues, where Solve all continues", danger: true },
+  retry: { label: "Retry", title: "Re-run the review or the retro" },
+  abandon: { label: "Abandon", title: "Stop the runs, close the PR, delete the branch, the worktree and the card; the issues stay open", danger: true },
+  answer: { label: "Answer", title: "A decision or permission waits on the user; the card detail answers it" },
+};
 
 // From kanzo's app.js: one color per step, from To do on.
 const STATUS_COLORS = ["#8a8a83", "#3b82f6", "#e8a317", "#2f9e44", "#ae3ec9", "#e8590c"];
@@ -105,10 +119,10 @@ function BoardCard({
   onMove: (column: Column) => void;
   /** A spec card's click toggles its row of ticket sub-cards instead of opening the detail. */
   onToggleExpand?: () => void;
-  onApprove?: () => void;
-  onStop?: () => void;
-  onRetry?: () => void;
-  onAbandon?: () => void;
+  onApprove: () => void;
+  onStop: () => void;
+  onRetry: () => void;
+  onAbandon: () => void;
   busy: boolean;
 }) {
   const issue = unclaimedNumber(card.id);
@@ -126,22 +140,13 @@ function BoardCard({
   // A plain click on any spec card toggles its row of ticket sub-cards (one row open at a time);
   // a plain card (a plain issue, a card with no tickets yet) still opens the card detail.
   const spec = card.specCard;
-  // The spec card keeps its whole-card actions on the card: each stops the card's own click.
+  // Every session card keeps its whole-card actions on the card — a direct card included, which has
+  // no tickets to carry them. Each action stops the card's own click.
   const actions: CardAction[] = [];
   if (solveAll) actions.push(SOLVE_ALL);
   if (plain) actions.push(SOLVE, SPLIT);
-  if (spec && s) {
-    if (s.phase === "pr") actions.push({ label: "Approve", title: "Merge the PR, delete the branch and the worktree", run: onApprove });
-    // Stop only while the tickets, the review or the retro run is going; a stopped review or
-    // retro shows Retry instead, as a blocked ticket's sub-card does.
-    if ((s.phase === "implement" || s.phase === "review" || s.phase === "retro") && (s.status === "running" || s.status === "waiting"))
-      actions.push({ label: "Stop", title: "Stop the runs; the card pauses in Issues, where Solve all continues", danger: true, run: onStop });
-    if ((s.phase === "review" || s.phase === "retro") && s.attention)
-      actions.push({ label: "Retry", title: "Re-run the review or the retro", run: onRetry });
-    if (card.column !== "done")
-      actions.push({ label: "Abandon", title: "Stop the runs, close the PR, delete the branch, the worktree and the card; the issues stay open", danger: true, run: onAbandon });
-    if (waitingOn(s).length > 0) actions.push({ label: "Answer", title: "A decision or permission waits on the user; the card detail answers it", run: onOpen });
-  }
+  const runs: Record<BoardAction, () => void> = { approve: onApprove, stop: onStop, retry: onRetry, abandon: onAbandon, answer: onOpen };
+  for (const a of boardCardActions(card, s)) actions.push({ ...BOARD_ACTION[a], run: runs[a] });
   const line =
     card.attention ??
     (unclaimed
@@ -527,8 +532,8 @@ export function Board({ repoId }: { repoId?: string }) {
     setDragged(null);
     setOver(null);
     if (!card) return;
-    // Review → Done is Approve: it merges the PR, so it asks first.
-    if (card.column === "review" && column === "done" && !confirm(approveQuestion(card))) return;
+    // Review → Done is Approve: it merges the PR, so it asks first — a direct card included.
+    if (isApproveMove(card, column) && !confirm(approveQuestion(card))) return;
     moveCard(card, column);
   };
 

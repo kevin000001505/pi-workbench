@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Card } from "../../../shared/board.ts";
-import { COLUMNS, isPlainUnclaimedCard, issueNumberOf, parseIssueRef, refLabel, unclaimedNumber } from "../../../shared/board.ts";
+import { boardCardActions, COLUMNS, isPlainUnclaimedCard, issueNumberOf, parseIssueRef, refLabel, unclaimedNumber } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { PendingCard } from "../session/PendingCard.tsx";
 import { phaseLabel } from "../session/PipelinePanel.tsx";
@@ -260,6 +260,8 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
   };
 
   const column = COLUMNS.find((c) => c.id === card.column)?.label ?? card.column;
+  // The card's whole-card actions, the same gate the board card uses (shared/board.ts).
+  const cardActions = boardCardActions(card, s);
   const specRef = s?.specRef ?? card.specRef;
   const prUrl = card.pr?.url ?? s?.prUrl ?? null;
   const attention = s?.attention ?? card.attention;
@@ -313,12 +315,12 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
               {card.pr.state ? ` · ${card.pr.state}` : ""}
             </a>
           )}
-          {s?.phase === "pr" && (
+          {cardActions.includes("approve") && (
             <button className="kz-btn primary" disabled={busy} onClick={approve} title="Merge the PR, delete the branch and the worktree">
               {busy ? <Spinner small /> : null} Approve
             </button>
           )}
-          {!plain && !unclaimedSpec && card.column !== "done" && (
+          {cardActions.includes("abandon") && (
             <button className="kz-btn danger" disabled={busy} onClick={abandon} title="Stop the runs, close the PR, delete the branch, the worktree and the card; the issues stay open">
               Abandon
             </button>
