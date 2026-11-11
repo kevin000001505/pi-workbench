@@ -119,6 +119,12 @@ export function nextTicket(tickets: Ticket[]): Ticket | undefined {
 
 export const allDone = (tickets: Ticket[]) => tickets.length > 0 && tickets.every((t) => t.status === "done");
 
+/**
+ * True when a prompt already names the skill pi must expand: it starts with a `/skill:name ...`
+ * call that has an argument. Such a prompt goes out as it is; a bare task goes through grillPrompt.
+ */
+export const isSkillCall = (prompt: string) => /^\/skill:[\w-]+ \S/.test(prompt);
+
 export function grillPrompt(task: string) {
   return `/skill:grill-with-docs ${task}
 
@@ -126,6 +132,16 @@ export function grillPrompt(task: string) {
 Ask your questions with the ask_user tool. Keep going until the user explicitly confirms, through ask_user, that we have reached a shared understanding.
 Commit any docs you wrote along the way (glossary, ADRs) to the current branch. Do not push.
 Then call save_grill_summary with a short summary of the decisions made, and stop. Do not write the spec, tickets or code yet.`;
+}
+
+/**
+ * A plain issue card's Grill: grill-with-docs on the issue's own words. The issue is the session's
+ * origin, not its spec: the grill and the to-spec step that follows write the spec, and the PR closes
+ * the issue through the session's issue ref.
+ */
+export function grillIssuePrompt(issue: TicketSeed["spec"]) {
+  const body = (issue.body ?? "").trim() || "(the issue has no description)";
+  return grillPrompt(`Issue #${issue.number} (${issue.htmlUrl}): ${issue.title.trim()}\n\n${body}`);
 }
 
 export function specPrompt() {
@@ -183,13 +199,15 @@ export function ticketFromIssue(spec: { number: number; title: string; body: str
   return [{ number: 1, title: spec.title.trim(), body: (spec.body ?? "").trim() || `No description for #${spec.number}`, blockedBy: [], trackerRef: String(spec.number) }];
 }
 
-/** The start a session takes from an unclaimed card's move, picked by the issue's open ticket sub-issues. */
-export type StartFrom = "tickets" | "spec" | "issue" | "split";
+/** The start a session takes from an unclaimed card's move or action, picked by the issue's open ticket sub-issues. */
+export type StartFrom = "tickets" | "spec" | "issue" | "split" | "grill";
 
 /**
  * What one StartFrom begins a session with: its phase, the prompt held until setup is done
  * (or sent at once), the tickets recorded at once, and its spec bookkeeping. The one table for
- * the four unclaimed-card starts, so the move route and SessionManager read them the same way.
+ * the unclaimed-card starts, so the move route, the grill route and SessionManager read them the
+ * same way. A held prompt is always a full skill call (see isSkillCall): SessionManager sends it
+ * as it is.
  */
 export type StartPlan = {
   phase: Phase;
@@ -201,6 +219,9 @@ export type StartPlan = {
   needsSubIssues: boolean;
   /** True when the issue's body becomes the session's spec text. A rework re-saves its spec in the to-spec step. */
   spec: boolean;
+  /** True when the seed issue is the session's spec from the start, so its URL is the session's spec ref.
+   * A Grill starts from the issue as its origin only: grill and to-spec write the spec. */
+  specRefFromSeed: boolean;
 };
 
 export const START_PLANS: Record<StartFrom, StartPlan> = {
@@ -209,24 +230,35 @@ export const START_PLANS: Record<StartFrom, StartPlan> = {
     tickets: (seed) => validateTickets(ticketsFromSubIssues(seed.subIssues)),
     needsSubIssues: true,
     spec: true,
+    specRefFromSeed: true,
   },
   issue: {
     phase: "implement",
     tickets: (seed) => ticketFromIssue(seed.spec),
     needsSubIssues: false,
     spec: true,
+    specRefFromSeed: true,
   },
   split: {
     phase: "tickets",
     held: (seed, contextWindow) => splitPrompt(seed.spec.htmlUrl, contextWindow),
     needsSubIssues: false,
     spec: true,
+    specRefFromSeed: true,
   },
   spec: {
     phase: "grill",
     held: (seed) => reworkPrompt(seed.spec.htmlUrl),
     needsSubIssues: true,
     spec: false,
+    specRefFromSeed: true,
+  },
+  grill: {
+    phase: "grill",
+    held: (seed) => grillIssuePrompt(seed.spec),
+    needsSubIssues: false,
+    spec: false,
+    specRefFromSeed: false,
   },
 };
 

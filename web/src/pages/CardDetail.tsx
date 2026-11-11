@@ -200,6 +200,22 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
     }
   };
 
+  // Grill a plain issue card: grill-with-docs on the issue's own title and body. The session claims
+  // the issue, so the unclaimed card goes and this detail closes with it.
+  const grillIssue = async () => {
+    setBusy(true);
+    const part = issueParts(card.specRef);
+    try {
+      if (!part) throw new Error("The card has no issue link to grill");
+      await api.post(`/api/repos/${part.owner}/${part.name}/issues/${part.number}/grill`, {});
+      onClose();
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // Solve one sub-issue of an unclaimed spec card: it creates the spec's session with that
   // sub-issue as the solo ticket. The unclaimed card goes, and this detail closes with it.
   const solveUnclaimed = async (sub: number) => {
@@ -278,7 +294,17 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
             </a>
           )}
           {plain && (
-            <CardActions actions={[{ ...SOLVE, primary: true }, SPLIT]} busy={busy} spinner flat onMove={(column) => movePlain(column)} />
+            <CardActions
+              actions={[
+                { ...SOLVE, primary: true },
+                { label: "Grill", title: "Start the pipeline on the issue with grill-with-docs: the grill works from its title and body, and the PR closes the issue", run: grillIssue },
+                SPLIT,
+              ]}
+              busy={busy}
+              spinner
+              flat
+              onMove={(column) => movePlain(column)}
+            />
           )}
           {card.pr && (
             <a className={`kz-tag kz-pr ${card.pr.state ? `pr-${card.pr.state}` : ""}`} href={prUrl ?? undefined} target="_blank" rel="noopener">

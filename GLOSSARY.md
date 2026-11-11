@@ -99,7 +99,7 @@ The column for every unclaimed card — a plain issue and a spec issue with its 
 _Avoid_: ready (as a column name)
 
 **Unclaimed card**:
-A card for an open issue that no session claims yet. A plain issue (no open sub-issues, not itself a sub-issue) and a spec issue with open ticket sub-issues both sit in Issues. A plain card's move to Doing is Solve; its move to To do is Split. A spec card's move to Doing starts Solve all; a move to To do grills on that spec issue to rework it. A click on the card toggles its open ticket sub-issues as a row of cards under it, which collapses on the next click; each sub-card has a Solve.
+A card for an open issue that no session claims yet. A plain issue (no open sub-issues, not itself a sub-issue) and a spec issue with open ticket sub-issues both sit in Issues. A plain card's move to Doing is Solve; its move to To do is Split; its detail's **Grill** action starts the pipeline on it. A spec card's move to Doing starts Solve all; a move to To do grills on that spec issue to rework it. A click on the card toggles its open ticket sub-issues as a row of cards under it, which collapses on the next click; each sub-card has a Solve.
 
 **Solve**:
 To work a plain issue through a session that skips grill, spec and tickets: the issue becomes the card's only ticket, and the PR's merge closes the issue.
@@ -108,6 +108,10 @@ _Avoid_: solve all (that is for a spec card's tickets), fix (a fix is one possib
 **Split**:
 Breaking a plain issue into ticket sub-issues with `to-tickets`, so it becomes a spec issue that waits for Solve all.
 _Avoid_: rework
+
+**Grill**:
+A plain issue card's action that starts the pipeline on it with grill-with-docs. The grill works from the issue's title and body, the session keeps the issue as its **Origin issue**, and the card goes through spec, tickets and Solve all; the PR's merge closes the issue.
+_Avoid_: Solve (Solve skips grill, spec and tickets), Split (Split only cuts the issue into tickets)
 
 **Doing**:
 The column for a feature whose tickets are being implemented.

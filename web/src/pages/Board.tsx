@@ -146,7 +146,7 @@ function BoardCard({
     card.attention ??
     (unclaimed
       ? plain
-        ? `Issue #${issue}: Solve makes it the card's only ticket; Split breaks it into tickets when it is too big.`
+        ? `Issue #${issue}: Solve makes it the card's only ticket; open the card to grill it first, or Split it into tickets when it is too big.`
         : `Spec issue #${issue}: Solve all starts its tickets; drag it to To do to rework it`
       : s?.activity ?? "");
   return (

@@ -73,6 +73,17 @@ async function gitEnv(): Promise<GitEnv> {
 
 const llmKey = () => secrets.get(GLOBAL_SCOPE, LLM_KEY_ENV);
 
+/**
+ * The issue behind an unclaimed card, read for a write route: its title, body, URL, parent and open
+ * ticket sub-issues. A number that is a sub-issue of another issue is refused (409): its spec's card
+ * owns it, and a stale tab can still post it.
+ */
+async function cardSeed(repo: ReturnType<typeof requireTrackedRepo>, number: number) {
+  const seed = await github().listTicketSubIssues(repo.owner, repo.name, number);
+  if (seed.spec.hasParent) throw new HttpError(409, `Issue #${number} is a sub-issue of another issue; its spec's card owns it.`);
+  return seed;
+}
+
 const delivery = githubDelivery({ github, gitEnv, model: () => getModelSettings(db), llmKey });
 const sessions = new SessionManager(
   db,
@@ -230,13 +241,23 @@ const router = new Router()
     const repo = requireTrackedRepo(db, `${params.owner}/${params.name}`);
     const number = Number(params.number);
     if (body.column !== "doing" && body.column !== "todo") throw new HttpError(409, "An unclaimed card can move only to Doing or To do.");
-    const seed = await github().listTicketSubIssues(repo.owner, repo.name, number);
-    // A sub-issue has no card: its spec's card owns it. A stale tab can still post its number.
-    if (seed.spec.hasParent) throw new HttpError(409, `Issue #${number} is a sub-issue of another issue; its spec's card owns it.`);
+    const seed = await cardSeed(repo, number);
     const specCard = seed.subIssues.length > 0;
     const startFrom = specCard ? (body.column === "doing" ? "tickets" : "spec") : (body.column === "doing" ? "issue" : "split");
     // create() refuses a second session for an issue a card works on already (409).
     return sessions.create({ repoId: repo.id, title: "", prompt: "", mode: "pipeline", issueRef: `${repo.id}#${number}`, startFrom });
+  })
+  // Grill on a plain issue card's detail: the issue is the session's origin issue, grill-with-docs
+  // starts from its title and body, and the card runs the normal pipeline (spec, tickets, Solve all).
+  // A spec issue (open ticket sub-issues) and a sub-issue's number are refused, as the move route does.
+  .on("POST", "/api/repos/:owner/:name/issues/:number/grill", async ({ params }) => {
+    const repo = requireTrackedRepo(db, `${params.owner}/${params.name}`);
+    const number = Number(params.number);
+    const seed = await cardSeed(repo, number);
+    if (seed.subIssues.length > 0)
+      throw new HttpError(409, `Issue #${number} has open ticket sub-issues: it is a spec card. Solve all its tickets, or move it to To do to rework it.`);
+    // create() refuses a second session for an issue a card works on already (409).
+    return sessions.create({ repoId: repo.id, title: "", prompt: "", mode: "pipeline", issueRef: `${repo.id}#${number}`, startFrom: "grill" });
   })
   // Solve one ticket of an unclaimed spec card: creates the spec's session as the tickets start
   // does, with the solo ticket set to the sub-issue's local number, so only that ticket runs
@@ -246,9 +267,7 @@ const router = new Router()
     const number = Number(params.number);
     const sub = Number(params.sub);
     if (!Number.isInteger(sub) || sub < 1) throw new HttpError(400, "The sub-issue number must be a whole number");
-    const seed = await github().listTicketSubIssues(repo.owner, repo.name, number);
-    // A sub-issue has no card: its spec's card owns it. A stale tab can still post its number.
-    if (seed.spec.hasParent) throw new HttpError(409, `Issue #${number} is a sub-issue of another issue; its spec's card owns it.`);
+    const seed = await cardSeed(repo, number);
     const subSeed = seed.subIssues.find((s) => s.number === sub);
     if (!subSeed) throw new HttpError(409, `Issue #${sub} is not an open sub-issue of #${number}`);
     // A blocker outside the open set is dropped, as ticketsFromSubIssues does: an open blocker

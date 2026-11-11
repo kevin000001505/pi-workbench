@@ -23,6 +23,7 @@ import {
   type Diagnosis,
   fixPrompt,
   grillPrompt,
+  isSkillCall,
   reworkPrompt,
   implementPrompt,
   mergePrompt,
@@ -486,10 +487,11 @@ export class SessionManager extends EventEmitter {
       throw Object.assign(new Error(`The TypeSafe skill is not installed (expected at ${typesafeSkillDir()})`), { status: 400 });
     }
     const mode = input.mode === "direct" ? "direct" : "pipeline";
-    // Unclaimed card moves start a session from the issue; START_PLANS picks its phase, its
-    // tickets, its held prompt and its spec bookkeeping. A spec card to Doing solves its
-    // tickets; to To do reworks it. A plain card to Doing is Solve (the issue is the card's
-    // only ticket); to To do is Split (to-tickets on the issue).
+    // Unclaimed card moves and the plain card's Grill start a session from the issue; START_PLANS
+    // picks its phase, its tickets, its held prompt and its spec bookkeeping. A spec card to Doing
+    // solves its tickets; to To do reworks it. A plain card to Doing is Solve (the issue is the
+    // card's only ticket); to To do is Split (to-tickets on the issue); its Grill is grill (the
+    // grill works from the issue's title and body, and the issue stays the session's origin).
     const startFrom = isStartFrom(input.startFrom) ? input.startFrom : undefined;
     const plan = startFrom ? START_PLANS[startFrom] : undefined;
     if (startFrom && input.mode === "direct")
@@ -538,7 +540,29 @@ export class SessionManager extends EventEmitter {
         `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt, mode, phase, active_run, issue_ref, auto_approve, typesafe_skill, spec, spec_ref, held_phase, solo_ticket)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup ? held : null, mode, phase, id, issueRef, autoApprove === "inherit" ? null : autoApprove, typesafe ? 1 : 0, plan?.spec ? (seed?.spec.body ?? null) : null, startFrom ? (seed?.spec.htmlUrl ?? null) : null, needsSetup ? heldPhase : null, input.soloTicket ?? null);
+      .run(
+        id,
+        repo.id,
+        title,
+        branch,
+        base,
+        worktree,
+        now,
+        now,
+        needsSetup ? held : null,
+        mode,
+        phase,
+        id,
+        issueRef,
+        autoApprove === "inherit" ? null : autoApprove,
+        typesafe ? 1 : 0,
+        plan?.spec ? (seed?.spec.body ?? null) : null,
+        // A start that names its seed issue as the spec carries its URL as the spec ref; a Grill's issue
+        // is its origin only, so its spec ref comes later from save_spec.
+        startFrom && plan?.specRefFromSeed ? (seed?.spec.htmlUrl ?? null) : null,
+        needsSetup ? heldPhase : null,
+        input.soloTicket ?? null,
+      );
     const s = this.state(id);
     s.loaded = true;
     await this.start(id);
@@ -551,7 +575,8 @@ export class SessionManager extends EventEmitter {
     } else if (plan?.held) {
       await this.send(id, held!);
     } else if (mode === "pipeline") {
-      await this.send(id, grillPrompt(input.prompt));
+      // A task that is already a skill call (the session form's ✦ Skills pick) goes out as it is.
+      await this.send(id, isSkillCall(input.prompt) ? input.prompt : grillPrompt(input.prompt));
     } else if (task) {
       await this.send(id, input.prompt);
     }
@@ -1011,11 +1036,13 @@ export class SessionManager extends EventEmitter {
     this.emit("event", id, { type: "wb_held", heldPrompt: null });
     if (row.mode === "pipeline" && !discard) {
       // held_phase names the phase the prompt releases into: tickets for a split, grill for a
-      // rework or a task.
+      // rework, a plain issue card's grill or a task.
       this.update(id, { phase: row.held_phase ?? "grill" });
       this.emitSummary(id);
-      // A session on an existing spec issue holds its whole rework or split prompt; others hold the task.
-      await this.send(id, row.spec_ref ? row.held_prompt : grillPrompt(row.held_prompt), "followUp");
+      // A held prompt is either a full skill call (a rework, a split, a plain issue card's grill)
+      // or a bare task from the session form. Only the bare task needs the grill wrapper: wrapping
+      // a call again would send pi the skill directive twice.
+      await this.send(id, isSkillCall(row.held_prompt) ? row.held_prompt : grillPrompt(row.held_prompt), "followUp");
       return;
     }
     this.update(id, { phase: "direct", mode: "direct" });
