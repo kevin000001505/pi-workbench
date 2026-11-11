@@ -30,12 +30,16 @@ function pushToBase(line: string, file = "work.txt", baseBranch = "main") {
 
 const approve = (id: string) => api("POST", `/api/sessions/${id}/approve`, {});
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString().trim();
+const move = (id: string, column: string) => api("POST", `/api/sessions/${id}/move`, { column });
+const mergeInProgress = (worktree: string) => spawnSync("git", ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd: worktree }).status === 0;
 
 /**
  * A direct session with its PR recorded: its card is in Review. Its PR body is the user's own
- * words, so it carries no `Closes` line.
+ * words, so it carries no `Closes` line. With `workLine` it also puts a line in work.txt on its
+ * branch, so a base branch that changes work.txt conflicts with its PR and Approve takes the
+ * merge-run path.
  */
-async function directToReview(title: string, issueRef?: string) {
+async function directToReview(title: string, issueRef?: string, workLine?: string) {
   await setup();
   const d = (await api("POST", "/api/sessions", {
     repoId: "kevin/ship",
@@ -47,10 +51,17 @@ async function directToReview(title: string, issueRef?: string) {
   assert.ok(d.id, JSON.stringify(d));
   await waitFor(async () => (await summary(d.id)).phase === "direct", 120_000);
   // The session's own change on its branch: a PR needs a commit beyond the base.
+  // Appending keeps it a change even when an earlier test's merge already put hello.txt on the base.
   const worktree = path.join(process.env.DATA_DIR!, "worktrees", d.id);
-  fs.writeFileSync(path.join(worktree, "hello.txt"), "Hello\n");
+  fs.appendFileSync(path.join(worktree, "hello.txt"), "Hello\n");
   git(worktree, "add", "hello.txt");
   git(worktree, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "Say hello");
+  if (workLine) {
+    // The branch's own line in work.txt: a base branch that adds a line there conflicts with it.
+    fs.appendFileSync(path.join(worktree, "work.txt"), `${workLine}\n`);
+    git(worktree, "add", "work.txt");
+    git(worktree, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "Note the work");
+  }
   const pr = await api("POST", `/api/sessions/${d.id}/pr`, { title, body: "## Summary\n- hello.txt says Hello" });
   assert.equal(pr.status, 200, JSON.stringify(pr.json));
   const card = await waitFor(async () => (await board()).find((c) => c.id === d.id && c.column === "review"), 120_000);
@@ -353,6 +364,47 @@ test("Approve on a conflicting PR resolves the conflict in a merge run; after fi
   assert.ok(!fs.existsSync(worktree));
 });
 
+test("Approve on a conflicting direct card resolves the conflict in a merge run; the resolve is pushed, and a second Approve merges the PR and lands the card in Done", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, pr, worktree, branch } = await directToReview("Direct conflict", undefined, "direct was here");
+  const theirs = pushToBase("direct-side: main changed this line");
+
+  const r = await approve(id);
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.phase, "pr", "the card stays in Review");
+  // The merge run is on screen as soon as Approve answers.
+  assert.match(r.json.activeRun, new RegExp(`^${id}-merge-[a-z0-9]+$`));
+  assert.ok(r.json.runs.some((x: any) => x.id === r.json.activeRun), "the merge run is one of the session's runs");
+  assert.ok(!pr.merged);
+  assert.equal((await board()).find((c) => c.id === id)?.column, "review");
+  // A second Approve while the merge run works is refused, from the button and from the drag alike.
+  assert.equal((await approve(id)).status, 409);
+  assert.equal((await move(id, "done")).status, 409, "the Review → Done drag is the same Approve");
+
+  const resolved = await waitFor(async () => (await summary(id)).attention && summary(id), 120_000);
+  assert.equal(resolved.phase, "pr");
+  assert.match(resolved.attention, /^The merge conflict with main is resolved and pushed .*approve again\.$/);
+  assert.equal((await board()).find((c) => c.id === id)?.column, "review");
+  // The resolution is pushed: the branch on GitHub has the base's commit, both sides' lines, no markers.
+  execFileSync("git", ["merge-base", "--is-ancestor", theirs, `refs/heads/${branch}`], { cwd: bare });
+  const pushed = git(bare, "show", `refs/heads/${branch}:work.txt`);
+  assert.match(pushed, /direct was here/);
+  assert.match(pushed, /main changed this line/);
+  assert.doesNotMatch(pushed, /<<<<<<<|=======|>>>>>>>/);
+
+  // A second Approve — the Review → Done drag the board sends — merges the PR and lands the card in Done.
+  const done = await move(id, "done");
+  assert.equal(done.status, 200, JSON.stringify(done.json));
+  assert.equal(done.json.phase, "done");
+  assert.equal(pr.merged, true);
+  assert.equal(pr.merge_method, "merge");
+  assert.ok(!hasRef(`refs/heads/${branch}`), "the remote branch is deleted");
+  assert.ok(!fs.existsSync(worktree), "the worktree is removed");
+  const landed = (await board()).find((c) => c.id === id)!;
+  assert.equal(landed.column, "done");
+  assert.equal(landed.pr.state, "merged");
+  assert.ok(landed.doneAt, "the card carries its Done time");
+});
+
 test("a merge run's resolve is pushed when a file the branch changed has a setext underline (=======) that is no conflict marker", { skip: !hasPi && "pi CLI not found" }, async () => {
   const { id, worktree, branch } = await toReview(137);
   // The branch's README has a Markdown heading underlined with seven `=`.
@@ -398,6 +450,29 @@ test("a conflict resolve whose finish_merge fails keeps the card in Review with 
   assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktree }).toString().trim(), tip);
 });
 
+for (const [word, says] of [["direct-giveup", /Both sides rewrote the last line/], ["direct-nonfinish", /the run stopped without finishing/]] as const)
+test(`a merge run on a direct card that ends unresolved (${word === "direct-giveup" ? "with its report" : "without its report"}) leaves it in Review with the reason and undoes the half-done merge`, { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, pr, worktree, branch } = await directToReview(`Direct ${word}`, undefined, "direct was here");
+  const tip = git(bare, "rev-parse", `refs/heads/${branch}`);
+  pushToBase(`${word === "direct-giveup" ? "GIVEUP" : "NOFINISH"}: main rewrote this line`);
+
+  const r = await approve(id);
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.match(r.json.activeRun, new RegExp(`^${id}-merge-[a-z0-9]+$`));
+
+  const failed = await waitFor(async () => (await summary(id)).attention && summary(id), 120_000);
+  assert.equal(failed.phase, "pr");
+  assert.match(failed.attention, /^The merge conflict was not resolved: .*approve again\.$/);
+  assert.match(failed.attention, says);
+  assert.equal((await board()).find((c) => c.id === id)?.column, "review", "the card is still in Review");
+  assert.ok(!pr.merged);
+  // Nothing of the merge is pushed, and the worktree is back on the branch's own tip, no merge half done.
+  assert.equal(git(bare, "rev-parse", `refs/heads/${branch}`), tip, "nothing is pushed");
+  assert.ok(!mergeInProgress(worktree), "no merge is left half done");
+  assert.equal(git(worktree, "status", "--porcelain"), "", "no conflict markers are left in the worktree");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), tip);
+});
+
 test("a merge run that ends without finish_merge keeps the card in Review, and Approve can start it again", { skip: !hasPi && "pi CLI not found" }, async () => {
   const { id, pr, branch } = await toReview(57);
   const tip = execFileSync("git", ["rev-parse", `refs/heads/${branch}`], { cwd: bare }).toString().trim();
@@ -415,9 +490,6 @@ test("a merge run that ends without finish_merge keeps the card in Review, and A
   assert.notEqual(again.json.activeRun, first);
   await waitFor(async () => (await summary(id)).attention, 120_000);
 });
-
-const move = (id: string, column: string) => api("POST", `/api/sessions/${id}/move`, { column });
-const mergeInProgress = (worktree: string) => spawnSync("git", ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd: worktree }).status === 0;
 
 /** Approve a PR whose base changed under it, and wait while the merge run asks the user a question. */
 async function holdMergeRun(id: string) {
