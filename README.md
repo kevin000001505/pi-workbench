@@ -13,7 +13,7 @@ A self-hosted web UI for the [pi coding agent](https://github.com/earendil-works
 
 ## What you get
 
-- **A board per repo.** The start page is the selected repo's **Board**: one card per session in the columns To do, Issues, Doing, QA, Review and Done — a pipeline card in the column its phase sets, and a direct session's card always in Doing. A card shows its title, its ticket progress, and why it needs you. The sidebar lists the tracked repos and opens each one's board; the last one opens again next time. The **Sessions** page lists both direct sessions and card (pipeline) sessions, with a **Cards** section that shows each card's column and the run that goes now.
+- **A board per repo.** The start page is the selected repo's **Board**: one card per session in the columns To do, Issues, Doing, QA, Review and Done — a pipeline card in the column its phase sets, and a direct session's card in Doing until its PR is recorded, then in Review and, once the PR merges, in Done. A card shows its title, its ticket progress, and why it needs you. The sidebar lists the tracked repos and opens each one's board; the last one opens again next time. The **Sessions** page lists both direct sessions and card (pipeline) sessions, with a **Cards** section that shows each card's column and the run that goes now.
 - **Plan, then build, as the default.** A new session runs a pipeline (see [The pipeline](#the-pipeline)): `grill-with-docs` → `to-spec` → `to-tickets` → test-first build of each ticket → one code review. Pick **Direct** on the New session form to skip it for small fixes.
 - **Live sessions.** Every session streams text, thinking, and tool calls as they happen. Sessions keep running when you close the tab, and several can run in parallel, each in its own git worktree and branch.
 - **Permissions.** Before a risky tool call runs, the session waits for **Allow / Allow for this session / Deny**. Risky calls include `git push`, `gh`, `rm -r`, `sudo`, `curl`/`wget`, `ssh`, package installs, destructive git commands, and writes outside the worktree. You can edit the rules under Settings.
@@ -47,7 +47,7 @@ New sessions follow the flow these skills are designed for: align on requirement
 - **Every conversation stays readable** (the plan, each ticket, the review) from the run tabs above the transcript.
 - **The pipeline stops and notifies you** when a ticket reports itself blocked, a run stops without finishing, or you stop it. **Retry** reruns that ticket (or the review) from scratch. **Mark done & continue** moves on. A reply in the chat continues the same run.
 - **When the review is done,** the session tells you, and **Create PR** drafts a PR whose body lists the tickets. GitHub issues become `Closes #n`.
-- **New feature, new session.** One session holds one feature. Pick **Direct** on the New session form to skip the pipeline for small fixes.
+- **New feature, new session.** One session holds one feature. Pick **Direct** on the New session form to skip the pipeline for small fixes. Its card follows its PR: it sits in Doing, the session page's **Create PR** moves it to Review, and **Approve** on its card merges the PR into Done. **Abandon** drops it, and every other drag of it is refused.
 
 Matt Pocock's skills hand off to each other by "calling the Skill tool": `grill-with-docs` calls `grilling` and `domain-modeling`, and `implement` calls `tdd` and `code-review`. The workbench extension adds a `Skill` tool to pi so these hand-offs work.
 

@@ -6,7 +6,7 @@
  * (pending.ts) belong here.
  */
 
-import { waitsOnUser } from "./pending.ts";
+import { waitsOnUser, type WaitingState } from "./pending.ts";
 
 export type Column = "todo" | "issues" | "doing" | "qa" | "review" | "done";
 
@@ -146,15 +146,15 @@ export type SessionActionSource = {
   phase: string;
   status: string;
   attention: string | null;
-  /** The session's pending requests, as waitsOnUser (shared/pending.ts) reads them. */
-  pending: { judge?: { state: string }; review?: { state: string }; reviewer?: { state: string } }[];
+  /** The session's pending requests, read by waitsOnUser (shared/pending.ts). */
+  pending: WaitingState[];
 };
 
 /**
  * The whole-card actions of a session card — the actions on the card itself, a direct card included:
  *
- * - `approve` — the card is in Review, so its card can merge its PR.
- * - `abandon` — the card is not in Done, so its card can still be dropped.
+ * - `approve` — the card is in Review, so it can merge its PR.
+ * - `abandon` — the card is not in Done, so it can still be dropped.
  * - `stop`, `retry`, `answer` — the pipeline card's own controls: a direct card has no tickets to
  *   pause and no review or retro to re-run, and it answers a decision in the card detail.
  *

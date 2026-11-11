@@ -1523,8 +1523,16 @@ test("Review → Done on a direct card is Approve: its PR merges with a merge co
 
   const closedBefore = gh.closed.length;
   const at = Date.now();
+  // Open boards of the repo are told to fetch the Board again: the card changed column.
+  const events = await boardEvents();
   const moved = await api("POST", `/api/sessions/${id}/move`, { column: "done" });
   assert.equal(moved.status, 200, JSON.stringify(moved.json));
+  assert.deepEqual(
+    events.seen.filter((r) => r === "kevin/directmerge"),
+    ["kevin/directmerge"],
+    "the Approve emits one board event for the repo",
+  );
+  events.close();
   assert.equal(moved.json.phase, "done");
   assert.ok(moved.json.doneAt >= at, "the card's Done time is set");
 

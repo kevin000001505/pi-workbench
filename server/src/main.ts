@@ -532,8 +532,8 @@ const broadcast = (msg: unknown, sessionId?: string) => {
 };
 sessions.on("summary", (session) => broadcast({ type: "summary", session }));
 sessions.on("removed", (id) => broadcast({ type: "removed", id }));
-// A card was created, removed, or delivered by a board load's reconcile: open boards of that
-// repo fetch GET /api/board again.
+// A card was created, dropped by Abandon, delivered by Approve or by a board load's reconcile:
+// open boards of that repo fetch GET /api/board again.
 sessions.on("board", (repoId) => broadcast({ type: "wb_board", repoId }));
 sessions.on("event", (sessionId, event) => broadcast({ type: "event", sessionId, event }, sessionId));
 

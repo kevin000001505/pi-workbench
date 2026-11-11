@@ -377,7 +377,7 @@ test("a direct card follows its PR: Review in phase pr, Done in phase done, Doin
   const session = (mode: string, phase: string, extra: Record<string, unknown> = {}) =>
     ({ id: "s1", title: "T", mode, phase, attention: null, prNumber: null, prUrl: null, specRef: null, tickets: [], ...extra }) as any;
   // A direct card sits in Doing in every phase but its last two: `pr` puts it in Review, `done` in Done.
-  for (const phase of ["direct", "setup", "grill", "spec", "tickets", "ready", "implement", "review", "retro", "no-such-phase"]) {
+  for (const phase of ["direct", "setup", "grill", "spec", "tickets", "ready", "implement", "review", "retro", "split", "no-such-phase"]) {
     assert.equal(sessionColumn("direct", phase), "doing", `a direct card in phase ${phase}`);
   }
   assert.equal(sessionColumn("direct", "pr"), "review");

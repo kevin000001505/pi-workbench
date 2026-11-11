@@ -581,7 +581,7 @@ export class SessionManager extends EventEmitter {
       await this.send(id, input.prompt);
     }
     this.emitSummary(id);
-    // A new session is a new card on its repo's board (a direct session is a card in Doing).
+    // A new session is a new card on its repo's board (a direct session's card starts in Doing).
     this.emit("board", repo.id);
     return this.summary(id);
   }
@@ -1482,13 +1482,19 @@ export class SessionManager extends EventEmitter {
   };
 
   /**
-   * The board's moves of a direct card: Review → Done only, which is Approve like a pipeline
-   * card's. A backward drag has no command: a direct card has no tickets to pause and no spec to
-   * rework, so it snaps back in Review.
+   * The keys of `moves` a direct card may use: Review → Done, which is Approve like a pipeline
+   * card's. Every other drag of it has no command: a direct card has no tickets to pause and no
+   * spec to rework, so it snaps back where the board put it.
    */
-  private readonly directMoves: Partial<Record<`${Column}>${Column}`, (id: string) => Promise<void>>> = {
-    "review>done": (id) => this.approve(id),
-  };
+  private readonly directMoves = new Set<`${Column}>${Column}`>(["review>done"]);
+
+  /** The move this card's mode accepts, or undefined when the drag is refused with 409. */
+  private moveCommand(row: SessionRow, from: Column | null, to: Column) {
+    if (!from) return undefined;
+    const key = `${from}>${to}`;
+    if (row.mode === "direct" && !this.directMoves.has(key)) return undefined;
+    return this.moves[key];
+  }
 
   /**
    * Stop the live run and wait in `ready`; ticket statuses stay, and an open PR stays open for the
@@ -1748,7 +1754,11 @@ export class SessionManager extends EventEmitter {
         return;
       }
       if ("conflict" in result) await this.mergeConflict(id, result.conflict);
-      else await this.delivered(id, repo);
+      else {
+        await this.delivered(id, repo);
+        // The card changed column: it lands in Done, so open boards of the repo fetch GET /api/board again.
+        this.emit("board", row.repo_id);
+      }
     } finally {
       this.approving.delete(id);
       this.emitSummary(id, true);
@@ -1938,14 +1948,14 @@ export class SessionManager extends EventEmitter {
 
   /**
    * A drag of a card to another column. The `from` column is what the board shows (sessionColumn),
-   * and a drag is a command on the moves that mode has: a direct card has only Review → Done
+   * and a drag is a command only on the moves that mode has: a direct card has only Review → Done
    * (Approve), so every backward drag of it is refused with 409 and it snaps back where the board
    * put it.
    */
   async move(id: string, to: Column) {
     const row = this.row(id);
     const from = sessionColumn(row.mode, row.phase);
-    const command = from ? (row.mode === "direct" ? this.directMoves : this.moves)[`${from}>${to}`] : undefined;
+    const command = this.moveCommand(row, from, to);
     if (!command) {
       const label = (c: Column | null) => COLUMNS.find((x) => x.id === c)?.label ?? "this place";
       throw Object.assign(new Error(`This card cannot move from ${label(from)} to ${label(to)} now.`), { status: 409 });
