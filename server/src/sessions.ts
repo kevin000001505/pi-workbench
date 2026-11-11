@@ -530,7 +530,7 @@ export class SessionManager extends EventEmitter {
     // The first prompt; a setup run holds it until setup is done. A rework holds its rework
     // prompt, a split its split prompt, a plain task the task itself; Solve holds nothing
     // (its recorded ticket starts the run after setup).
-    const held = plan?.held ? plan.held(seed!) : task ? input.prompt : null;
+    const held = plan?.held ? plan.held(seed!, getModelSettings(this.db).contextWindow) : task ? input.prompt : null;
     // The phase releaseHeld moves the session to when a held prompt is released.
     const heldPhase = held ? (plan ? plan.phase : mode === "pipeline" ? "grill" : "direct") : null;
     this.db
@@ -1042,7 +1042,7 @@ export class SessionManager extends EventEmitter {
       await this.send(id, specPrompt(), "followUp");
     } else if (row.phase === "spec" && row.spec) {
       this.update(id, { phase: "tickets" });
-      await this.send(id, ticketsPrompt(row.spec_ref), "followUp");
+      await this.send(id, ticketsPrompt(row.spec_ref, getModelSettings(this.db).contextWindow), "followUp");
     } else if (row.phase === "tickets" && !row.rework_tickets && this.tickets(id).length > 0) {
       // The tickets are on the tracker: the card waits in Issues until Solve all starts the runs.
       this.update(id, { phase: "ready" });

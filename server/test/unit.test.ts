@@ -618,7 +618,7 @@ test("README documents the issues feature for a fresh setup", () => {
 test("every pipeline prompt starts with a /skill: command pi will expand", async () => {
   const p = await import("../src/pipeline.ts");
   const t = { num: 1, title: "T", body: "b", blockedBy: [], trackerRef: null, status: "ready", note: null, runId: null } as any;
-  for (const prompt of [p.grillPrompt("task"), p.specPrompt(), p.ticketsPrompt(null), p.ticketsPrompt("#4"), p.implementPrompt(t, null, null, []), p.reviewPrompt("main", null, null, [t]), p.reworkPrompt("#4"), p.reworkPrompt(null), p.mergePrompt("main", "PR #1 has a merge conflict with main", ["a.txt"]), p.splitPrompt("https://github.com/a/b/issues/5")]) {
+  for (const prompt of [p.grillPrompt("task"), p.specPrompt(), p.ticketsPrompt(null, 131072), p.ticketsPrompt("#4", 131072), p.implementPrompt(t, null, null, []), p.reviewPrompt("main", null, null, [t]), p.reworkPrompt("#4"), p.reworkPrompt(null), p.mergePrompt("main", "PR #1 has a merge conflict with main", ["a.txt"]), p.splitPrompt("https://github.com/a/b/issues/5", 131072)]) {
     // pi needs an argument after the skill name on the first line.
     assert.match(prompt.split("\n")[0], /^\/skill:[\w-]+ \S/);
   }
@@ -626,7 +626,7 @@ test("every pipeline prompt starts with a /skill: command pi will expand", async
 
 test("the split prompt breaks the issue into sub-issues with blocking edges, and leaves the issue itself untouched", async () => {
   const { splitPrompt } = await import("../src/pipeline.ts");
-  const prompt = splitPrompt("https://github.com/a/b/issues/5");
+  const prompt = splitPrompt("https://github.com/a/b/issues/5", 131072);
   assert.match(prompt, /^\/skill:to-tickets /);
   assert.ok(prompt.includes("https://github.com/a/b/issues/5"), "names the issue URL");
   assert.match(prompt, /sub-issue/i, "publishes the tickets as sub-issues of the issue");
@@ -634,6 +634,17 @@ test("the split prompt breaks the issue into sub-issues with blocking edges, and
   assert.match(prompt, /ask_user/, "asks the user to approve the breakdown");
   assert.match(prompt, /record_tickets/, "records every ticket with its tracker ref");
   assert.match(prompt, /do not (change|close).*the issue itself/i, "does not change or close the issue itself");
+});
+
+test("the tickets and split prompts size every ticket to the model's context window", async () => {
+  const { ticketsPrompt, splitPrompt, START_PLANS } = await import("../src/pipeline.ts");
+  const seed = { spec: { number: 3, title: "A plain issue", body: "Fix it", htmlUrl: "https://github.com/a/b/issues/3", hasParent: false }, subIssues: [] };
+  for (const prompt of [ticketsPrompt("#4", 131072), splitPrompt("https://github.com/a/b/issues/5", 131072), START_PLANS.split.held!(seed, 131072)]) {
+    assert.match(prompt, /context window is 128K tokens/, "names the window");
+    assert.match(prompt, /about half of the window \(64K tokens\)/, "budgets each ticket's run to half of it");
+    assert.match(prompt, /Split a ticket that is too big/, "splits a ticket that does not fit");
+  }
+  assert.match(ticketsPrompt(null, 262144), /context window is 256K tokens/, "follows the Model settings value");
 });
 
 test("the unclaimed-card starts pick phase, tickets, held prompt and spec in one table", async () => {
@@ -653,8 +664,8 @@ test("the unclaimed-card starts pick phase, tickets, held prompt and spec in one
   assert.equal(START_PLANS.split.needsSubIssues, false, "Split refuses a spec issue");
   const seed = { spec: { number: 3, title: "A plain issue", body: "Fix it", htmlUrl: "https://github.com/a/b/issues/3", hasParent: false }, subIssues: [] };
   assert.deepEqual(START_PLANS.issue.tickets!(seed), ticketFromIssue(seed.spec), "Solve records the issue as its only ticket");
-  assert.ok(START_PLANS.split.held!(seed).includes("https://github.com/a/b/issues/3"), "Split holds the split prompt");
-  assert.ok(START_PLANS.spec.held!(seed).startsWith("/skill:grill-with-docs"), "rework holds the rework prompt");
+  assert.ok(START_PLANS.split.held!(seed, 131072).includes("https://github.com/a/b/issues/3"), "Split holds the split prompt");
+  assert.ok(START_PLANS.spec.held!(seed, 131072).startsWith("/skill:grill-with-docs"), "rework holds the rework prompt");
   assert.ok(START_PLANS.tickets.tickets, "Solve all derives its tickets from the sub-issues");
   assert.equal(START_PLANS.split.spec, true, "a split takes the issue body as its spec");
   assert.equal(START_PLANS.spec.spec, false, "a rework re-saves its spec in the to-spec step");
