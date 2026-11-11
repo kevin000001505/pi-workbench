@@ -132,7 +132,7 @@ The user's go-ahead on a card in Review: it merges the PR with a merge commit an
 _Avoid_: Allow (that answers a permission), accept
 
 **Abandon**:
-Dropping a feature: it stops the card's runs, closes its PR, deletes its branch, and takes the card off the board; its GitHub issues stay open.
+Dropping a feature: it stops the card's runs, closes its PR unmerged, deletes its branch, and takes the card off the board; its GitHub issues stay open. A card already in Done keeps its merged PR and its merge commit. A direct card is abandoned the same way.
 _Avoid_: stop (a stop pauses the card; the card can resume), delete, cancel
 
 **Not planned**:
