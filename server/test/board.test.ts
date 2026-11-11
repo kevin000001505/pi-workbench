@@ -792,12 +792,17 @@ test("a plain card's Grill grills the issue from its title and body: the session
   assert.equal((await api("POST", "/api/sessions", { repoId: "kevin/grilled", title: "again", prompt: "work", issueRef: "kevin/grilled#2" })).status, 409);
   assert.equal((await api("POST", "/api/repos/kevin/grilled/issues/2/move", { column: "doing" })).status, 409);
 
-  // The grill prompt carries the issue's title, body and URL.
+  // The grill prompt carries the issue's title, body and URL. Setup releases the held prompt as it
+  // is, so pi sees one grill skill call and one pipeline instruction block.
   const promptReq = await waitFor(() => mock.requests.find((x) => JSON.stringify(x.messages ?? []).includes("Issue #2 (https://github.com/kevin/grilled/issues/2)")));
-  const text = JSON.stringify(promptReq.messages);
-  assert.match(text, /<skill name=\\"grill-with-docs\\"[^]*Issue #2 \(https:\/\/github\.com\/kevin\/grilled\/issues\/2\)/);
-  assert.ok(text.includes("Fix login Crash"), "the issue's title");
-  assert.ok(text.includes("The app crashes when the login page is reloaded."), "the issue's body");
+  const released = (promptReq.messages ?? []).filter((m: any) => m.role === "user").at(-1)?.content;
+  const grillText = typeof released === "string" ? released : ((released ?? []) as any[]).map((c) => c.text ?? "").join("");
+  assert.match(grillText, /^<skill name="grill-with-docs"[^>]*>/, "pi expanded the grill skill call");
+  assert.ok(!grillText.includes("/skill:grill-with-docs"), "the held grill prompt is not wrapped in the grill prompt a second time");
+  assert.equal((grillText.match(/\[pi-workbench pipeline:/g) ?? []).length, 1, "one pipeline instruction block");
+  assert.ok(grillText.includes("Issue #2 (https://github.com/kevin/grilled/issues/2)"), "the issue's URL");
+  assert.ok(grillText.includes("Fix login Crash"), "the issue's title");
+  assert.ok(grillText.includes("The app crashes when the login page is reloaded."), "the issue's body");
 
   // The card runs the normal pipeline: grill, spec, tickets, then it waits in Issues for Solve all.
   await waitFor(async () => (await summary(s.id)).phase === "grill");
@@ -814,23 +819,22 @@ test("a plain card's Grill grills the issue from its title and body: the session
   // Solve all works the tickets to the review; every decision and permission is answered here, and
   // the mock's blocked ticket is marked done so the review runs.
   assert.equal((await api("POST", `/api/sessions/${s.id}/move`, { column: "doing" })).status, 200);
-  const deadline = Date.now() + 240_000;
-  let sum = await summary(s.id);
-  while (sum.phase !== "pr") {
-    if (Date.now() > deadline) throw new Error(`the pipeline did not open its PR (phase ${sum.phase})`);
-    const p = sum.pending[0];
+  const sum = await waitFor(async () => {
+    const x = await summary(s.id);
+    if (x.phase === "pr") return x;
+    const p = x.pending[0];
     if (p) assert.equal((await api("POST", `/api/sessions/${s.id}/respond`, { requestId: p.id, value: p.options[0] })).status, 200);
-    else if (sum.attention && sum.tickets.some((t: any) => t.status === "blocked"))
+    else if (x.attention && x.tickets.some((t: any) => t.status === "blocked"))
       assert.equal((await api("POST", `/api/sessions/${s.id}/pipeline`, { action: "skip" })).status, 200);
-    await new Promise((res) => setTimeout(res, 100));
-    sum = await summary(s.id);
-  }
+    return undefined;
+  }, 240_000);
   assert.equal(await col(s.id), "review");
 
   // The PR the pipeline opened closes the origin issue, and nothing else.
   const pr = gh.pulls.at(-1);
   assert.equal(pr.head, sum.branch);
   assert.deepEqual([...pr.body.matchAll(/Closes #(\d+)/g)].map((m) => Number(m[1])), [2], "one Closes line: the origin issue");
+  await api("POST", `/api/sessions/${s.id}/stop`, {});
 });
 
 test("Grill is refused (409) on a spec issue, which has its open ticket sub-issues, and on a sub-issue's number", { skip: !hasPi && "pi CLI not found" }, async () => {

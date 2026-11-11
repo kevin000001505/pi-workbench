@@ -119,6 +119,12 @@ export function nextTicket(tickets: Ticket[]): Ticket | undefined {
 
 export const allDone = (tickets: Ticket[]) => tickets.length > 0 && tickets.every((t) => t.status === "done");
 
+/**
+ * True when a prompt already names the skill pi must expand: it starts with a `/skill:name ...`
+ * call that has an argument. Such a prompt goes out as it is; a bare task goes through grillPrompt.
+ */
+export const isSkillCall = (prompt: string) => /^\/skill:[\w-]+ \S/.test(prompt);
+
 export function grillPrompt(task: string) {
   return `/skill:grill-with-docs ${task}
 
@@ -182,7 +188,9 @@ export type StartFrom = "tickets" | "spec" | "issue" | "split" | "grill";
 /**
  * What one StartFrom begins a session with: its phase, the prompt held until setup is done
  * (or sent at once), the tickets recorded at once, and its spec bookkeeping. The one table for
- * the four unclaimed-card starts, so the move route and SessionManager read them the same way.
+ * the unclaimed-card starts, so the move route, the grill route and SessionManager read them the
+ * same way. A held prompt is always a full skill call (see isSkillCall): SessionManager sends it
+ * as it is.
  */
 export type StartPlan = {
   phase: Phase;

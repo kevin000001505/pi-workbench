@@ -23,6 +23,7 @@ import {
   type Diagnosis,
   fixPrompt,
   grillPrompt,
+  isSkillCall,
   reworkPrompt,
   implementPrompt,
   mergePrompt,
@@ -574,7 +575,8 @@ export class SessionManager extends EventEmitter {
     } else if (plan?.held) {
       await this.send(id, held!);
     } else if (mode === "pipeline") {
-      await this.send(id, grillPrompt(input.prompt));
+      // A task that is already a skill call (the session form's ✦ Skills pick) goes out as it is.
+      await this.send(id, isSkillCall(input.prompt) ? input.prompt : grillPrompt(input.prompt));
     } else if (task) {
       await this.send(id, input.prompt);
     }
@@ -1034,11 +1036,13 @@ export class SessionManager extends EventEmitter {
     this.emit("event", id, { type: "wb_held", heldPrompt: null });
     if (row.mode === "pipeline" && !discard) {
       // held_phase names the phase the prompt releases into: tickets for a split, grill for a
-      // rework or a task.
+      // rework, a plain issue card's grill or a task.
       this.update(id, { phase: row.held_phase ?? "grill" });
       this.emitSummary(id);
-      // A session on an existing spec issue holds its whole rework or split prompt; others hold the task.
-      await this.send(id, row.spec_ref ? row.held_prompt : grillPrompt(row.held_prompt), "followUp");
+      // A held prompt is either a full skill call (a rework, a split, a plain issue card's grill)
+      // or a bare task from the session form. Only the bare task needs the grill wrapper: wrapping
+      // a call again would send pi the skill directive twice.
+      await this.send(id, isSkillCall(row.held_prompt) ? row.held_prompt : grillPrompt(row.held_prompt), "followUp");
       return;
     }
     this.update(id, { phase: "direct", mode: "direct" });
