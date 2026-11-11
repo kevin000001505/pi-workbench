@@ -31,6 +31,34 @@ function pushToBase(line: string, file = "work.txt", baseBranch = "main") {
 const approve = (id: string) => api("POST", `/api/sessions/${id}/approve`, {});
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString().trim();
 
+/**
+ * A direct session with its PR recorded: its card is in Review. Its PR body is the user's own
+ * words, so it carries no `Closes` line.
+ */
+async function directToReview(title: string, issueRef?: string) {
+  await setup();
+  const d = (await api("POST", "/api/sessions", {
+    repoId: "kevin/ship",
+    title,
+    prompt: "say hello",
+    mode: "direct",
+    ...(issueRef ? { issueRef } : {}),
+  })).json;
+  assert.ok(d.id, JSON.stringify(d));
+  await waitFor(async () => (await summary(d.id)).phase === "direct", 120_000);
+  // The session's own change on its branch: a PR needs a commit beyond the base.
+  const worktree = path.join(process.env.DATA_DIR!, "worktrees", d.id);
+  fs.writeFileSync(path.join(worktree, "hello.txt"), "Hello\n");
+  git(worktree, "add", "hello.txt");
+  git(worktree, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "Say hello");
+  const pr = await api("POST", `/api/sessions/${d.id}/pr`, { title, body: "## Summary\n- hello.txt says Hello" });
+  assert.equal(pr.status, 200, JSON.stringify(pr.json));
+  const card = await waitFor(async () => (await board()).find((c) => c.id === d.id && c.column === "review"), 120_000);
+  await waitFor(async () => (await summary(d.id)).status !== "running", 120_000);
+  const pull = gh.pulls.find((p) => p.number === card.pr.number);
+  return { id: d.id as string, card, pr: pull, worktree, branch: (await summary(d.id)).branch as string };
+}
+
 /*
  * Every merge-run word below (GIVEUP, NOFINISH, HOLDMERGE, ...) stays in main's work.txt, and the
  * mock reads the whole file, so a test that needs the plain keep-both resolve comes before them.
@@ -245,6 +273,53 @@ test("Approve refuses a card outside Review, and a request from another site", {
     body: "{}",
   });
   assert.equal(crossSite.status, 403);
+});
+
+test("Approve on a direct card merges its PR with a merge commit, deletes its branch and worktree, closes the issue its refs name, and records them in Done under its card", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { id, card, pr, worktree, branch } = await directToReview("Direct hello", "kevin/ship#1");
+  assert.equal(card.doneAt, null, "the card is not Done while its PR is open");
+  assert.ok(hasRef(`refs/heads/${branch}`), "the branch is on GitHub");
+  assert.ok(fs.existsSync(worktree), "the worktree is on disk");
+
+  const before = gh.closed.length;
+  const at = Date.now();
+  const done = await approve(id);
+  assert.equal(done.status, 200, JSON.stringify(done.json));
+  assert.equal(done.json.phase, "done");
+  assert.equal(done.json.attention, null);
+  assert.ok(done.json.doneAt >= at, "the card's Done time is set");
+  assert.equal(pr.merged, true);
+  assert.equal(pr.merge_method, "merge");
+  // A merge commit: the base branch's tip has two parents.
+  assert.equal(execFileSync("git", ["rev-list", "--parents", "-n1", "refs/heads/main"], { cwd: bare }).toString().trim().split(" ").length, 3);
+  assert.ok(!hasRef(`refs/heads/${branch}`), "the remote branch is deleted");
+  assert.ok(!fs.existsSync(worktree), "the worktree is removed");
+
+  // The PR body carried no `Closes` line, so the workbench closed the issue its refs name.
+  assert.deepEqual(gh.closed.slice(before), [{ ref: "kevin/ship#1", by: "api" }]);
+
+  // The card is in Done with its Done time and its merged badge; its closed issue sits under it.
+  const cards = await board();
+  const landed = cards.find((c) => c.id === id)!;
+  assert.equal(landed.column, "done");
+  assert.equal(landed.pr.state, "merged");
+  assert.equal(landed.doneAt, done.json.doneAt);
+  assert.ok(!cards.some((c) => c.id === "issue:1"), "the closed issue is not a card of its own, and not open");
+
+  // Once the session is off the board, its closed issue shows in Done under it.
+  assert.equal((await api("DELETE", `/api/sessions/${id}`)).status, 200);
+  const issueCard = (await board()).find((c) => c.id === "issue:1");
+  assert.ok(issueCard, "the closed issue is recorded in Done");
+  assert.equal(issueCard.column, "done");
+  assert.equal(issueCard.title, "Add dark mode");
+  assert.ok(issueCard.doneAt >= at, "the issue carries its close time");
+
+  // Only a card in Review with its PR open is approvable: the Done card, and a direct card that
+  // never recorded a PR, are refused.
+  assert.equal((await approve(id)).status, 409);
+  const idle = (await api("POST", "/api/sessions", { repoId: "kevin/ship", title: "No PR", prompt: "say hello", mode: "direct" })).json;
+  assert.equal((await approve(idle.id)).status, 409, "a direct card in Doing is not approvable");
+  await api("POST", `/api/sessions/${idle.id}/stop`, {});
 });
 
 test("Approve on a conflicting PR resolves the conflict in a merge run; after finish_merge the branch is pushed and a second Approve merges", { skip: !hasPi && "pi CLI not found" }, async () => {

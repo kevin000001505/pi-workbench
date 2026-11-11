@@ -1482,6 +1482,15 @@ export class SessionManager extends EventEmitter {
   };
 
   /**
+   * The board's moves of a direct card: Review → Done only, which is Approve like a pipeline
+   * card's. A backward drag has no command: a direct card has no tickets to pause and no spec to
+   * rework, so it snaps back in Review.
+   */
+  private readonly directMoves: Partial<Record<`${Column}>${Column}`, (id: string) => Promise<void>>> = {
+    "review>done": (id) => this.approve(id),
+  };
+
+  /**
    * Stop the live run and wait in `ready`; ticket statuses stay, and an open PR stays open for the
    * next review to push to. The phase changes first, so the stopped run's settle moves nothing.
    */
@@ -1876,9 +1885,11 @@ export class SessionManager extends EventEmitter {
       if (repoId === repo.id) recorded?.(n);
     };
     const ownNumbers = closedIssues(row, tickets);
-    let ownClosed = row.base_branch === repo.default_branch;
+    // A base that is not the default branch ignores `Closes`: the workbench closes the issues
+    // itself. A direct card's PR body is the user's own words, which carry no `Closes` line, so
+    // the workbench closes the issues its refs name for it too.
+    let ownClosed = row.mode !== "direct" && row.base_branch === repo.default_branch;
     if (!ownClosed && ownNumbers.length) {
-      // A base that is not the default branch ignores `Closes`: the workbench closes the issues itself.
       ownClosed = await delivery.closeIssues(repo, ownNumbers).then(
         () => true,
         (err) => {
@@ -1927,13 +1938,14 @@ export class SessionManager extends EventEmitter {
 
   /**
    * A drag of a card to another column. The `from` column is what the board shows (sessionColumn),
-   * and a drag is a command only on a pipeline card: every drag of a direct card is refused with
-   * 409, so it snaps back where the board put it.
+   * and a drag is a command on the moves that mode has: a direct card has only Review → Done
+   * (Approve), so every backward drag of it is refused with 409 and it snaps back where the board
+   * put it.
    */
   async move(id: string, to: Column) {
     const row = this.row(id);
     const from = sessionColumn(row.mode, row.phase);
-    const command = row.mode === "pipeline" && from ? this.moves[`${from}>${to}`] : undefined;
+    const command = from ? (row.mode === "direct" ? this.directMoves : this.moves)[`${from}>${to}`] : undefined;
     if (!command) {
       const label = (c: Column | null) => COLUMNS.find((x) => x.id === c)?.label ?? "this place";
       throw Object.assign(new Error(`This card cannot move from ${label(from)} to ${label(to)} now.`), { status: 409 });
