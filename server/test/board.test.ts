@@ -1424,3 +1424,45 @@ test("a Done card and a direct session do not claim their issue: the unclaimed c
   assert.equal((await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Ask", prompt: "how is it going?", issueRef: "kevin/demo#140", mode: "direct" })).status, 200);
   for (const s of (await api("GET", "/api/sessions")).json) await api("POST", `/api/sessions/${s.id}/stop`, {});
 });
+
+test("a direct session's PR puts its card in Review with its PR badge; every drag of it is refused", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "directpr");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/directpr" })).status, 200);
+  const col = columnOfCard("kevin/directpr");
+
+  // A fresh repo has no setup marker: setup commits on the branch, and the card stays in Doing.
+  const d = await api("POST", "/api/sessions", { repoId: "kevin/directpr", title: "Quick", prompt: "say hello", mode: "direct" });
+  assert.equal(d.status, 200, JSON.stringify(d.json));
+  const id = d.json.id;
+  await waitFor(async () => (await summary(id)).phase === "direct");
+  assert.equal(await col(id), "doing", "no PR yet: the card is in Doing");
+
+  const events = await boardEvents();
+  const before = events.seen.length;
+
+  // The session page's open-PR action records the PR: the phase is `pr`, and Done time stays unset.
+  const pr = await api("POST", `/api/sessions/${id}/pr`, { title: "Set up agent skills", body: "## Summary\n- docs/agents/issue-tracker.md" });
+  assert.equal(pr.status, 200, JSON.stringify(pr.json));
+  const sum = await summary(id);
+  assert.equal(sum.phase, "pr");
+  assert.equal(sum.prNumber, pr.json.number);
+  assert.equal(sum.doneAt, null, "the card is not Done until its PR merges");
+
+  // The card sits in Review with its PR badge, and open boards hear the board event.
+  const card = (await board("kevin/directpr")).find((c) => c.id === id);
+  assert.equal(card?.column, "review");
+  assert.equal(card?.pr?.number, pr.json.number);
+  assert.equal(card?.pr?.url, pr.json.url);
+  assert.ok(card?.pr?.state, "the board read the PR's state");
+  await waitFor(() => events.seen.slice(before).includes("kevin/directpr"));
+
+  // Every drag of the direct card is refused (409), so it snaps back in Review: Approve is not a
+  // drag of a direct card yet.
+  for (const column of ["todo", "issues", "doing", "qa", "done"]) {
+    const r = await api("POST", `/api/sessions/${id}/move`, { column });
+    assert.equal(r.status, 409, `a drag to ${column}: ${JSON.stringify(r.json)}`);
+  }
+  assert.equal(await col(id), "review", "the card stayed in Review");
+
+  events.close();
+});

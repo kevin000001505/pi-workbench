@@ -372,20 +372,29 @@ test("cardOf specCard: a plain issue card and a card with no tickets are not spe
   assert.equal(cardOf({ ...src([]), mode: "direct", phase: "direct" })?.specCard, false);
 });
 
-test("a direct session is a card in Doing: with no PR, and even while it sets up", async () => {
+test("a direct card follows its PR: Review in phase pr, Done in phase done, Doing in every other phase", async () => {
   const { cardOf, sessionColumn } = await import("../../shared/board.ts");
   const session = (mode: string, phase: string, extra: Record<string, unknown> = {}) =>
     ({ id: "s1", title: "T", mode, phase, attention: null, prNumber: null, prUrl: null, specRef: null, tickets: [], ...extra }) as any;
-  // The board column a session's card sits in; a direct card is in Doing in every phase it has.
-  assert.equal(sessionColumn("direct", "direct"), "doing");
-  assert.equal(sessionColumn("direct", "setup"), "doing");
+  // A direct card sits in Doing in every phase but its last two: `pr` puts it in Review, `done` in Done.
+  for (const phase of ["direct", "setup", "grill", "spec", "tickets", "ready", "implement", "review", "retro", "no-such-phase"]) {
+    assert.equal(sessionColumn("direct", phase), "doing", `a direct card in phase ${phase}`);
+  }
+  assert.equal(sessionColumn("direct", "pr"), "review");
+  assert.equal(sessionColumn("direct", "done"), "done");
+  // A pipeline card's column is unchanged.
   assert.equal(sessionColumn("pipeline", "setup"), "todo");
+  assert.equal(sessionColumn("pipeline", "grill"), "todo");
+  assert.equal(sessionColumn("pipeline", "spec"), "todo");
+  assert.equal(sessionColumn("pipeline", "tickets"), "todo");
   assert.equal(sessionColumn("pipeline", "ready"), "issues");
   assert.equal(sessionColumn("pipeline", "implement"), "doing");
   assert.equal(sessionColumn("pipeline", "review"), "qa");
+  assert.equal(sessionColumn("pipeline", "retro"), "qa");
   assert.equal(sessionColumn("pipeline", "pr"), "review");
   assert.equal(sessionColumn("pipeline", "done"), "done");
   assert.equal(sessionColumn("pipeline", "no-such-phase"), null);
+  assert.equal(sessionColumn("pipeline", "direct"), null, "the direct phase has no pipeline column");
   assert.deepEqual(cardOf(session("direct", "direct")), {
     id: "s1",
     title: "T",
@@ -399,10 +408,16 @@ test("a direct session is a card in Doing: with no PR, and even while it sets up
     subs: null,
   });
   assert.equal(cardOf(session("direct", "setup"))?.column, "doing", "a direct session in setup is in Doing, not To do");
-  // A PR on a direct session keeps the card in Doing, with its badge.
-  const pr = cardOf(session("direct", "direct", { prNumber: 7, prUrl: "https://github.com/me/app/pulls/7" }));
-  assert.equal(pr?.column, "doing");
-  assert.deepEqual(pr?.pr, { number: 7, url: "https://github.com/me/app/pulls/7", state: null });
+  // A direct card with a PR but not in phase `pr` (a session of an older database) is still in Doing.
+  assert.equal(cardOf(session("direct", "direct", { prNumber: 7, prUrl: "https://github.com/me/app/pulls/7" }))?.column, "doing");
+  // A direct card in phase `pr` is in Review, with its PR badge and no Done time yet.
+  const review = cardOf(session("direct", "pr", { prNumber: 7, prUrl: "https://github.com/me/app/pulls/7" }));
+  assert.equal(review?.column, "review");
+  assert.deepEqual(review?.pr, { number: 7, url: "https://github.com/me/app/pulls/7", state: null });
+  assert.equal(review?.doneAt, null, "a Review card has no Done time");
+  // A direct card that reached Done carries its Done time, so Done lists it newest first.
+  assert.equal(cardOf(session("direct", "done", { doneAt: 1000 }))?.column, "done");
+  assert.equal(cardOf(session("direct", "done", { doneAt: 1000 }))?.doneAt, 1000);
   // A pipeline card keeps its phase's column through cardOf as well.
   assert.equal(cardOf(session("pipeline", "implement"))?.column, "doing");
 });

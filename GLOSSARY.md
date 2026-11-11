@@ -150,7 +150,7 @@ _Avoid_: sync, poll, catch up
 - **Decisions** are never auto-approved
 - The **Reviewer's** settings drive the **Reviewer** as well as **Rescue runs** and **Retro runs**; an empty Reviewer model turns all three off
 - A **Card** from a pipeline session moves through the columns as its phase changes; the user's drag outranks the pipeline
-- A **Card** from a direct session sits in **Doing** always; every drag of it is refused
+- A **Card** from a direct session sits in **Doing**, and follows its PR: recording the PR puts it in **Review**, and a merged PR puts it in **Done**; every drag of it is refused
 - Dragging a **Card** from **Issues** to **Doing** starts **Solve** (a plain issue) or **Solve all** (a spec issue or a ready session); dragging it from **Review** to **Done** is **Approve**; any other forward drag is refused
 - A **Solve one ticket** run on a spec card pauses the card in **Issues** when its ticket is done; **Solve all**, a backward drag, and Stop clear the pause, and **Solve all** runs every remaining ticket
 - Dragging a plain **Card** in **Issues** to **To do** is **Split**: the issue is cut into ticket sub-issues before any work starts
