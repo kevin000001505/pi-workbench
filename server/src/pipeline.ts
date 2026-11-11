@@ -137,10 +137,26 @@ Check the testing seams with the user using ask_user. After you publish the spec
 call save_spec with the full spec text and trackerRef (the file path or issue number/URL). Then stop.`;
 }
 
-export function ticketsPrompt(specRef: string | null) {
+/**
+ * The to-tickets skill sizes each ticket "to fit in a single fresh context window" but does not
+ * know how big that window is. Each ticket's tdd run uses the workbench model, so the prompt names
+ * its context window (Model settings) and asks for tickets whose whole run fits in about half of it.
+ */
+export function ticketSizeRule(contextWindow: number) {
+  const k = (tokens: number) => `${Math.round(tokens / 1024)}K`;
+  return `Ticket size: one fresh run of the coding model solves each ticket, and its context window is ${k(contextWindow)} tokens.
+That one run reads the ticket and the spec, explores the code, writes the tests and the code, reads the test output and fixes the failures.
+Make each ticket small enough that this whole run uses at most about half of the window (${k(contextWindow / 2)} tokens), so that retries and long test output still fit.
+A ticket is too big when it delivers more than one behaviour, changes more than about 5 files or more than one module, has more than about 5 acceptance criteria, or needs large files or long logs read in full.
+Split a ticket that is too big, or that you are not sure fits, into smaller tickets with blocking edges.
+In the breakdown you present, give each ticket a size estimate in tokens against this budget.`;
+}
+
+export function ticketsPrompt(specRef: string | null, contextWindow: number) {
   return `/skill:to-tickets ${specRef ? `Break the spec (${specRef}) into tickets.` : "Break the spec we just wrote into tickets."}
 
 [pi-workbench pipeline]
+${ticketSizeRule(contextWindow)}
 Present the breakdown and ask the user to approve it with ask_user before publishing. After you publish the approved tickets to the tracker,
 call record_tickets with every ticket: its number, title, full body (what to build and acceptance criteria), blockedBy (ticket numbers) and trackerRef (the file path or issue number/URL).
 Then stop. Do not start implementing.`;
@@ -151,10 +167,11 @@ Then stop. Do not start implementing.`;
  * as a sub-issue of the issue with its blocking edges, so it becomes a spec issue that waits in
  * Issues for Solve all. The issue itself is not changed or closed.
  */
-export function splitPrompt(issueUrl: string) {
+export function splitPrompt(issueUrl: string, contextWindow: number) {
   return `/skill:to-tickets Split the issue (${issueUrl}) into tickets: it is too big for one ticket.
 
 [pi-workbench pipeline: split of a plain issue]
+${ticketSizeRule(contextWindow)}
 Present the breakdown and ask the user to approve it with ask_user before publishing. After approval,
 publish every ticket as a sub-issue of this issue, with its blocking edges. Do not change or close the issue itself.
 Call record_tickets with every ticket: its number, title, full body (what to build and acceptance criteria), blockedBy (ticket numbers) and trackerRef (the sub-issue's number or URL).
@@ -176,8 +193,8 @@ export type StartFrom = "tickets" | "spec" | "issue" | "split";
  */
 export type StartPlan = {
   phase: Phase;
-  /** Held until setup is done, then released: the rework grill or the split. */
-  held?: (seed: TicketSeed) => string;
+  /** Held until setup is done, then released: the rework grill or the split (sized to the model's context window). */
+  held?: (seed: TicketSeed, contextWindow: number) => string;
   /** Recorded at once, so the first ticket run starts after setup. */
   tickets?: (seed: TicketSeed) => TicketInput[];
   /** The seed must have open sub-issues (404 without); the plain starts refuse them (409 with). */
@@ -201,7 +218,7 @@ export const START_PLANS: Record<StartFrom, StartPlan> = {
   },
   split: {
     phase: "tickets",
-    held: (seed) => splitPrompt(seed.spec.htmlUrl),
+    held: (seed, contextWindow) => splitPrompt(seed.spec.htmlUrl, contextWindow),
     needsSubIssues: false,
     spec: true,
   },
