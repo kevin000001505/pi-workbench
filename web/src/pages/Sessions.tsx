@@ -3,13 +3,13 @@ import { waitingOn } from "../types.ts";
 import { ago, Empty, PageHeader, StatusPill, issueUrl, repoIssue } from "../ui.tsx";
 import { columnOf, COLUMNS } from "../../../shared/board.ts";
 
-/** The column label of a session's phase; "" when the phase has no column (a direct session). */
+/** The column label of a session's phase; "" when the phase has no column (a direct session's own phase). */
 const columnLabel = (phase: string) => {
   const col = columnOf(phase);
   return col ? (COLUMNS.find((c) => c.id === col)?.label ?? "") : "";
 };
 
-/** The direct-mode sessions: plain agent turns, each a card in Doing on its repo's board. */
+/** The direct-mode sessions: plain agent turns, each a card on its repo's board, in Doing until its PR is recorded. */
 export function Sessions() {
   const { sessions } = useStore();
   const direct = Object.values(sessions)
@@ -64,8 +64,8 @@ export function Sessions() {
         {direct.length === 0 ? (
           <Empty title="No direct sessions">
             <p className="muted">
-              Direct sessions skip the pipeline: pick <strong>Direct</strong> on the New session form. Each is a card in Doing on
-              its repo's <a href="#/">board</a>.
+              Direct sessions skip the pipeline: pick <strong>Direct</strong> on the New session form. Each is a card on its
+              repo's <a href="#/">board</a>, in Doing until you open its PR.
             </p>
             <a className="btn btn-primary" href="#/new">
               + New session

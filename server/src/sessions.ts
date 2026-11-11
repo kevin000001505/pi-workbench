@@ -581,7 +581,7 @@ export class SessionManager extends EventEmitter {
       await this.send(id, input.prompt);
     }
     this.emitSummary(id);
-    // A new session is a new card on its repo's board (a direct session is a card in Doing).
+    // A new session is a new card on its repo's board (a direct session's card starts in Doing).
     this.emit("board", repo.id);
     return this.summary(id);
   }
@@ -1045,14 +1045,17 @@ export class SessionManager extends EventEmitter {
       await this.send(id, isSkillCall(row.held_prompt) ? row.held_prompt : grillPrompt(row.held_prompt), "followUp");
       return;
     }
-    this.update(id, { phase: "direct", mode: "direct" });
+    // A direct session that already has its PR recorded keeps phase `pr`: its card is in Review.
+    this.update(id, { phase: row.pr_number ? "pr" : "direct", mode: "direct" });
     this.emitSummary(id);
     if (!discard) await this.send(id, row.held_prompt, "followUp");
   }
 
   private async afterSettled(id: string, s: Live) {
     const row = this.row(id);
-    if (row.phase === "setup") {
+    // The setup step keys on the setup run, not only on the stored phase: recording a direct
+    // session's PR while setup runs moves its phase to `pr`, and its held task must still release.
+    if (row.phase === "setup" || (s.setupRunning && row.held_prompt)) {
       if (s.setupRunning && !worktreeNeedsSetup(row.worktree)) {
         s.setupRunning = false;
         if (row.held_prompt) await this.releaseHeld(id);
@@ -1479,6 +1482,21 @@ export class SessionManager extends EventEmitter {
   };
 
   /**
+   * The keys of `moves` a direct card may use: Review → Done, which is Approve like a pipeline
+   * card's. Every other drag of it has no command: a direct card has no tickets to pause and no
+   * spec to rework, so it snaps back where the board put it.
+   */
+  private readonly directMoves = new Set<`${Column}>${Column}`>(["review>done"]);
+
+  /** The move this card's mode accepts, or undefined when the drag is refused with 409. */
+  private moveCommand(row: SessionRow, from: Column | null, to: Column) {
+    if (!from) return undefined;
+    const key = `${from}>${to}`;
+    if (row.mode === "direct" && !this.directMoves.has(key)) return undefined;
+    return this.moves[key];
+  }
+
+  /**
    * Stop the live run and wait in `ready`; ticket statuses stay, and an open PR stays open for the
    * next review to push to. The phase changes first, so the stopped run's settle moves nothing.
    */
@@ -1736,7 +1754,11 @@ export class SessionManager extends EventEmitter {
         return;
       }
       if ("conflict" in result) await this.mergeConflict(id, result.conflict);
-      else await this.delivered(id, repo);
+      else {
+        await this.delivered(id, repo);
+        // The card changed column: it lands in Done, so open boards of the repo fetch GET /api/board again.
+        this.emit("board", row.repo_id);
+      }
     } finally {
       this.approving.delete(id);
       this.emitSummary(id, true);
@@ -1873,9 +1895,11 @@ export class SessionManager extends EventEmitter {
       if (repoId === repo.id) recorded?.(n);
     };
     const ownNumbers = closedIssues(row, tickets);
-    let ownClosed = row.base_branch === repo.default_branch;
+    // A base that is not the default branch ignores `Closes`: the workbench closes the issues
+    // itself. A direct card's PR body is the user's own words, which carry no `Closes` line, so
+    // the workbench closes the issues its refs name for it too.
+    let ownClosed = row.mode !== "direct" && row.base_branch === repo.default_branch;
     if (!ownClosed && ownNumbers.length) {
-      // A base that is not the default branch ignores `Closes`: the workbench closes the issues itself.
       ownClosed = await delivery.closeIssues(repo, ownNumbers).then(
         () => true,
         (err) => {
@@ -1924,13 +1948,14 @@ export class SessionManager extends EventEmitter {
 
   /**
    * A drag of a card to another column. The `from` column is what the board shows (sessionColumn),
-   * and a drag is a command only on a pipeline card: a direct card sits in Doing always, and every
-   * drag of it is refused with 409, so it snaps back.
+   * and a drag is a command only on the moves that mode has: a direct card has only Review → Done
+   * (Approve), so every backward drag of it is refused with 409 and it snaps back where the board
+   * put it.
    */
   async move(id: string, to: Column) {
     const row = this.row(id);
     const from = sessionColumn(row.mode, row.phase);
-    const command = row.mode === "pipeline" && from ? this.moves[`${from}>${to}`] : undefined;
+    const command = this.moveCommand(row, from, to);
     if (!command) {
       const label = (c: Column | null) => COLUMNS.find((x) => x.id === c)?.label ?? "this place";
       throw Object.assign(new Error(`This card cannot move from ${label(from)} to ${label(to)} now.`), { status: 409 });
@@ -1979,9 +2004,23 @@ export class SessionManager extends EventEmitter {
     this.emitSummary(id);
   }
 
+  /**
+   * Record the PR the session page opened. A direct session's card follows its PR: its phase is
+   * `pr`, so the board puts the card in Review and the Review paths (Approve, the merge run, the
+   * board's merged-PR rule) apply to it. Its Done time stays unset until the PR merges. A pipeline
+   * card keeps its phase: its review finishing is what moves it to `pr`.
+   */
   setPr(id: string, number: number, url: string) {
-    this.update(id, { pr_number: number, pr_url: url });
+    const row = this.row(id);
+    const followsPr = row.mode === "direct";
+    this.update(id, {
+      pr_number: number,
+      pr_url: url,
+      ...(followsPr ? { phase: "pr" } : {}),
+    });
     this.emitSummary(id);
+    // The card changed column: open boards of the repo fetch GET /api/board again.
+    if (followsPr) this.emit("board", row.repo_id);
   }
 
   repoOf(id: string): { row: SessionRow; repo: RepoRow } {

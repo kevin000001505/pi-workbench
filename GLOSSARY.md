@@ -87,7 +87,7 @@ The kanban view of the workbench's features, with one column per stage of the pi
 _Avoid_: kanban (the style, not the thing), dashboard
 
 **Card**:
-One feature on the board: a pipeline session, a direct session, or an unclaimed card (a plain issue or a spec issue with its open tickets), and the PR that delivers it. A click on a spec card toggles a row of ticket sub-cards under it, one row open at a time: a started card's row is its tickets, with their state, a done card's row is its recorded sub-issues. A spec card keeps its whole-card actions — Solve all, Approve, Stop, Retry, Abandon, Answer — on the card.
+One feature on the board: a pipeline session, a direct session, or an unclaimed card (a plain issue or a spec issue with its open tickets), and the PR that delivers it. A click on a spec card toggles a row of ticket sub-cards under it, one row open at a time: a started card's row is its tickets, with their state, a done card's row is its recorded sub-issues. Every session card keeps its whole-card actions on the card: **Approve** while it is in **Review** and **Abandon** until it is **Done**, on a direct card as on a spec card, and **Stop**, **Retry** and **Answer** on a pipeline card only. An unclaimed card's buttons are the column moves (**Solve all** on a spec card, **Solve** and **Split** on a plain one).
 _Avoid_: task (kanzo's word), ticket (a ticket is one part of a card)
 
 **To do**:
@@ -132,7 +132,7 @@ The user's go-ahead on a card in Review: it merges the PR with a merge commit an
 _Avoid_: Allow (that answers a permission), accept
 
 **Abandon**:
-Dropping a feature: it stops the card's runs, closes its PR, deletes its branch, and takes the card off the board; its GitHub issues stay open.
+Dropping a feature: it stops the card's runs, closes its PR unmerged, deletes its branch, and takes the card off the board; its GitHub issues stay open. A card already in Done keeps its merged PR and its merge commit. A direct card is abandoned the same way.
 _Avoid_: stop (a stop pauses the card; the card can resume), delete, cancel
 
 **Not planned**:
@@ -150,7 +150,7 @@ _Avoid_: sync, poll, catch up
 - **Decisions** are never auto-approved
 - The **Reviewer's** settings drive the **Reviewer** as well as **Rescue runs** and **Retro runs**; an empty Reviewer model turns all three off
 - A **Card** from a pipeline session moves through the columns as its phase changes; the user's drag outranks the pipeline
-- A **Card** from a direct session sits in **Doing** always; every drag of it is refused
+- A **Card** from a direct session sits in **Doing**, and follows its PR: recording the PR puts it in **Review**, and **Approve** or a merged PR puts it in **Done**. Only **Review** to **Done** is a command for it: a backward drag is refused, because it has no tickets to pause and no spec to rework
 - Dragging a **Card** from **Issues** to **Doing** starts **Solve** (a plain issue) or **Solve all** (a spec issue or a ready session); dragging it from **Review** to **Done** is **Approve**; any other forward drag is refused
 - A **Solve one ticket** run on a spec card pauses the card in **Issues** when its ticket is done; **Solve all**, a backward drag, and Stop clear the pause, and **Solve all** runs every remaining ticket
 - Dragging a plain **Card** in **Issues** to **To do** is **Split**: the issue is cut into ticket sub-issues before any work starts

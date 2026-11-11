@@ -7,7 +7,7 @@ type Toast = { id: number; text: string; level: "info" | "warning" | "error" };
 type Store = {
   connected: boolean;
   sessions: Record<string, SessionSummary>;
-  /** Per repo id, how many `wb_board` events (a card created or removed) came in; a board refetches on a change. */
+  /** Per repo id, how many `wb_board` events (a card created, dropped, or delivered) came in; a board refetches on a change. */
   boardChanges: Record<string, number>;
   transcript: (id: string) => Transcript | undefined;
   stderr: (id: string) => string[];

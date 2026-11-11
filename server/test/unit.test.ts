@@ -372,20 +372,29 @@ test("cardOf specCard: a plain issue card and a card with no tickets are not spe
   assert.equal(cardOf({ ...src([]), mode: "direct", phase: "direct" })?.specCard, false);
 });
 
-test("a direct session is a card in Doing: with no PR, and even while it sets up", async () => {
+test("a direct card follows its PR: Review in phase pr, Done in phase done, Doing in every other phase", async () => {
   const { cardOf, sessionColumn } = await import("../../shared/board.ts");
   const session = (mode: string, phase: string, extra: Record<string, unknown> = {}) =>
     ({ id: "s1", title: "T", mode, phase, attention: null, prNumber: null, prUrl: null, specRef: null, tickets: [], ...extra }) as any;
-  // The board column a session's card sits in; a direct card is in Doing in every phase it has.
-  assert.equal(sessionColumn("direct", "direct"), "doing");
-  assert.equal(sessionColumn("direct", "setup"), "doing");
+  // A direct card sits in Doing in every phase but its last two: `pr` puts it in Review, `done` in Done.
+  for (const phase of ["direct", "setup", "grill", "spec", "tickets", "ready", "implement", "review", "retro", "split", "no-such-phase"]) {
+    assert.equal(sessionColumn("direct", phase), "doing", `a direct card in phase ${phase}`);
+  }
+  assert.equal(sessionColumn("direct", "pr"), "review");
+  assert.equal(sessionColumn("direct", "done"), "done");
+  // A pipeline card's column is unchanged.
   assert.equal(sessionColumn("pipeline", "setup"), "todo");
+  assert.equal(sessionColumn("pipeline", "grill"), "todo");
+  assert.equal(sessionColumn("pipeline", "spec"), "todo");
+  assert.equal(sessionColumn("pipeline", "tickets"), "todo");
   assert.equal(sessionColumn("pipeline", "ready"), "issues");
   assert.equal(sessionColumn("pipeline", "implement"), "doing");
   assert.equal(sessionColumn("pipeline", "review"), "qa");
+  assert.equal(sessionColumn("pipeline", "retro"), "qa");
   assert.equal(sessionColumn("pipeline", "pr"), "review");
   assert.equal(sessionColumn("pipeline", "done"), "done");
   assert.equal(sessionColumn("pipeline", "no-such-phase"), null);
+  assert.equal(sessionColumn("pipeline", "direct"), null, "the direct phase has no pipeline column");
   assert.deepEqual(cardOf(session("direct", "direct")), {
     id: "s1",
     title: "T",
@@ -399,12 +408,94 @@ test("a direct session is a card in Doing: with no PR, and even while it sets up
     subs: null,
   });
   assert.equal(cardOf(session("direct", "setup"))?.column, "doing", "a direct session in setup is in Doing, not To do");
-  // A PR on a direct session keeps the card in Doing, with its badge.
-  const pr = cardOf(session("direct", "direct", { prNumber: 7, prUrl: "https://github.com/me/app/pulls/7" }));
-  assert.equal(pr?.column, "doing");
-  assert.deepEqual(pr?.pr, { number: 7, url: "https://github.com/me/app/pulls/7", state: null });
+  // A direct card with a PR but not in phase `pr` (a session of an older database) is still in Doing.
+  assert.equal(cardOf(session("direct", "direct", { prNumber: 7, prUrl: "https://github.com/me/app/pulls/7" }))?.column, "doing");
+  // A direct card in phase `pr` is in Review, with its PR badge and no Done time yet.
+  const review = cardOf(session("direct", "pr", { prNumber: 7, prUrl: "https://github.com/me/app/pulls/7" }));
+  assert.equal(review?.column, "review");
+  assert.deepEqual(review?.pr, { number: 7, url: "https://github.com/me/app/pulls/7", state: null });
+  assert.equal(review?.doneAt, null, "a Review card has no Done time");
+  // A direct card that reached Done carries its Done time, so Done lists it newest first.
+  assert.equal(cardOf(session("direct", "done", { doneAt: 1000 }))?.column, "done");
+  assert.equal(cardOf(session("direct", "done", { doneAt: 1000 }))?.doneAt, 1000);
   // A pipeline card keeps its phase's column through cardOf as well.
   assert.equal(cardOf(session("pipeline", "implement"))?.column, "doing");
+});
+
+test("a card's whole-card actions follow its session: Approve with the PR, Abandon until Done", async () => {
+  const { boardCardActions } = await import("../../shared/board.ts");
+  const card = (column: string) => ({ column }) as any;
+  const s = (mode: string, phase: string, extra: Record<string, unknown> = {}) =>
+    ({ id: "s1", mode, phase, status: "idle", attention: null, pending: [], ...extra }) as any;
+
+  // A direct card in Review is Approvable: its Review → Done drag merges its PR, as a spec card's does.
+  assert.deepEqual(boardCardActions(card("review"), s("direct", "pr")), ["approve", "abandon"]);
+  // A direct card in Doing has no PR yet, so there is nothing to approve; it can still be abandoned.
+  for (const phase of ["direct", "setup", "implement"]) {
+    assert.deepEqual(boardCardActions(card("doing"), s("direct", phase)), ["abandon"], `a direct card in phase ${phase}`);
+  }
+  // A direct card in Done is not abandoned: its merged PR and its record stay.
+  assert.deepEqual(boardCardActions(card("done"), s("direct", "done")), []);
+  // Stop, Retry and Answer are the pipeline card's controls. A direct card has no tickets to pause,
+  // no review or retro to re-run, and it answers a decision in the card detail.
+  assert.deepEqual(
+    boardCardActions(
+      card("doing"),
+      s("direct", "implement", { status: "running", attention: "The run stopped", pending: [{ id: "r1", kind: "permission" }] }),
+    ),
+    ["abandon"],
+  );
+  // A card with no session (an unclaimed card, a done issue card) has no whole-card action.
+  assert.deepEqual(boardCardActions(card("issues"), undefined), []);
+  assert.deepEqual(boardCardActions(card("done"), undefined), []);
+});
+
+test("a pipeline card keeps Stop, Retry and Answer, and every session card gets them on its own card", async () => {
+  const { boardCardActions } = await import("../../shared/board.ts");
+  const card = (column: string) => ({ column }) as any;
+  const s = (phase: string, extra: Record<string, unknown> = {}) =>
+    ({ id: "s1", mode: "pipeline", phase, status: "idle", attention: null, pending: [], ...extra }) as any;
+
+  // A ticket run going on can be stopped; a stopped or blocked one gets Retry instead.
+  assert.deepEqual(boardCardActions(card("doing"), s("implement", { status: "running" })), ["stop", "abandon"]);
+  assert.deepEqual(boardCardActions(card("doing"), s("implement", { status: "waiting" })), ["stop", "abandon"]);
+  assert.deepEqual(boardCardActions(card("doing"), s("implement", { status: "error" })), ["abandon"]);
+  assert.deepEqual(boardCardActions(card("qa"), s("review", { attention: "The review stopped" })), ["retry", "abandon"]);
+  assert.deepEqual(boardCardActions(card("qa"), s("retro", { status: "running", attention: "The retro stopped" })), ["stop", "retry", "abandon"]);
+  // Review is Approve: the card offers Approve before Abandon.
+  assert.deepEqual(boardCardActions(card("review"), s("pr")), ["approve", "abandon"]);
+  // A card that waits in Issues or in Done has no Stop, no Retry, and no Abandon once it is Done.
+  assert.deepEqual(boardCardActions(card("issues"), s("ready")), ["abandon"]);
+  assert.deepEqual(boardCardActions(card("done"), s("done")), []);
+
+  // A decision or permission that waits on the user gets Answer; one still under the risk judge does not.
+  assert.deepEqual(boardCardActions(card("doing"), s("implement", { pending: [{ id: "r1", kind: "decision" }] })), ["abandon", "answer"]);
+  assert.deepEqual(
+    boardCardActions(card("doing"), s("implement", { pending: [{ id: "r1", kind: "permission", judge: { state: "judging" } }] })),
+    ["abandon"],
+  );
+
+  // The actions come from the session, not from being a spec card: a plain card (its only ticket is
+  // its own issue) gets them on its card too, and a card with no session gets none.
+  const plainInReview = { column: "review", specCard: false } as any;
+  const specInReview = { column: "review", specCard: true } as any;
+  assert.deepEqual(boardCardActions(plainInReview, s("pr")), boardCardActions(specInReview, s("pr")));
+});
+
+test("a drag from Review to Done is Approve for every card, the direct card included", async () => {
+  const { isApproveMove } = await import("../../shared/board.ts");
+  assert.equal(isApproveMove({ column: "review" }, "done"), true);
+  // Every other drag of a Review card asks nothing: the server refuses these moves for a direct card.
+  for (const column of ["todo", "issues", "doing", "qa", "review"]) {
+    assert.equal(isApproveMove({ column: "review" }, column as any), false, `Review to ${column}`);
+  }
+  // A card in another column never approves on a drag.
+  for (const column of ["todo", "issues", "doing", "qa", "done"]) {
+    for (const to of ["todo", "issues", "doing", "qa", "review", "done"] as const) {
+      if (column === "review") continue;
+      assert.equal(isApproveMove({ column } as any, to), false, `${column} to ${to}`);
+    }
+  }
 });
 
 test("done cards: a merged card and the issues it closed sit in Done, newest first, and a done limit hides the older", async () => {

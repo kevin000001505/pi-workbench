@@ -1424,3 +1424,187 @@ test("a Done card and a direct session do not claim their issue: the unclaimed c
   assert.equal((await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Ask", prompt: "how is it going?", issueRef: "kevin/demo#140", mode: "direct" })).status, 200);
   for (const s of (await api("GET", "/api/sessions")).json) await api("POST", `/api/sessions/${s.id}/stop`, {});
 });
+
+test("a direct session's PR puts its card in Review with its PR badge; a backward drag of it is refused", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "directpr");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/directpr" })).status, 200);
+  const col = columnOfCard("kevin/directpr");
+
+  // A fresh repo has no setup marker: setup commits on the branch, and the card stays in Doing.
+  const d = await api("POST", "/api/sessions", { repoId: "kevin/directpr", title: "Quick", prompt: "say hello", mode: "direct" });
+  assert.equal(d.status, 200, JSON.stringify(d.json));
+  const id = d.json.id;
+  await waitFor(async () => (await summary(id)).phase === "direct");
+  assert.equal(await col(id), "doing", "no PR yet: the card is in Doing");
+
+  const events = await boardEvents();
+  const before = events.seen.length;
+
+  // The session page's open-PR action records the PR: the phase is `pr`, and Done time stays unset.
+  const pr = await api("POST", `/api/sessions/${id}/pr`, { title: "Set up agent skills", body: "## Summary\n- docs/agents/issue-tracker.md" });
+  assert.equal(pr.status, 200, JSON.stringify(pr.json));
+  const sum = await summary(id);
+  assert.equal(sum.phase, "pr");
+  assert.equal(sum.prNumber, pr.json.number);
+  assert.equal(sum.doneAt, null, "the card is not Done until its PR merges");
+
+  // The card sits in Review with its PR badge, and open boards hear the board event.
+  const card = (await board("kevin/directpr")).find((c) => c.id === id);
+  assert.equal(card?.column, "review");
+  assert.equal(card?.pr?.number, pr.json.number);
+  assert.equal(card?.pr?.url, pr.json.url);
+  assert.ok(card?.pr?.state, "the board read the PR's state");
+  await waitFor(() => events.seen.slice(before).includes("kevin/directpr"));
+
+  // A backward drag of the direct card is refused (409), so it snaps back in Review: it has no
+  // tickets to pause and no spec to rework. Review → Done (Approve) is its only other command.
+  for (const column of ["todo", "issues", "doing", "qa"]) {
+    const r = await api("POST", `/api/sessions/${id}/move`, { column });
+    assert.equal(r.status, 409, `a drag to ${column}: ${JSON.stringify(r.json)}`);
+  }
+  assert.equal(await col(id), "review", "the card stayed in Review");
+
+  events.close();
+});
+
+/** A bare repo's own git: the branch and merge-commit checks a mock GitHub write leaves behind. */
+function gitInBare(repoId: string) {
+  const bare = path.join(remotes, ...repoId.split("/")) + ".git";
+  const sh = (...args: string[]) => spawnSync("git", args, { cwd: bare, stdio: "pipe" }).stdout.toString().trim();
+  const hasRef = (ref: string) => spawnSync("git", ["rev-parse", "--verify", "-q", ref], { cwd: bare, stdio: "pipe" }).status === 0;
+  return { sh, hasRef };
+}
+
+/** Put a session in Done with a Done time of the test's choosing, as a merge would. */
+function markDoneAt(id: string, at: number) {
+  const db = new DatabaseSync(path.join(process.env.DATA_DIR!, "workbench.db"));
+  db.prepare("UPDATE sessions SET phase = 'done', done_at = ? WHERE id = ?").run(at, id);
+  db.close();
+}
+
+/** A direct session with its PR open: its card sits in Review, and the mock's pull is returned. */
+async function directToReview(repoId: string, title: string, opts: { issueRef?: string } = {}) {
+  const d = (await api("POST", "/api/sessions", {
+    repoId,
+    title,
+    prompt: "say hello",
+    mode: "direct",
+    ...(opts.issueRef ? { issueRef: opts.issueRef } : {}),
+  })).json;
+  assert.ok(d.id, JSON.stringify(d));
+  // A fresh repo has no setup marker: setup commits on the branch, and the card stays in Doing.
+  await waitFor(async () => (await summary(d.id)).phase === "direct", 120_000);
+  const pr = await api("POST", `/api/sessions/${d.id}/pr`, { title, body: "## Summary\n- docs/agents/issue-tracker.md" });
+  assert.equal(pr.status, 200, JSON.stringify(pr.json));
+  const card = await waitFor(async () => (await board(repoId)).find((c) => c.id === d.id && c.column === "review"), 120_000);
+  const pull = gh.pulls.find((p) => p.number === card.pr.number);
+  const worktree = path.join(process.env.DATA_DIR!, "worktrees", d.id);
+  return { id: d.id as string, pr: pull, number: pr.json.number as number, worktree, branch: (await summary(d.id)).branch as string };
+}
+
+test("Review → Done on a direct card is Approve: its PR merges with a merge commit, its branch and worktree go, and it lands in Done with its Done time, newest first beside the merged pipeline cards", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "directmerge");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/directmerge" })).status, 200);
+  const { sh, hasRef } = gitInBare("kevin/directmerge");
+
+  // A pipeline card already in Done, with an older Done time: the direct card must land before it.
+  const older = (await api("POST", "/api/sessions", { repoId: "kevin/directmerge", title: "Older merge", prompt: "add a greeting" })).json;
+  await waitFor(async () => (await summary(older.id)).pending.some((p: any) => p.kind === "decision"), 120_000);
+  assert.equal((await api("POST", `/api/sessions/${older.id}/stop`, {})).status, 200);
+  markDoneAt(older.id, Date.now() - 60_000);
+  await waitFor(async () => (await summary(older.id)).phase === "done");
+
+  const { id, pr, worktree, branch } = await directToReview("kevin/directmerge", "Quick merge", { issueRef: "kevin/directmerge#3" });
+  assert.ok(hasRef(`refs/heads/${branch}`), "the branch is on GitHub");
+  assert.ok(fs.existsSync(worktree), "the worktree is on disk");
+
+  // A backward drag is refused (409): Review → Done is the only drag of a direct card.
+  assert.equal((await api("POST", `/api/sessions/${id}/move`, { column: "doing" })).status, 409, "no drag from Review to Doing");
+
+  const closedBefore = gh.closed.length;
+  const at = Date.now();
+  // Open boards of the repo are told to fetch the Board again: the card changed column.
+  const events = await boardEvents();
+  const moved = await api("POST", `/api/sessions/${id}/move`, { column: "done" });
+  assert.equal(moved.status, 200, JSON.stringify(moved.json));
+  assert.deepEqual(
+    events.seen.filter((r) => r === "kevin/directmerge"),
+    ["kevin/directmerge"],
+    "the Approve emits one board event for the repo",
+  );
+  events.close();
+  assert.equal(moved.json.phase, "done");
+  assert.ok(moved.json.doneAt >= at, "the card's Done time is set");
+
+  // The PR merged with a merge commit: main's tip has two parents, and the branch is gone.
+  assert.equal(pr.merged, true);
+  assert.equal(pr.merge_method, "merge");
+  assert.equal(sh("rev-list", "--parents", "-n1", "refs/heads/main").split(" ").length, 3, "a merge commit");
+  assert.ok(!hasRef(`refs/heads/${branch}`), "the remote branch is deleted");
+  assert.ok(!fs.existsSync(worktree), "the worktree is removed");
+
+  // The issue its refs name closed with the merge: its PR body carries no `Closes` line, so the
+  // workbench closed it.
+  assert.deepEqual(gh.closed.slice(closedBefore), [{ ref: "kevin/directmerge#3", by: "api" }]);
+
+  // The card is in Done with its Done time and its merged badge, newest first beside the older
+  // merged card. Its closed issue sits under the card, not as a flat card of its own.
+  const cards = await board("kevin/directmerge");
+  const card = cards.find((c) => c.id === id)!;
+  assert.equal(card.column, "done");
+  assert.equal(card.pr.state, "merged");
+  assert.equal(card.doneAt, moved.json.doneAt);
+  assert.deepEqual(
+    cards.filter((c) => c.column === "done").map((c) => c.id),
+    [id, older.id],
+    "the Done cards, newest first, with no flat card for the closed issue",
+  );
+  assert.ok(!cards.some((c) => c.id === "issue:3"), "the closed issue is not an open card either");
+
+  // A second Approve is refused: the card is no longer in Review.
+  assert.equal((await api("POST", `/api/sessions/${id}/approve`, {})).status, 409);
+
+  // Once the session is archived it is no longer a card: its closed issue stands beside the
+  // merged cards in Done, newest first.
+  assert.equal((await api("DELETE", `/api/sessions/${id}`)).status, 200);
+  const after = await board("kevin/directmerge");
+  const issueCard = after.find((c) => c.id === "issue:3");
+  assert.ok(issueCard, "the closed issue is recorded in Done");
+  assert.equal(issueCard.column, "done");
+  assert.equal(issueCard.title, "Docs: setup guide");
+  assert.ok(issueCard.doneAt >= at, "the issue carries its close time");
+  assert.deepEqual(after.filter((c) => c.column === "done").map((c) => c.id), ["issue:3", older.id]);
+});
+
+test("a board load delivers a direct card whose PR was merged by hand on GitHub", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "directhand");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/directhand" })).status, 200);
+  const { hasRef } = gitInBare("kevin/directhand");
+  const { id, worktree, branch, number } = await directToReview("kevin/directhand", "Hand merge");
+  assert.ok(hasRef(`refs/heads/${branch}`), "the branch is on GitHub");
+
+  // Someone merges the PR on GitHub: no Approve, no merge run.
+  const merged = await fetch(`${gh.url}/repos/kevin/directhand/pulls/${number}/merge`, {
+    method: "PUT",
+    headers: { Authorization: "Bearer ghp_test", "Content-Type": "application/json" },
+    body: JSON.stringify({ merge_method: "merge" }),
+  });
+  assert.equal(merged.status, 200, await merged.text());
+
+  // The board load delivers the card: Done with its Done time, the branch deleted, the worktree gone.
+  const events = await boardEvents();
+  const before = events.seen.length;
+  const cards = await board("kevin/directhand");
+  const card = cards.find((c) => c.id === id)!;
+  assert.equal(card.column, "done");
+  assert.ok(card.doneAt, "the card's Done time is set");
+  assert.equal(card.pr.state, "merged");
+  assert.equal((await summary(id)).phase, "done");
+  assert.ok(!hasRef(`refs/heads/${branch}`), "the remote branch is deleted");
+  assert.ok(!fs.existsSync(worktree), "the worktree is removed");
+  await waitFor(() => events.seen.slice(before).includes("kevin/directhand"), 120_000);
+
+  // The delivered card is not approvable again.
+  assert.equal((await api("POST", `/api/sessions/${id}/approve`, {})).status, 409);
+  events.close();
+});

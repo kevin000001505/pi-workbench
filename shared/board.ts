@@ -2,8 +2,11 @@
  * The Board: one Card per pipeline session and one Card per unclaimed issue, in the columns
  * To do → Issues → Doing → QA → Review → Done. The column is computed from the session, never
  * stored. The server (GET /api/board) and the web board both use this module, like
- * shared/transcript.ts. Keep it free of server and browser imports.
+ * shared/transcript.ts. Keep it free of server and browser imports; only other shared modules
+ * (pending.ts) belong here.
  */
+
+import { waitsOnUser, type WaitingState } from "./pending.ts";
 
 export type Column = "todo" | "issues" | "doing" | "qa" | "review" | "done";
 
@@ -30,19 +33,24 @@ const BY_PHASE: Record<string, Column> = {
   done: "done",
 };
 
-/** The column a session's phase puts its card in; null for the `direct` phase, which has no pipeline
- * column. A direct session's card sits in Doing all the while (see sessionColumn). */
+/** The column a pipeline session's phase puts its card in; null for the `direct` phase, which has no
+ * pipeline column (a direct card follows only its `pr` and `done` phases, see sessionColumn). */
 export function columnOf(phase: string): Column | null {
   return BY_PHASE[phase] ?? null;
 }
 
+/** The columns of a direct session: `pr` is its Review, `done` its Done, every other phase its Doing. */
+const BY_DIRECT_PHASE: Record<string, Column> = { pr: "review", done: "done" };
+
 /**
- * The column the board puts a session's card in: a pipeline card follows its phase, and a direct
- * card sits in Doing all the while (even while it sets up, and even with a PR badge), because a
- * direct session never goes through grill, spec or tickets.
+ * The column the board puts a session's card in: a pipeline card follows its phase. A direct card
+ * follows only its last two phases, because a direct session never goes through grill, spec or
+ * tickets: its phase `pr` (its PR is recorded) puts it in Review, `done` in Done, and every other
+ * phase — setup included — keeps it in Doing.
  */
 export function sessionColumn(mode: string, phase: string): Column | null {
-  return mode === "pipeline" ? columnOf(phase) : "doing";
+  if (mode === "pipeline") return columnOf(phase);
+  return BY_DIRECT_PHASE[phase] ?? "doing";
 }
 
 /** What a card is built from: the fields of a session summary that the board reads. */
@@ -125,6 +133,51 @@ export function cardOf(s: CardSource): Card | null {
     subs: null,
   };
 }
+
+/**
+ * A whole-card action a card's buttons offer on its session, in button order. The column moves
+ * (Solve all, Solve, Split) are not here: they start or rework an unclaimed card.
+ */
+export type BoardAction = "approve" | "stop" | "retry" | "abandon" | "answer";
+
+/** The session facts a card's whole-card actions read. A browser's session summary satisfies it. */
+export type SessionActionSource = {
+  mode: string;
+  phase: string;
+  status: string;
+  attention: string | null;
+  /** The session's pending requests, read by waitsOnUser (shared/pending.ts). */
+  pending: WaitingState[];
+};
+
+/**
+ * The whole-card actions of a session card — the actions on the card itself, a direct card included:
+ *
+ * - `approve` — the card is in Review, so it can merge its PR.
+ * - `abandon` — the card is not in Done, so it can still be dropped.
+ * - `stop`, `retry`, `answer` — the pipeline card's own controls: a direct card has no tickets to
+ *   pause and no review or retro to re-run, and it answers a decision in the card detail.
+ *
+ * A card with no session (an unclaimed card, a done issue card) has none.
+ */
+export function boardCardActions(card: { column: Column }, s: SessionActionSource | undefined): BoardAction[] {
+  if (!s) return [];
+  const pipeline = s.mode === "pipeline";
+  const actions: BoardAction[] = [];
+  if (s.phase === "pr") actions.push("approve");
+  if (pipeline && (s.phase === "implement" || s.phase === "review" || s.phase === "retro") && (s.status === "running" || s.status === "waiting"))
+    actions.push("stop");
+  if (pipeline && (s.phase === "review" || s.phase === "retro") && s.attention) actions.push("retry");
+  if (card.column !== "done") actions.push("abandon");
+  if (pipeline && s.pending.some(waitsOnUser)) actions.push("answer");
+  return actions;
+}
+
+/**
+ * Whether dragging this card into `column` is Approve — it merges the card's PR, so the board asks
+ * for a confirmation first. Only Review to Done is Approve, for a direct card as for a spec card.
+ */
+export const isApproveMove = (card: { column: Column }, column: Column) => card.column === "review" && column === "done";
 
 /** How many Done cards the board shows at first, and how many more each "show more" adds. */
 export const DONE_PAGE = 20;
