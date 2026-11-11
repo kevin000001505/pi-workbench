@@ -638,9 +638,9 @@ test("the split prompt breaks the issue into sub-issues with blocking edges, and
 
 test("the unclaimed-card starts pick phase, tickets, held prompt and spec in one table", async () => {
   const { START_PLANS, isStartFrom, ticketFromIssue } = await import("../src/pipeline.ts");
-  assert.deepEqual(Object.keys(START_PLANS).sort(), ["issue", "spec", "split", "tickets"]);
-  assert.ok(isStartFrom("split"), "names the four starts");
-  assert.ok(!isStartFrom("grill"));
+  assert.deepEqual(Object.keys(START_PLANS).sort(), ["grill", "issue", "spec", "split", "tickets"]);
+  assert.ok(isStartFrom("split"), "names the five starts");
+  assert.ok(isStartFrom("grill"), "Grill is one of them");
   assert.ok(!isStartFrom(null));
   assert.ok(!isStartFrom(3));
   assert.equal(START_PLANS.tickets.phase, "implement", "Solve all starts at the tickets");
@@ -658,11 +658,36 @@ test("the unclaimed-card starts pick phase, tickets, held prompt and spec in one
   assert.ok(START_PLANS.tickets.tickets, "Solve all derives its tickets from the sub-issues");
   assert.equal(START_PLANS.split.spec, true, "a split takes the issue body as its spec");
   assert.equal(START_PLANS.spec.spec, false, "a rework re-saves its spec in the to-spec step");
+  assert.equal(START_PLANS.grill.spec, false, "a grill writes its spec; the issue body is not it");
+});
+
+test("the grill start grills a plain issue from its title, body and URL, and records no tickets", async () => {
+  const { START_PLANS, grillIssuePrompt } = await import("../src/pipeline.ts");
+  const seed = {
+    spec: { number: 3, title: "Fix login crash", body: "The app crashes when the login page is reloaded.", htmlUrl: "https://github.com/a/b/issues/3", hasParent: false },
+    subIssues: [],
+  } as any;
+  // The plan: grill, on a plain issue, with nothing recorded yet.
+  assert.equal(START_PLANS.grill.phase, "grill", "the card starts at grill");
+  assert.equal(START_PLANS.grill.needsSubIssues, false, "Grill refuses a spec issue");
+  assert.equal(START_PLANS.grill.tickets, undefined, "no tickets until the breakdown");
+  assert.equal(START_PLANS.grill.specRefFromSeed, false, "the issue is the origin, not the spec");
+
+  // The prompt: grill-with-docs on the issue's own words.
+  const prompt = START_PLANS.grill.held!(seed);
+  assert.equal(prompt, grillIssuePrompt(seed.spec));
+  assert.match(prompt.split("\n")[0], /^\/skill:grill-with-docs \S/, "pi expands the skill");
+  assert.ok(prompt.includes("Fix login crash"), "the issue's title");
+  assert.ok(prompt.includes("The app crashes when the login page is reloaded."), "the issue's body");
+  assert.ok(prompt.includes("https://github.com/a/b/issues/3"), "the issue's URL");
+  assert.match(prompt, /save_grill_summary/, "ends with the agreed decisions");
+  // A grill names its issue, so the PR closes it.
+  assert.match(prompt, /#3/);
 });
 
 test("the glossary records the board's columns and card actions", () => {
   const glossary = fs.readFileSync(new URL("../../GLOSSARY.md", import.meta.url), "utf8");
-  for (const term of ["To do", "Unclaimed card", "Solve", "Split"]) {
+  for (const term of ["To do", "Unclaimed card", "Solve", "Split", "Grill"]) {
     assert.match(glossary, new RegExp(`\\*\\*${term}\\*\\*:`), `glossary defines ${term}`);
   }
   assert.match(glossary, /\*\*Issues\*\* \(column\):/);
@@ -671,6 +696,11 @@ test("the glossary records the board's columns and card actions", () => {
     glossary,
     /\*\*Split\*\*:\nBreaking a plain issue into ticket sub-issues with `to-tickets`, so it becomes a spec issue that waits for Solve all\./,
     "Split is a term entry, not only the drag-relationship mention",
+  );
+  assert.match(
+    glossary,
+    /\*\*Grill\*\*:\nA plain issue card's action that starts the pipeline on it with grill-with-docs\./,
+    "Grill is a term entry",
   );
 });
 

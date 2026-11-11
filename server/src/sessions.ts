@@ -486,10 +486,11 @@ export class SessionManager extends EventEmitter {
       throw Object.assign(new Error(`The TypeSafe skill is not installed (expected at ${typesafeSkillDir()})`), { status: 400 });
     }
     const mode = input.mode === "direct" ? "direct" : "pipeline";
-    // Unclaimed card moves start a session from the issue; START_PLANS picks its phase, its
-    // tickets, its held prompt and its spec bookkeeping. A spec card to Doing solves its
-    // tickets; to To do reworks it. A plain card to Doing is Solve (the issue is the card's
-    // only ticket); to To do is Split (to-tickets on the issue).
+    // Unclaimed card moves and the plain card's Grill start a session from the issue; START_PLANS
+    // picks its phase, its tickets, its held prompt and its spec bookkeeping. A spec card to Doing
+    // solves its tickets; to To do reworks it. A plain card to Doing is Solve (the issue is the
+    // card's only ticket); to To do is Split (to-tickets on the issue); its Grill is grill (the
+    // grill works from the issue's title and body, and the issue stays the session's origin).
     const startFrom = isStartFrom(input.startFrom) ? input.startFrom : undefined;
     const plan = startFrom ? START_PLANS[startFrom] : undefined;
     if (startFrom && input.mode === "direct")
@@ -538,7 +539,29 @@ export class SessionManager extends EventEmitter {
         `INSERT INTO sessions (id, repo_id, title, branch, base_branch, worktree, created_at, updated_at, held_prompt, mode, phase, active_run, issue_ref, auto_approve, typesafe_skill, spec, spec_ref, held_phase, solo_ticket)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, repo.id, title, branch, base, worktree, now, now, needsSetup ? held : null, mode, phase, id, issueRef, autoApprove === "inherit" ? null : autoApprove, typesafe ? 1 : 0, plan?.spec ? (seed?.spec.body ?? null) : null, startFrom ? (seed?.spec.htmlUrl ?? null) : null, needsSetup ? heldPhase : null, input.soloTicket ?? null);
+      .run(
+        id,
+        repo.id,
+        title,
+        branch,
+        base,
+        worktree,
+        now,
+        now,
+        needsSetup ? held : null,
+        mode,
+        phase,
+        id,
+        issueRef,
+        autoApprove === "inherit" ? null : autoApprove,
+        typesafe ? 1 : 0,
+        plan?.spec ? (seed?.spec.body ?? null) : null,
+        // A start that names its seed issue as the spec carries its URL as the spec ref; a Grill's issue
+        // is its origin only, so its spec ref comes later from save_spec.
+        startFrom && plan?.specRefFromSeed ? (seed?.spec.htmlUrl ?? null) : null,
+        needsSetup ? heldPhase : null,
+        input.soloTicket ?? null,
+      );
     const s = this.state(id);
     s.loaded = true;
     await this.start(id);

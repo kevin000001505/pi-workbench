@@ -238,6 +238,20 @@ const router = new Router()
     // create() refuses a second session for an issue a card works on already (409).
     return sessions.create({ repoId: repo.id, title: "", prompt: "", mode: "pipeline", issueRef: `${repo.id}#${number}`, startFrom });
   })
+  // Grill on a plain issue card's detail: the issue is the session's origin issue, grill-with-docs
+  // starts from its title and body, and the card runs the normal pipeline (spec, tickets, Solve all).
+  // A spec issue (open ticket sub-issues) and a sub-issue's number are refused, as the move route does.
+  .on("POST", "/api/repos/:owner/:name/issues/:number/grill", async ({ params }) => {
+    const repo = requireTrackedRepo(db, `${params.owner}/${params.name}`);
+    const number = Number(params.number);
+    const seed = await github().listTicketSubIssues(repo.owner, repo.name, number);
+    // A sub-issue has no card: its spec's card owns it. A stale tab can still post its number.
+    if (seed.spec.hasParent) throw new HttpError(409, `Issue #${number} is a sub-issue of another issue; its spec's card owns it.`);
+    if (seed.subIssues.length > 0)
+      throw new HttpError(409, `Issue #${number} has open ticket sub-issues: it is a spec card. Solve all its tickets, or move it to To do to rework it.`);
+    // create() refuses a second session for an issue a card works on already (409).
+    return sessions.create({ repoId: repo.id, title: "", prompt: "", mode: "pipeline", issueRef: `${repo.id}#${number}`, startFrom: "grill" });
+  })
   // Solve one ticket of an unclaimed spec card: creates the spec's session as the tickets start
   // does, with the solo ticket set to the sub-issue's local number, so only that ticket runs
   // and the card pauses in Issues when it is done. A blocked or foreign sub-issue is refused.
