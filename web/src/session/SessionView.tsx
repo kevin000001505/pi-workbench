@@ -33,7 +33,7 @@ function PrBadge({ sessionId, number, url }: { sessionId: string; number: number
   return (
     <a className={`btn btn-sm pr-badge pr-${st?.state ?? "open"} ${checks?.failed ? "pr-failing" : ""}`} href={url} target="_blank" rel="noopener">
       PR #{number}
-      {st && <span className="muted">{st.state}</span>}
+      {st && <span className="muted"> · {st.state}</span>}
       {ci && <span className={`ci ci-${checks!.failed ? "fail" : checks!.pending ? "pending" : "pass"}`}>{ci}</span>}
     </a>
   );
@@ -170,7 +170,7 @@ export function SessionView({ id, run }: { id: string; run?: string }) {
             {s.contextTokens > 0 && (
               <span className="ctx" title={`${s.contextTokens.toLocaleString()} of ${s.contextWindow.toLocaleString()} tokens`}>
                 <span className="ctx-bar">
-                  <span style={{ transform: `scaleX(${Math.min(100, ctxPct) / 100})` }} className={ctxPct > 80 ? "hot" : ""} />
+                  <span style={{ width: `${ctxPct}%` }} className={ctxPct > 80 ? "hot" : ""} />
                 </span>
                 {kTokens(s.contextTokens)} / {kTokens(s.contextWindow)}
               </span>
@@ -223,7 +223,7 @@ export function SessionView({ id, run }: { id: string; run?: string }) {
             return (
               <button key={r.id} className={on ? "active" : ""} onClick={() => viewRun(r.id)} title={r.label}>
                 {r.id === s.activeRun && <span className="live-dot" />}
-                <span className="run-label">{r.label}</span>
+                {r.label}
               </button>
             );
           })}

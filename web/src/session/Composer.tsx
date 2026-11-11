@@ -55,12 +55,7 @@ export function SkillPicker({
   return (
     <div className="skill-picker" role="listbox">
       <div className="skill-picker-head">
-        Skills
-        <span className="muted small hint-keys">
-          <span>↑↓ to move</span>
-          <span>Enter to insert</span>
-          <span>Esc to close</span>
-        </span>
+        Skills <span className="muted small">↑↓ to move · Enter to insert · Esc to close</span>
       </div>
       {list.length === 0 && <div className="muted skill-empty">No skill matches “{query}”.</div>}
       {list.map((s, i) => (
@@ -157,11 +152,10 @@ export function Composer({
       />
       <div className="composer-bar">
         <button className="btn btn-ghost btn-sm" onClick={() => setPicker((p) => !p)} title="Choose a skill">
-          Skills <span className="muted">({skills.length})</span>
+          ✦ Skills <span className="muted">({skills.length})</span>
         </button>
-        <span className="muted small grow composer-hint hint-keys">
-          <span>{busy ? "Enter steers now" : "Enter to send"}</span>
-          <span>{busy ? "Alt+Enter queues for after" : "Shift+Enter for a new line"}</span>
+        <span className="muted small grow composer-hint">
+          {busy ? "Enter steers now · Alt+Enter queues for after" : "Enter to send · Shift+Enter for a new line"}
         </span>
         {busy && (
           <button className="btn btn-sm" disabled={!text.trim() || sending} onClick={() => send("followUp")}>

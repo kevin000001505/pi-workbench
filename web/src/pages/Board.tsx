@@ -25,19 +25,19 @@ function rememberBoardRepo(id: string) {
 }
 
 // From kanzo's app.js: one color per step, from To do on.
-/**
- * kanzo's status icon: a ring that fills as the column gets closer to Done. It draws in
- * currentColor; board.css colours it (muted, Done in ink) from the theme tokens.
- */
+const STATUS_COLORS = ["#8a8a83", "#3b82f6", "#e8a317", "#2f9e44", "#ae3ec9", "#e8590c"];
+
+/** kanzo's status icon: a ring that fills as the column gets closer to Done. */
 function StatusIcon({ column }: { column: Column }) {
   const step = COLUMNS.findIndex((c) => c.id === column);
   const f = step / (COLUMNS.length - 1);
+  const color = STATUS_COLORS[step % STATUS_COLORS.length];
   let inside = null;
   if (f >= 1) {
     inside = (
       <>
-        <circle cx="7" cy="7" r="6" fill="currentColor" />
-        <path className="tick" d="m4.4 7.2 1.8 1.8 3.4-3.6" fill="none" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx="7" cy="7" r="6" fill={color} />
+        <path d="m4.4 7.2 1.8 1.8 3.4-3.6" fill="none" stroke="var(--kz-bg)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
       </>
     );
   } else if (f > 0) {
@@ -45,12 +45,12 @@ function StatusIcon({ column }: { column: Column }) {
     const a = f * 2 * Math.PI;
     const x = (7 + r * Math.sin(a)).toFixed(2);
     const y = (7 - r * Math.cos(a)).toFixed(2);
-    inside = <path d={`M7 7L7 ${7 - r}A${r} ${r} 0 ${f > 0.5 ? 1 : 0} 1 ${x} ${y}Z`} fill="currentColor" />;
+    inside = <path d={`M7 7L7 ${7 - r}A${r} ${r} 0 ${f > 0.5 ? 1 : 0} 1 ${x} ${y}Z`} fill={color} />;
   }
   return (
-    <span className={`status-icon ${f >= 1 ? "full" : ""}`}>
+    <span className="status-icon">
       <svg viewBox="0 0 14 14" aria-hidden="true">
-        <circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <circle cx="7" cy="7" r="6" fill="none" stroke={color} strokeWidth="1.5" />
         {inside}
       </svg>
     </span>
@@ -185,8 +185,8 @@ function BoardCard({
         <span className="tags">
           <span className={`kz-tag ${prState ? `pr-${prState}` : ""}`} title={card.pr.url ?? undefined}>
             <span className="dot" />
-            <span className="pr-num">PR #{card.pr.number}</span>
-            {prState && <span className="pr-state">{prState}</span>}
+            PR #{card.pr.number}
+            {prState ? ` · ${prState}` : ""}
           </span>
         </span>
       )}
