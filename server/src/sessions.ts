@@ -61,7 +61,7 @@ import {
   transcriptExcerpt,
   type ReviewContext,
 } from "./autoapprove.ts";
-import { createWorktree, getRepo, listRepos, pushSetupCommit, recordSetUp, removeWorktree, repoSetupState, requireTrackedRepo, slugify, worktreeNeedsSetup } from "./repos.ts";
+import { createWorktree, getRepo, listRepos, needsSetupRun, pushSetupCommit, recordSetUp, removeWorktree, repoSetupState, requireTrackedRepo, slugify, worktreeNeedsSetup } from "./repos.ts";
 import { loadSshHosts } from "./ssh.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, getPipelineSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
@@ -565,7 +565,9 @@ export class SessionManager extends EventEmitter {
     const branch = `pi/${slugify(title)}-${id.slice(0, 6)}`;
     const worktree = await createWorktree(repo, id, branch, base, await this.gitEnv());
     const now = Date.now();
-    const needsSetup = worktreeNeedsSetup(worktree);
+    // The repo's record decides whether this session starts with a setup run (issue #101): no repo
+    // runs the setup twice, and a repo with a record gets no marker check at all.
+    const needsSetup = needsSetupRun(this.db, repo, worktree);
     if (plan?.tickets && seed) {
       let ticketInputs: TicketInput[];
       try {

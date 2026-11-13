@@ -82,7 +82,7 @@ _Avoid_: code review (the review phase reads every change; the retro reads only 
 
 **Setup session**:
 The one session the workbench starts when you add a repo recorded as not set up; it runs only the agent-skills setup skill and holds no task. Its card sits in To do while it works, and lands in Done when the workbench pushes its setup commit to the repo's default branch — no pull request, no Approve.
-_Avoid_: setup run (a **setup run** is the setup step any session runs first, on a worktree that lacks the marker)
+_Avoid_: setup run (a **setup run** is the setup step a session runs first, on a repo its record does not hold as set up)
 
 ### Board
 
