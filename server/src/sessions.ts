@@ -61,7 +61,7 @@ import {
   transcriptExcerpt,
   type ReviewContext,
 } from "./autoapprove.ts";
-import { createWorktree, getRepo, listRepos, removeWorktree, repoSetupState, requireTrackedRepo, slugify, worktreeNeedsSetup } from "./repos.ts";
+import { createWorktree, getRepo, listRepos, pushSetupCommit, recordSetUp, removeWorktree, repoSetupState, requireTrackedRepo, slugify, worktreeNeedsSetup } from "./repos.ts";
 import { loadSshHosts } from "./ssh.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, getPipelineSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
@@ -219,7 +219,7 @@ function latestTask(t: Transcript): { task: string; skill?: string } {
 /** The title of the session that runs only the setup skill (see `SessionManager.startSetupSession`). */
 const SETUP_TITLE = "Set up agent skills";
 
-const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs automatically on this repository's first pi-workbench session. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push.`;
+const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs automatically on this repository's first pi-workbench session. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push: the workbench pushes this commit to the repo's default branch.`;
 
 /** Standing instruction appended to every pi system prompt: explanations follow the asd-ste100 skill. */
 const EXPLAIN_PROMPT =
@@ -1123,9 +1123,17 @@ export class SessionManager extends EventEmitter {
           await this.runNext(id);
         } else if (!this.isRepoSetupSession(row)) {
           // A session with no held task and no ticket to run goes on to the grill. The repo's setup
-          // session is the exception: its whole job was the setup skill, so it keeps its `setup`
-          // phase and its card stays in To do instead of reading as grilling a task.
+          // session is the exception: its whole job was the setup skill, so it never reads as
+          // grilling a task, and its commit lands on the default branch instead.
           this.update(id, { phase: row.mode === "pipeline" ? "grill" : "direct" });
+        } else if (s.lastSettleAborted) {
+          // The user stopped the setup run. A run the user cut short does not land its files on the
+          // default branch: its work may be half-done, and the repo would read as set up on it.
+          this.flag(id, "The setup run was stopped. Its setup files do not reach the repo's default branch until the run finishes: reply to continue it.");
+        } else {
+          // The repo's setup session committed its setup files: the server lands them on the default
+          // branch, so the repo reads as set up and its card is Done (issue #100).
+          await this.landSetupCommit(id, row);
         }
       }
     } else if (row.phase === "grill" && row.grill_summary) {
@@ -1493,6 +1501,32 @@ export class SessionManager extends EventEmitter {
   private flag(id: string, reason: string) {
     this.update(id, { attention: reason });
     this.emit("event", id, { type: "wb_notify", message: reason, level: "warning" });
+  }
+
+  /**
+   * Land the repo's setup session's commit on the repo's default branch (issue #100): no pull
+   * request, no Approve. The push goes through `pushSetupCommit`, which merges the branch in when
+   * it moved and refuses to report success when no commit carries the setup files. When the commit
+   * lands, the repo records its setup state as set up (issue #98) so every later read says it is
+   * set up, the card is Done, and open boards fetch GET /api/board again. When it cannot land, the
+   * repo keeps its not_set_up record and the card carries git's reason, so the card says what waits.
+   */
+  private async landSetupCommit(id: string, row: SessionRow) {
+    const repo = getRepo(this.db, row.repo_id);
+    if (!repo) {
+      this.flag(id, "The setup commit has no repo to land on: this repo is no longer tracked.");
+      return;
+    }
+    const base = repo.default_branch;
+    const landed = await pushSetupCommit(repo, row.worktree, await this.gitEnv());
+    if (!landed.ok) {
+      this.flag(id, `The setup commit did not reach ${base}: ${landed.reason}. The setup files stay in this card's worktree, and the repo is still recorded as not set up.`);
+      return;
+    }
+    recordSetUp(this.db, repo.id);
+    await removeWorktree(repo, row.worktree).catch(() => {});
+    this.update(id, { phase: "done", attention: null });
+    this.emit("board", repo.id);
   }
 
   /** User actions on a stopped pipeline: retry or skip the current ticket, or stop the pipeline. */
