@@ -219,7 +219,7 @@ function latestTask(t: Transcript): { task: string; skill?: string } {
 /** The title of the session that runs only the setup skill (see `SessionManager.startSetupSession`). */
 const SETUP_TITLE = "Set up agent skills";
 
-const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs automatically on this repository's first pi-workbench session. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push: the workbench pushes this commit to the repo's default branch.`;
+const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs automatically on a repo the workbench has not recorded as set up. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push: the workbench pushes this commit to the repo's default branch.`;
 
 /** Standing instruction appended to every pi system prompt: explanations follow the asd-ste100 skill. */
 const EXPLAIN_PROMPT =
@@ -567,7 +567,7 @@ export class SessionManager extends EventEmitter {
     const now = Date.now();
     // The repo's record decides whether this session starts with a setup run (issue #101): no repo
     // runs the setup twice, and a repo with a record gets no marker check at all.
-    const needsSetup = needsSetupRun(this.db, repo, worktree);
+    const needsSetup = needsSetupRun(this.db, repo.id, worktree);
     if (plan?.tickets && seed) {
       let ticketInputs: TicketInput[];
       try {

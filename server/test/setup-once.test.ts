@@ -9,34 +9,40 @@
  * Seams under test: SessionManager.create (the session-creation interface the routes use), the
  * session summary the UI reads (phase, setupRunning, heldPrompt), the prompt the session's run was
  * sent first (its transcript's first user message), and the record under repos.setup_state.
- * What they miss: the git calls themselves. These tests show that the setup decision comes from the
- * record and not from the worktree — the two disagree in both directions — and not how many times
- * git was asked about the marker.
+ * What they miss: how many times the marker was read. unit.test.ts counts the marker checks
+ * needsSetupRun makes, which guards "no marker check for a repo with a record". These tests show
+ * where the decision comes from: the record, not the worktree, which disagrees with it in both
+ * directions.
  */
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import { startMockLlm } from "./mock-llm.ts";
+import { ISSUE_TRACKER_DOC, editRemoteFile, seedBareRepo } from "./remote-repo.ts";
 
 const piBin = process.env.PI_BIN ?? "pi";
 const hasPi = spawnSync(piBin, ["--version"]).status === 0;
 const skip = !hasPi && "pi CLI not found";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wb-setup-once-"));
+const remotes = path.join(tmp, "remotes");
+fs.mkdirSync(remotes);
 process.env.DATA_DIR = path.join(tmp, "data");
 process.env.WORKBENCH_MASTER_KEY = "setup-once-master-key-0123456789";
 process.env.SKILLS_DIR = path.join(tmp, "skills");
 process.env.HOME = path.join(tmp, "agent-home");
-process.env.GITHUB_CLONE_BASE = path.join(tmp, "remotes");
+// The bare repos these tests seed are the remotes the workbench clones from.
+process.env.GITHUB_CLONE_BASE = `file://${remotes}`;
 process.env.PI_EXTENSION = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "pi-extension", "workbench.ts");
 
-const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
-const WHO = ["-c", "user.name=t", "-c", "user.email=t@t"];
 const gitEnv = async () => ({ GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" });
+/** Every repo of this file lives under one owner on the local remotes. */
+const seedRemote = (name: string, files: Record<string, string> = {}) => seedBareRepo(remotes, "me", name, files);
+const changeRemoteFile = (name: string, rel: string, content: string | null) => editRemoteFile(remotes, "me", name, rel, content);
 
 let mock: Awaited<ReturnType<typeof startMockLlm>>;
 let mgr: any;
@@ -44,41 +50,9 @@ let db: any;
 let secrets: any;
 let SETUP_MARKER: string;
 let SETUP_SKILL: string;
-let cloneBase: string;
 
-/** A bare repo on the mock remote, with the given files on its default branch. */
-function seedRemote(name: string, files: Record<string, string> = {}) {
-  const bare = path.join(cloneBase, "me", `${name}.git`);
-  fs.mkdirSync(path.dirname(bare), { recursive: true });
-  const seed = path.join(tmp, `seed-${name}`);
-  fs.mkdirSync(seed, { recursive: true });
-  sh(seed, "init", "-q", "-b", "main");
-  fs.writeFileSync(path.join(seed, "README.md"), `# ${name}\n`);
-  for (const [rel, body] of Object.entries(files)) {
-    fs.mkdirSync(path.join(seed, path.dirname(rel)), { recursive: true });
-    fs.writeFileSync(path.join(seed, rel), body);
-  }
-  sh(seed, "add", ".");
-  sh(seed, ...WHO, "commit", "-qm", "init");
-  sh(tmp, "clone", "-q", "--bare", seed, bare);
-  fs.rmSync(seed, { recursive: true, force: true });
-}
-
-/** Put a file on (or off) the mock remote's default branch, as another developer's push does. */
-function changeRemoteFile(name: string, rel: string, content: string | null) {
-  const work = path.join(tmp, `edit-${name}`);
-  sh(tmp, "clone", "-q", path.join(cloneBase, "me", `${name}.git`), work);
-  if (content === null) fs.rmSync(path.join(work, rel));
-  else {
-    fs.mkdirSync(path.join(work, path.dirname(rel)), { recursive: true });
-    fs.writeFileSync(path.join(work, rel), content);
-  }
-  sh(work, "add", "-A");
-  sh(work, ...WHO, "commit", "-qm", content === null ? `Remove ${rel}` : `Add ${rel}`);
-  sh(work, "push", "-q", "origin", "main");
-  fs.rmSync(work, { recursive: true, force: true });
-}
-
+// src modules are imported only after the environment above is set (a static import would snapshot
+// process.env too early, see review-server.ts).
 /** Add the repo through the workbench's own add path, which records its setup state once. */
 const track = async (name: string) => {
   const { addRepo } = await import("../src/repos.ts");
@@ -101,8 +75,6 @@ async function firstPrompt(id: string) {
   }
 }
 
-const MARKER_DOC = "# Issue tracker\n\nGitHub Issues.\n";
-
 before(async () => {
   if (!hasPi) return;
   mock = await startMockLlm();
@@ -113,7 +85,6 @@ before(async () => {
   const { SessionManager } = await import("../src/sessions.ts");
   SETUP_MARKER = marker;
   SETUP_SKILL = skill;
-  cloneBase = config.githubCloneBase;
   config.piBin = piBin;
   db = openDb(config.dbFile);
   saveModelSettings(db, { baseUrl: mock.url });
@@ -137,7 +108,7 @@ after(async () => {
 });
 
 test("a direct session on a repo recorded as set up starts in its planned phase, even when its worktree has no setup marker", { skip }, async () => {
-  seedRemote("set-up", { [SETUP_MARKER]: MARKER_DOC });
+  seedRemote("set-up", { [SETUP_MARKER]: ISSUE_TRACKER_DOC });
   const repo = await track("set-up");
   assert.equal(await recorded(repo.id), "set_up", "add time recorded it once");
 
@@ -155,7 +126,7 @@ test("a direct session on a repo recorded as set up starts in its planned phase,
 });
 
 test("a pipeline session on a repo recorded as set up goes straight to its grill, even when its worktree has no setup marker", { skip }, async () => {
-  seedRemote("set-up-pipeline", { [SETUP_MARKER]: MARKER_DOC });
+  seedRemote("set-up-pipeline", { [SETUP_MARKER]: ISSUE_TRACKER_DOC });
   const repo = await track("set-up-pipeline");
   assert.equal(await recorded(repo.id), "set_up");
   changeRemoteFile("set-up-pipeline", SETUP_MARKER, null);
@@ -177,7 +148,7 @@ test("a session on a repo recorded as not set up starts in setup, even when its 
 
   // Someone else put the setup files on the default branch afterwards: the worktree now carries them.
   // The record is what decides, so setup runs once more and its push makes the record set up.
-  changeRemoteFile("not-set-up", SETUP_MARKER, MARKER_DOC);
+  changeRemoteFile("not-set-up", SETUP_MARKER, ISSUE_TRACKER_DOC);
 
   const s = await mgr.create({ repoId: repo.id, title: "Quick", prompt: "hello there", mode: "direct" });
   assert.equal(s.phase, "setup", "the record decides, not the worktree");
@@ -205,7 +176,7 @@ test("a repo with no recorded setup state keeps today's marker check on its fres
 });
 
 test("a repo with no recorded setup state skips setup when its worktree carries the marker", { skip }, async () => {
-  seedRemote("unrecorded-ready", { [SETUP_MARKER]: MARKER_DOC });
+  seedRemote("unrecorded-ready", { [SETUP_MARKER]: ISSUE_TRACKER_DOC });
   const repo = await track("unrecorded-ready");
   db.prepare("UPDATE repos SET setup_state = NULL WHERE id = ?").run(repo.id);
 

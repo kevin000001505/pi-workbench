@@ -104,12 +104,12 @@ export function recordSetUp(db: Db, repoId: string) {
 /**
  * Whether a session on this repo starts with a setup run (issue #101). The repo's record decides, so
  * no repo runs the setup twice: a repo recorded as set up runs none, and a repo recorded as not set
- * up runs one without a new marker check. Only a repo with no recorded state — added before the
- * record existed — still reads the marker off its fresh worktree, and that check records nothing: the record
- * is written by the add-time check and by a landed setup push.
+ * up runs one with no new marker check. Only a repo with no recorded state — added before the record
+ * existed — still reads the marker off its fresh worktree, and that check runs once and records
+ * nothing: the add-time check and a landed setup push are what write the record.
  */
-export function needsSetupRun(db: Db, repo: RepoRow, worktree: string): boolean {
-  const recorded = recordedSetupState(db, repo.id);
+export function needsSetupRun(db: Db, repoId: string, worktree: string): boolean {
+  const recorded = recordedSetupState(db, repoId);
   return recorded === null ? worktreeNeedsSetup(worktree) : recorded === "not_set_up";
 }
 
