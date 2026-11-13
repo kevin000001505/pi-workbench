@@ -4,7 +4,6 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { after, before, test } from "node:test";
 import { startMockGitHub } from "./mock-github.ts";
 
@@ -401,12 +400,31 @@ const addLocalRepo = async (db: any, name: string) => {
   return addRepo(db, { owner: "kevin", name, defaultBranch: "main", private: true }, env);
 };
 
+/** A stand-in for the file `setup-matt-pocock-skills` commits: the repo's setup marker. */
+const ISSUE_TRACKER_DOC = "# Issue tracker\n\nGitHub Issues.\n";
+
+/** Put `file` on a local remote's default branch (`content`), or take it off (`null`). */
+const changeRemoteFile = (name: string, file: string, content: string | null) => {
+  const work = fs.mkdtempSync(path.join(remotes, ".edit-"));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: work });
+  execFileSync("git", ["clone", "-q", path.join(remotes, "kevin", `${name}.git`), work]);
+  if (content === null) fs.rmSync(path.join(work, file));
+  else {
+    fs.mkdirSync(path.join(work, path.dirname(file)), { recursive: true });
+    fs.writeFileSync(path.join(work, file), content);
+  }
+  git("add", "-A");
+  git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", content === null ? `Remove ${file}` : `Add ${file}`);
+  git("push", "-q", "origin", "main");
+  fs.rmSync(work, { recursive: true, force: true });
+};
+
 test("adding a repo whose default branch carries the setup marker records it as set up", async () => {
   const { openDb } = await import("../src/db.ts");
   const { config, SETUP_MARKER } = await import("../src/config.ts");
   const { recordedSetupState } = await import("../src/repos.ts");
   const db = openDb(config.dbFile);
-  gh.createBare("kevin", "setup-set", { [SETUP_MARKER]: "# Issue tracker\n\nGitHub Issues.\n" });
+  gh.createBare("kevin", "setup-set", { [SETUP_MARKER]: ISSUE_TRACKER_DOC });
 
   const repo = await addLocalRepo(db, "setup-set");
 
@@ -431,7 +449,7 @@ test("the recorded setup state answers later reads with no git check", async () 
   const { config, SETUP_MARKER } = await import("../src/config.ts");
   const { clonePath, getRepo, recordedSetupState, repoSetupState } = await import("../src/repos.ts");
   const db = openDb(config.dbFile);
-  gh.createBare("kevin", "setup-cached", { [SETUP_MARKER]: "# Issue tracker\n\nGitHub Issues.\n" });
+  gh.createBare("kevin", "setup-cached", { [SETUP_MARKER]: ISSUE_TRACKER_DOC });
   const added = await addLocalRepo(db, "setup-cached");
   assert.equal(recordedSetupState(db, added.id), "set_up");
   // The clone is gone, so git cannot answer at all: only the record can. A git check would answer
@@ -448,7 +466,7 @@ test("a repo added before this record existed gets one marker check, which recor
   const { config, SETUP_MARKER } = await import("../src/config.ts");
   const { recordedSetupState, repoSetupState } = await import("../src/repos.ts");
   const db = openDb(config.dbFile);
-  gh.createBare("kevin", "setup-old-set", { [SETUP_MARKER]: "# Issue tracker\n\nGitHub Issues.\n" });
+  gh.createBare("kevin", "setup-old-set", { [SETUP_MARKER]: ISSUE_TRACKER_DOC });
   gh.createBare("kevin", "setup-old-missing");
   const withMarker = await addLocalRepo(db, "setup-old-set");
   const withoutMarker = await addLocalRepo(db, "setup-old-missing");
@@ -461,34 +479,24 @@ test("a repo added before this record existed gets one marker check, which recor
   assert.equal(recordedSetupState(db, withoutMarker.id), "not_set_up", "the check recorded what it found");
 });
 
-test("an older repos table gains the setup_state column on open", async () => {
+test("a repo recorded as not set up keeps that record on a later read, even when git now sees the marker", async () => {
   const { openDb } = await import("../src/db.ts");
-  const { recordedSetupState } = await import("../src/repos.ts");
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wb-migrate-")), "workbench.db");
-  // The repos table as it was before this record: no setup_state, one repo in it.
-  const old = new DatabaseSync(file);
-  old.exec("CREATE TABLE repos (id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, default_branch TEXT NOT NULL, private INTEGER NOT NULL DEFAULT 1, added_at INTEGER NOT NULL);");
-  old.prepare("INSERT INTO repos (id, owner, name, default_branch, private, added_at) VALUES ('me/old','me','old','main',1,0)").run();
-  old.close();
+  const { config, SETUP_MARKER } = await import("../src/config.ts");
+  const { clonePath, getRepo, recordedSetupState, repoNeedsSetup, repoSetupState } = await import("../src/repos.ts");
+  const db = openDb(config.dbFile);
+  gh.createBare("kevin", "setup-stale");
+  const added = await addLocalRepo(db, "setup-stale");
+  assert.equal(recordedSetupState(db, added.id), "not_set_up");
+  // The marker lands on the default branch and the clone fetches it: git now says the repo is set
+  // up. A read still answers from the record, which is what "check it once" costs the pages.
+  changeRemoteFile("setup-stale", SETUP_MARKER, ISSUE_TRACKER_DOC);
+  const repo = getRepo(db, "kevin/setup-stale")!;
+  execFileSync("git", ["-C", clonePath(repo), "fetch", "-q", "origin"]);
 
-  const db = openDb(file);
-
-  const cols = (db.prepare("PRAGMA table_info(repos)").all() as { name: string }[]).map((c) => c.name);
-  assert.ok(cols.includes("setup_state"), `repos gained ${cols.join(", ")}`);
-  assert.equal(recordedSetupState(db, "me/old"), null, "a repo from before the record has no recorded state");
+  assert.equal(await repoNeedsSetup(repo), false, "git now reads the marker as there");
+  assert.equal(await repoSetupState(db, repo), "not_set_up", "the read took the record, not a new check");
+  assert.equal(recordedSetupState(db, repo.id), "not_set_up", "the read left the record alone");
 });
-
-/** Take `file` off a local remote's default branch, as a repo loses it. */
-const dropFromRemote = (name: string, file: string) => {
-  const work = fs.mkdtempSync(path.join(remotes, ".edit-"));
-  const git = (...args: string[]) => execFileSync("git", args, { cwd: work });
-  execFileSync("git", ["clone", "-q", path.join(remotes, "kevin", `${name}.git`), work]);
-  fs.rmSync(path.join(work, file));
-  git("add", "-A");
-  git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", `Remove ${file}`);
-  git("push", "-q", "origin", "main");
-  fs.rmSync(work, { recursive: true, force: true });
-};
 
 test("re-adding a repo already recorded as set up keeps it set up when git no longer sees the marker", async () => {
   const { openDb } = await import("../src/db.ts");
@@ -499,7 +507,7 @@ test("re-adding a repo already recorded as set up keeps it set up when git no lo
   const added = await addLocalRepo(db, "setup-keep");
   assert.equal(recordedSetupState(db, added.id), "set_up");
   // The marker goes off the default branch: git now says the repo needs setup, and the record says it does not.
-  dropFromRemote("setup-keep", SETUP_MARKER);
+  changeRemoteFile("setup-keep", SETUP_MARKER, null);
   const repo = await addLocalRepo(db, "setup-keep");
 
   assert.equal(await repoNeedsSetup(repo), true, "git now reads the marker as gone");
