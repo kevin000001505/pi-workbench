@@ -108,6 +108,17 @@ async function repoView(r: ReturnType<typeof listRepos>[number]) {
   };
 }
 
+/**
+ * Track a repo and start its setup session (issue #99): a repo recorded as not set up gets one
+ * session at once, a repo recorded as set up gets none. The response reads the row again, because
+ * the session is recorded on it.
+ */
+async function trackRepo(input: { owner: string; name: string; defaultBranch: string; private: boolean }) {
+  const repo = await addRepo(db, input, await gitEnv());
+  await sessions.startSetupSession(repo.id);
+  return repoView(getRepo(db, repo.id) ?? repo);
+}
+
 const router = new Router()
   .on("GET", "/api/health", () => ({ ok: true }))
 
@@ -164,11 +175,7 @@ const router = new Router()
     const [owner, name] = String(body.id ?? "").split("/");
     assertRepoName(owner ?? "", name ?? "");
     const gh = await github().getRepo(owner, name);
-    const repo = await addRepo(db, { owner, name, defaultBranch: gh.default_branch, private: gh.private }, await gitEnv());
-    // A repo that is not set up starts its setup session at once (issue #99).
-    await sessions.startSetupSession(repo.id);
-    // Read the row again: startSetupSession recorded the session on it.
-    return repoView(getRepo(db, repo.id) ?? repo);
+    return trackRepo({ owner, name, defaultBranch: gh.default_branch, private: gh.private });
   })
   .on("POST", "/api/repos/create", async ({ body }) => {
     const name = String(body.name ?? "").trim();
@@ -179,10 +186,7 @@ const router = new Router()
       private: body.private !== false,
       org: body.org ? String(body.org) : undefined,
     });
-    const repo = await addRepo(db, { owner: gh.owner.login, name: gh.name, defaultBranch: gh.default_branch, private: gh.private }, await gitEnv());
-    // The new repo is not set up either, so it starts its setup session at once (issue #99).
-    await sessions.startSetupSession(repo.id);
-    return repoView(getRepo(db, repo.id) ?? repo);
+    return trackRepo({ owner: gh.owner.login, name: gh.name, defaultBranch: gh.default_branch, private: gh.private });
   })
   .on("DELETE", "/api/repos/:owner/:name", async ({ params }) => {
     const id = `${params.owner}/${params.name}`;

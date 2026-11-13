@@ -81,7 +81,7 @@ A run at the end of a spec that reviews the rescued tickets with the `retro` ski
 _Avoid_: code review (the review phase reads every change; the retro reads only the rescued tickets)
 
 **Setup session**:
-The one session the workbench starts when you add a repo recorded as not set up; it runs only the agent-skills setup skill, holds no task, and its card sits in To do while it works.
+The one session the workbench starts when you add a repo recorded as not set up; it runs only the agent-skills setup skill, holds no task, and its card sits in To do while it works and after it finishes.
 _Avoid_: setup run (a **setup run** is the setup step any session runs first, on a worktree that lacks the marker)
 
 ### Board

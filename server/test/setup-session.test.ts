@@ -14,7 +14,8 @@ import path from "node:path";
 import { test } from "node:test";
 import { startReviewServer } from "./review-server.ts";
 
-const { hasPi, tmp, base, gh, api, waitFor, summary, board, llm } = await startReviewServer("setup-session");const skip = !hasPi && "pi CLI not found";
+const { hasPi, tmp, base, gh, api, waitFor, summary, board, llm } = await startReviewServer("setup-session");
+const skip = !hasPi && "pi CLI not found";
 // Read src modules only after startReviewServer set the environment (a static import would snapshot
 // process.env too early, see review-server.ts).
 const { SETUP_MARKER } = await import("../src/config.ts");
@@ -42,6 +43,8 @@ function init() {
 
 const sessionsOf = async (repoId: string) => ((await api("GET", "/api/sessions")).json as any[]).filter((s) => s.repoId === repoId);
 const repoRow = async (repoId: string) => ((await api("GET", "/api/repos")).json as any[]).find((r) => r.id === repoId);
+/** The setup session's worktree: where its setup run commits the marker file. */
+const worktreeOf = (id: string) => path.join(process.env.DATA_DIR!, "worktrees", id);
 
 test("adding a repo recorded as not set up creates one session titled Set up agent skills, which sends the setup prompt and holds no task", { skip }, async () => {
   await init();
@@ -142,4 +145,60 @@ test("creating a repo on GitHub starts its setup session too", { skip }, async (
   assert.equal(sessions.length, 1, JSON.stringify(sessions.map((s) => s.title)));
   assert.equal(sessions[0].title, "Set up agent skills");
   assert.equal((await repoRow("kevin/made")).setupSession, sessions[0].id);
+});
+
+test("the setup session's run finishes on its own: its phase stays setup, its card stays in To do, and it never grills a task", { skip }, async () => {
+  await init();
+  gh.createBare("kevin", "done-setup");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/done-setup" })).status, 200);
+  const s = (await sessionsOf("kevin/done-setup"))[0];
+
+  // The setup skill asks first; the answer lets it write the marker and commit it.
+  const ask = await waitFor(async () => (await summary(s.id)).pending.find((p: any) => p.kind === "decision"), 20_000);
+  assert.equal((await api("POST", `/api/sessions/${s.id}/respond`, { requestId: ask.id, value: ask.options[0] })).status, 200);
+
+  // The settle that ends the setup run is the one that would move a session on to the grill.
+  const settled = await waitFor(async () => {
+    const sum = await summary(s.id);
+    return !sum.setupRunning && sum.status !== "running" && fs.existsSync(path.join(worktreeOf(s.id), SETUP_MARKER)) ? sum : undefined;
+  }, 60_000);
+  assert.equal(settled.phase, "setup", "the setup session grills nothing: its whole job was the setup skill");
+  assert.equal((await board("kevin/done-setup")).find((c) => c.id === s.id)?.column, "todo");
+  assert.equal((await summary(s.id)).phase, "setup", "a later read says the same");
+  const userTurns = llm.requests
+    .map((r: any) => ((r.messages ?? []) as any[]).filter((m) => m.role === "user").map((m) => JSON.stringify(m)).join(""))
+    .join("");
+  assert.ok(!userTurns.includes('<skill name=\\"grill-with-docs\\"'), "the settled setup session starts no grill");
+});
+
+test("Abandon clears the repo's record of its setup session, so a later add gets a fresh one", { skip }, async () => {
+  await init();
+  gh.createBare("kevin", "dropped");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/dropped" })).status, 200);
+  const first = (await sessionsOf("kevin/dropped"))[0];
+
+  assert.equal((await api("POST", `/api/sessions/${first.id}/abandon`, {})).status, 200);
+  assert.equal((await repoRow("kevin/dropped")).setupSession, null, "the record does not name a session that is gone");
+
+  const again = await api("POST", "/api/repos", { id: "kevin/dropped" });
+  assert.equal(again.status, 200, JSON.stringify(again.json));
+  const sessions = await sessionsOf("kevin/dropped");
+  assert.equal(sessions.length, 1, JSON.stringify(sessions.map((s) => s.title)));
+  assert.notEqual(sessions[0].id, first.id);
+  assert.equal(again.json.setupSession, sessions[0].id);
+});
+
+test("two adds of one repo at once make one setup session", { skip }, async () => {
+  await init();
+  gh.createBare("kevin", "twice");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/twice" })).status, 200);
+  // Drop the first setup session, so the repo has no record to keep and both adds start fresh.
+  assert.equal((await api("POST", `/api/sessions/${(await sessionsOf("kevin/twice"))[0].id}/abandon`, {})).status, 200);
+
+  const both = await Promise.all([api("POST", "/api/repos", { id: "kevin/twice" }), api("POST", "/api/repos", { id: "kevin/twice" })]);
+  assert.deepEqual(both.map((r) => r.status), [200, 200], JSON.stringify(both.map((r) => r.json)));
+  const sessions = await sessionsOf("kevin/twice");
+  assert.equal(sessions.length, 1, JSON.stringify(sessions.map((s) => s.title)));
+  assert.equal(both[0].json.setupSession, sessions[0].id);
+  assert.equal(both[1].json.setupSession, sessions[0].id);
 });

@@ -281,6 +281,8 @@ export class SessionManager extends EventEmitter {
   private reconciling = new Map<string, Promise<ReconcileResult>>();
   /** Issues (`owner/name#n`) whose new session is being created now. */
   private claiming = new Set<string>();
+  /** Repos whose setup session is being created now; a second add of the same repo waits for the run. */
+  private setupRuns = new Map<string, Promise<SessionSummary | null>>();
 
   constructor(db: Db, secrets: SecretStore, gitEnv: () => Promise<GitEnv>, refreshSsh?: () => void, fetchTicketSeed?: (ref: string) => Promise<TicketSeed>, rescueProxy?: RescueProxy, delivery?: Delivery) {
     super();
@@ -482,21 +484,41 @@ export class SessionManager extends EventEmitter {
   /**
    * The session that sets up a repo's agent skills: one pipeline session that runs only the setup
    * skill and holds no task. main.ts's repo routes call it when a repo is added (issue #99). The
-   * repo records the session, so a reader can tell that setup is in progress. A repo recorded as
-   * set up (see `repoSetupState`) needs none, so this returns null for it.
+   * repo records the session as soon as its row exists (createSession), so a reader can tell that
+   * setup is in progress, and adding the repo again keeps the session it already has instead of
+   * starting a second one. A repo recorded as set up (see `repoSetupState`) needs none, so this
+   * returns null for it. A setup run that cannot start flags the session rather than failing the add.
    */
   async startSetupSession(repoId: string): Promise<SessionSummary | null> {
+    // Two adds of one repo at once share one run, so they make one setup session, as `create` does
+    // for two moves of one issue.
+    const inFlight = this.setupRuns.get(repoId);
+    if (inFlight) return inFlight;
+    const run = this.startSetupRun(repoId).finally(() => this.setupRuns.delete(repoId));
+    this.setupRuns.set(repoId, run);
+    return run;
+  }
+
+  private async startSetupRun(repoId: string): Promise<SessionSummary | null> {
     const repo = requireTrackedRepo(this.db, repoId);
     if ((await repoSetupState(this.db, repo)) === "set_up") return null;
     // The recorded session is this repo's setup session: adding the repo again keeps it instead of
-    // starting a second one. A recorded session that is gone (Abandon) leaves nothing to keep.
+    // starting a second one. A recorded session that is gone (Abandon or archive) leaves nothing to keep.
     const recorded = repo.setup_session
-      ? (this.db.prepare("SELECT id, repo_id FROM sessions WHERE id = ?").get(repo.setup_session) as { id: string; repo_id: string } | undefined)
+      ? (this.db.prepare("SELECT id, repo_id FROM sessions WHERE id = ? AND archived = 0").get(repo.setup_session) as { id: string; repo_id: string } | undefined)
       : undefined;
     if (recorded?.repo_id === repo.id) return this.summary(recorded.id);
-    const s = await this.createSession({ repoId: repo.id, title: SETUP_TITLE, prompt: "", mode: "pipeline", setupOnly: true }, repo);
-    this.db.prepare("UPDATE repos SET setup_session = ? WHERE id = ?").run(s.id, repo.id);
-    return s;
+    return this.createSession({ repoId: repo.id, title: SETUP_TITLE, prompt: "", mode: "pipeline", setupOnly: true }, repo);
+  }
+
+  /** Whether this session is the one its repo records as its setup session. */
+  private isRepoSetupSession(row: SessionRow): boolean {
+    return getRepo(this.db, row.repo_id)?.setup_session === row.id;
+  }
+
+  /** Drop a repo's record of its setup session when that session goes away, so the record never names one that is gone. */
+  private clearSetupSession(row: SessionRow) {
+    this.db.prepare("UPDATE repos SET setup_session = NULL WHERE id = ? AND setup_session = ?").run(row.repo_id, row.id);
   }
 
   private async createSession(input: CreateInput, repo: RepoRow) {
@@ -588,22 +610,33 @@ export class SessionManager extends EventEmitter {
         needsSetup ? heldPhase : null,
         input.soloTicket ?? null,
       );
+    // The repo records its setup session as soon as the row exists: a setup run that cannot start
+    // still leaves the repo one setup session, so adding the repo again keeps it (issue #99).
+    if (setupOnly) this.db.prepare("UPDATE repos SET setup_session = ? WHERE id = ?").run(id, repo.id);
     const s = this.state(id);
     s.loaded = true;
-    await this.start(id);
-    if (setupOnly || needsSetup) {
-      s.setupRunning = true;
-      await this.send(id, SETUP_PROMPT);
-    } else if (plan?.tickets) {
-      // grill/spec/tickets are skipped: the first ticket run starts now.
-      await this.runNext(id);
-    } else if (plan?.held) {
-      await this.send(id, held!);
-    } else if (mode === "pipeline") {
-      // A task that is already a skill call (the session form's ✦ Skills pick) goes out as it is.
-      await this.send(id, isSkillCall(input.prompt) ? input.prompt : grillPrompt(input.prompt));
-    } else if (task) {
-      await this.send(id, input.prompt);
+    try {
+      await this.start(id);
+      if (setupOnly || needsSetup) {
+        s.setupRunning = true;
+        await this.send(id, SETUP_PROMPT);
+      } else if (plan?.tickets) {
+        // grill/spec/tickets are skipped: the first ticket run starts now.
+        await this.runNext(id);
+      } else if (plan?.held) {
+        await this.send(id, held!);
+      } else if (mode === "pipeline") {
+        // A task that is already a skill call (the session form's ✦ Skills pick) goes out as it is.
+        await this.send(id, isSkillCall(input.prompt) ? input.prompt : grillPrompt(input.prompt));
+      } else if (task) {
+        await this.send(id, input.prompt);
+      }
+    } catch (err) {
+      // A setup session travels with a repo add, and the repo is tracked already: a setup run that
+      // cannot start must not fail the add, so the card carries the reason instead.
+      if (!setupOnly) throw err;
+      s.setupRunning = false;
+      this.flag(id, `Setup could not start: ${(err as Error).message}. Open this card to try again.`);
     }
     this.emitSummary(id);
     // A new session is a new card on its repo's board (a direct session's card starts in Doing).
@@ -1088,7 +1121,10 @@ export class SessionManager extends EventEmitter {
           // A session started from existing tickets skips grill/spec/tickets after setup.
           this.update(id, { phase: "implement" });
           await this.runNext(id);
-        } else {
+        } else if (!this.isRepoSetupSession(row)) {
+          // A session with no held task and no ticket to run goes on to the grill. The repo's setup
+          // session is the exception: its whole job was the setup skill, so it keeps its `setup`
+          // phase and its card stays in To do instead of reading as grilling a task.
           this.update(id, { phase: row.mode === "pipeline" ? "grill" : "direct" });
         }
       }
@@ -1995,6 +2031,7 @@ export class SessionManager extends EventEmitter {
     const repo = getRepo(this.db, row.repo_id);
     if (repo && fs.existsSync(row.worktree)) await removeWorktree(repo, row.worktree);
     this.update(id, { archived: 1, updated_at: Date.now() });
+    this.clearSetupSession(row);
     this.live.delete(id);
     this.emit("removed", id);
   }
@@ -2019,6 +2056,7 @@ export class SessionManager extends EventEmitter {
     this.db.prepare("DELETE FROM tickets WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM auto_decisions WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+    this.clearSetupSession(row);
     this.live.delete(id);
     this.emit("removed", id);
     this.emit("board", row.repo_id);
