@@ -162,6 +162,21 @@ export function Repos() {
                 <a className="btn btn-sm btn-primary" href={`#/new/${encodeURIComponent(r.id)}`}>
                   New session
                 </a>
+                {r.setup === "not_set_up" && (
+                  <button
+                    className="btn btn-sm btn-ghost"
+                    onClick={async () => {
+                      // Run setup: the workbench starts this repo's setup session, and its commit lands on the default branch.
+                      const started = await api
+                        .post<{ id: string }>(`/api/repos/${r.id}/setup`)
+                        .catch((e) => (toast(e.message, "error"), null));
+                      if (started) toast(`Setup runs for ${r.id}: its card is on the board.`);
+                      load();
+                    }}
+                  >
+                    Run setup
+                  </button>
+                )}
                 <a className="btn btn-sm btn-ghost" href={`https://github.com/${r.id}`} target="_blank" rel="noopener">
                   GitHub ↗
                 </a>

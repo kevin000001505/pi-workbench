@@ -283,3 +283,42 @@ test("a setup run that cannot land its commit on the default branch leaves the r
   assert.equal(again.status, 200);
   assert.equal(again.json.id !== started.json.id, true);
 });
+
+test("a setup run that commits no setup file leaves the repo not set up and flags its card", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "nothingcommitted");
+  // The marker path is blocked by a regular file, so the setup run can write nothing.
+  const work = fs.mkdtempSync(path.join(tmp, "block-"));
+  sh(tmp, "clone", "-q", remote("kevin", "nothingcommitted"), work);
+  fs.mkdirSync(path.join(work, "docs"), { recursive: true });
+  fs.writeFileSync(path.join(work, "docs", "agents"), "not a directory\n");
+  sh(work, "add", ".");
+  sh(work, "-c", "user.name=hand", "-c", "user.email=hand@x", "commit", "-qm", "docs/agents is a file");
+  sh(work, "push", "-q", "origin", "main");
+  fs.rmSync(work, { recursive: true, force: true });
+
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/nothingcommitted" })).json.setup, "not_set_up");
+  const started = await api("POST", "/api/repos/kevin/nothingcommitted/setup", {});
+  assert.equal(started.status, 200);
+
+  const flagged = await waitFor(async () => {
+    const c = (await board("kevin/nothingcommitted")).find((x) => x.id === started.json.id);
+    return c && c.attention ? c : undefined;
+  });
+  assert.match(flagged.attention, /committed no docs\/agents\/issue-tracker\.md/);
+  assert.equal(await setupState("kevin/nothingcommitted"), "not_set_up");
+  assert.equal(repoRow("kevin/nothingcommitted").setup_session, null);
+});
+
+test("Run setup twice at once starts one setup session", { skip: !hasPi && "pi CLI not found" }, async () => {
+  gh.createBare("kevin", "double");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/double" })).json.setup, "not_set_up");
+
+  const both = await Promise.all([api("POST", "/api/repos/kevin/double/setup", {}), api("POST", "/api/repos/kevin/double/setup", {})]);
+  assert.deepEqual(
+    both.map((r) => r.status).sort(),
+    [200, 409],
+    "one Run setup starts the session, the other is refused",
+  );
+  const sessions = (await api("GET", "/api/sessions")).json as any[];
+  assert.equal(sessions.filter((s) => s.repoId === "kevin/double" && s.title === "Set up agent skills").length, 1);
+});

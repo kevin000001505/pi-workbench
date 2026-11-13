@@ -4,6 +4,10 @@ Self-hosted web UI that drives the pi coding agent on your repos. This glossary 
 
 ## Language
 
+**Agent-skills setup**:
+The one time a tracked repo gets the files the agent skills need (the setup marker file `docs/agents/issue-tracker.md` and its companions). The workbench records the state on the repo row — `set_up`, `in_progress`, or `not_set_up` — and the Repos page states it. A repo that is not set up has a **Run setup** action: its own session runs `/setup-matt-pocock-skills`, and when that run settles the workbench lands its commit on the repo's default branch, records `set_up`, and puts the card in Done. A repo recorded `set_up` starts every card past setup, so no repo runs the setup twice.
+_Avoid_: repo setup (say **Run setup** for the action, **setup session** for the session it starts), setup check (the workbench checks the marker file once, then reads the record)
+
 **Issue**:
 A GitHub issue (feature request, bug, task) in a repository the workbench tracks.
 _Avoid_: pull request (a PR is not an issue; GitHub's issues feed mixes them in and the workbench filters PRs out)
