@@ -130,5 +130,6 @@ export async function startReviewServer(name: string) {
     return { id: s.id as string, pr, worktree: path.join(process.env.DATA_DIR!, "worktrees", s.id), branch: (await summary(s.id)).branch as string };
   }
 
-  return { hasPi, tmp, base, gh, api, waitFor, summary, board, columnOf, bare, hasRef, setup, toReview };
+  // `llm` is the mock model: a test that sets the model itself reads its url.
+  return { hasPi, tmp, base, gh, api, waitFor, summary, board, columnOf, bare, hasRef, setup, toReview, llm: mock };
 }

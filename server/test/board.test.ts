@@ -93,6 +93,11 @@ const columnOf = async (id: string) => (await board()).find((c) => c.id === id)?
 /** The column a session card sits in on a repo's board, for a repo other than the demo's. */
 const columnOfCard = (repoId: string) => async (id: string) => (await board(repoId)).find((c) => c.id === id)?.column;
 
+/** Adding a repo that is not set up starts a setup session (issue #99), and its card sits on the board.
+ * A test that lists a repo's feature cards drops that card with `featureCards`. */
+const SETUP_CARD = "Set up agent skills";
+const featureCards = async (repo?: string) => (await board(repo)).filter((c) => c.title !== SETUP_CARD);
+
 /**
  * The ticket run starts the mock model got for one ticket: requests whose last message is that
  * ticket's start prompt. The mock repeats the whole history in every request of a run, so a later
@@ -117,8 +122,15 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
   gh.createBare("kevin", "demo");
   assert.equal((await api("POST", "/api/repos", { id: "kevin/demo" })).status, 200);
 
-  // A fresh board shows the repo's plain open issues in Issues; no sessions yet.
+  // Adding the repo, which is recorded as not set up, starts its setup session (issue #99).
+  const setupRuns = (await api("GET", "/api/sessions")).json.filter((s: any) => s.repoId === "kevin/demo");
+  assert.equal(setupRuns.length, 1, JSON.stringify(setupRuns.map((s: any) => s.title)));
+  assert.equal(setupRuns[0].title, SETUP_CARD);
+  assert.equal(setupRuns[0].phase, "setup");
+
+  // A fresh board shows that card beside the repo's plain open issues in Issues.
   assert.deepEqual(await board(), [
+    { id: setupRuns[0].id, title: SETUP_CARD, column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: null, doneAt: null, specCard: false, subs: null },
     { id: "issue:1", title: "Add dark mode", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/1", doneAt: null, specCard: false, subs: null },
     { id: "issue:2", title: "Fix login Crash", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/2", doneAt: null, specCard: false, subs: null },
     { id: "issue:3", title: "Docs: setup guide", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/3", doneAt: null, specCard: false, subs: null },
@@ -165,8 +177,8 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
   // A direct session is a card in Doing too, even while it sets up.
   const d = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Quick", prompt: "hello there", mode: "direct" })).json;
   assert.equal(d.phase, "setup");
-  // The session cards, beside the plain issue cards, in column order.
-  const cards = (await board()).filter((c) => !c.id.startsWith("issue:"));
+  // The feature cards, beside the plain issue cards, in column order (the repo's setup card is no feature).
+  const cards = (await featureCards()).filter((c) => !c.id.startsWith("issue:"));
   assert.deepEqual(
     cards.map((c) => [c.title, c.column]),
     [
@@ -179,7 +191,7 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
   // Each repo has its own board; its plain issues show too.
   gh.createBare("kevin", "other");
   assert.equal((await api("POST", "/api/repos", { id: "kevin/other" })).status, 200);
-  assert.deepEqual((await board("kevin/other")).map((c) => [c.title, c.column]), [
+  assert.deepEqual((await featureCards("kevin/other")).map((c) => [c.title, c.column]), [
     ["Add dark mode", "issues"],
     ["Fix login Crash", "issues"],
     ["Docs: setup guide", "issues"],
@@ -268,7 +280,7 @@ test("a card started from a spec's ticket issues skips Issues: Doing, then QA, t
   assert.equal((await summary(s.id)).reviewNote, "Fixed one naming issue");
 
   // The newest session card still sorts by column, after the older ones in To do and Issues.
-  const sessionCards = (await board()).filter((c) => !c.id.startsWith("issue:"));
+  const sessionCards = (await featureCards()).filter((c) => !c.id.startsWith("issue:"));
   assert.deepEqual(sessionCards.map((c) => c.column), ["todo", "issues", "doing", "review"]);
 
   // The badge follows the PR on GitHub: every check passed, a check failed, then a merge conflict.
@@ -306,7 +318,7 @@ test("Done lists merged cards newest first, and a done limit hides the older one
   assert.equal((await api("POST", `/api/sessions/${ids[0]}/prompt`, { message: "one more thing" })).status, 200);
   assert.ok((await summary(ids[0])).updatedAt > touched, "the older card's session is now the latest updated");
   const all = await api("GET", "/api/board?repo=kevin/history");
-  const sessionTitles = (cards: any[]) => cards.filter((c) => !c.id.startsWith("issue:"));
+  const sessionTitles = (cards: any[]) => cards.filter((c) => !c.id.startsWith("issue:") && c.title !== SETUP_CARD);
   assert.deepEqual(
     sessionTitles(all.json.cards).map((c: any) => [c.title, c.column]),
     [["Third", "done"], ["Second", "done"], ["First", "done"]],

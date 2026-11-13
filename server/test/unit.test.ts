@@ -670,6 +670,27 @@ test("an older repos table gains the setup_state column on open", async () => {
   assert.equal(recordedSetupState(db, "me/old"), null);
 });
 
+test("an older repos table gains the setup_session column, which holds the session setting the repo up", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wb-mig-")), "old.db");
+  const old = new DatabaseSync(file);
+  // The repos table as it was before the setup session was recorded: no setup_session, one repo in it.
+  old.exec("CREATE TABLE repos (id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, default_branch TEXT NOT NULL, private INTEGER NOT NULL DEFAULT 1, added_at INTEGER NOT NULL, setup_state TEXT);");
+  old.prepare("INSERT INTO repos (id, owner, name, default_branch, private, added_at, setup_state) VALUES ('me/old','me','old','main',1,0,'not_set_up')").run();
+  old.close();
+  const db = openDb(file);
+  const cols = (db.prepare("PRAGMA table_info(repos)").all() as { name: string }[]).map((c) => c.name);
+  assert.ok(cols.includes("setup_session"), `the repos table has ${cols.join(", ")}`);
+  // A repo from before the record has no setup session, and its row keeps its recorded setup state.
+  assert.deepEqual(
+    { ...(db.prepare("SELECT setup_session, setup_state FROM repos WHERE id = 'me/old'").get() as any) },
+    { setup_session: null, setup_state: "not_set_up" },
+  );
+  // The column takes a session id: the repo records the one session that sets it up.
+  db.prepare("UPDATE repos SET setup_session = 's1' WHERE id = 'me/old'").run();
+  assert.equal((db.prepare("SELECT setup_session FROM repos WHERE id = 'me/old'").get() as any).setup_session, "s1");
+});
+
 test("old done pipeline rows with a PR number open as pr, once", async () => {
   const { DatabaseSync } = await import("node:sqlite");
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wb-mig-")), "old.db");
