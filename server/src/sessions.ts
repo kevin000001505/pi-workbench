@@ -61,7 +61,7 @@ import {
   transcriptExcerpt,
   type ReviewContext,
 } from "./autoapprove.ts";
-import { createWorktree, getRepo, listRepos, removeWorktree, slugify, worktreeNeedsSetup } from "./repos.ts";
+import { createWorktree, getRepo, listRepos, removeWorktree, repoSetupState, requireTrackedRepo, slugify, worktreeNeedsSetup } from "./repos.ts";
 import { loadSshHosts } from "./ssh.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, getPipelineSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
@@ -126,7 +126,7 @@ export type UiResponse = { value?: string; confirmed?: boolean; cancelled?: bool
 export type Run = { id: string; label: string };
 
 /** What POST /api/sessions (and an unclaimed card's move) asks SessionManager.create for. */
-export type CreateInput = { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: StartFrom; soloTicket?: number };
+export type CreateInput = { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: StartFrom; soloTicket?: number; /** The session runs only the agent-skills setup skill and holds no task. */ setupOnly?: boolean };
 
 export type SessionSummary = {
   id: string;
@@ -215,6 +215,9 @@ function latestTask(t: Transcript): { task: string; skill?: string } {
   const task = expanded ? text.slice(expanded[0].length) : text;
   return { task: task.length > 2000 ? `${task.slice(0, 2000)}…` : task, ...(expanded ? { skill: expanded[1] } : {}) };
 }
+
+/** The title of the session that runs only the setup skill (see `SessionManager.startSetupSession`). */
+const SETUP_TITLE = "Set up agent skills";
 
 const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs automatically on this repository's first pi-workbench session. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push.`;
 
@@ -476,6 +479,26 @@ export class SessionManager extends EventEmitter {
     }
   }
 
+  /**
+   * The session that sets up a repo's agent skills: one pipeline session that runs only the setup
+   * skill and holds no task. main.ts's repo routes call it when a repo is added (issue #99). The
+   * repo records the session, so a reader can tell that setup is in progress. A repo recorded as
+   * set up (see `repoSetupState`) needs none, so this returns null for it.
+   */
+  async startSetupSession(repoId: string): Promise<SessionSummary | null> {
+    const repo = requireTrackedRepo(this.db, repoId);
+    if ((await repoSetupState(this.db, repo)) === "set_up") return null;
+    // The recorded session is this repo's setup session: adding the repo again keeps it instead of
+    // starting a second one. A recorded session that is gone (Abandon) leaves nothing to keep.
+    const recorded = repo.setup_session
+      ? (this.db.prepare("SELECT id, repo_id FROM sessions WHERE id = ?").get(repo.setup_session) as { id: string; repo_id: string } | undefined)
+      : undefined;
+    if (recorded?.repo_id === repo.id) return this.summary(recorded.id);
+    const s = await this.createSession({ repoId: repo.id, title: SETUP_TITLE, prompt: "", mode: "pipeline", setupOnly: true }, repo);
+    this.db.prepare("UPDATE repos SET setup_session = ? WHERE id = ?").run(s.id, repo.id);
+    return s;
+  }
+
   private async createSession(input: CreateInput, repo: RepoRow) {
     const autoApprove = autoApproveMode(input.autoApprove);
     // Absent or null means no, as null means inherit for autoApprove.
@@ -497,7 +520,9 @@ export class SessionManager extends EventEmitter {
     if (startFrom && input.mode === "direct")
       throw Object.assign(new Error("Solving an issue needs a pipeline session"), { status: 400 });
     const task = (input.prompt ?? "").trim();
-    if (mode === "pipeline" && !task && !startFrom) throw Object.assign(new Error("Describe what you want built; grill-me starts from it"), { status: 400 });
+    // A setup session (see `startSetupSession`) carries no task: the setup skill is its whole job.
+    const setupOnly = input.setupOnly === true;
+    if (mode === "pipeline" && !task && !startFrom && !setupOnly) throw Object.assign(new Error("Describe what you want built; grill-me starts from it"), { status: 400 });
     const issueRef = input.issueRef?.trim() || null;
     if (startFrom) {
       if (!issueRef) throw Object.assign(new Error("Solving an issue needs its issue ref (issueRef)"), { status: 400 });
@@ -528,11 +553,11 @@ export class SessionManager extends EventEmitter {
       }
       this.insertTickets(id, ticketInputs);
     }
-    const phase: Phase = needsSetup ? "setup" : plan ? plan.phase : mode === "pipeline" ? "grill" : "direct";
+    const phase: Phase = setupOnly || needsSetup ? "setup" : plan ? plan.phase : mode === "pipeline" ? "grill" : "direct";
     // The first prompt; a setup run holds it until setup is done. A rework holds its rework
     // prompt, a split its split prompt, a plain task the task itself; Solve holds nothing
-    // (its recorded ticket starts the run after setup).
-    const held = plan?.held ? plan.held(seed!, getModelSettings(this.db).contextWindow) : task ? input.prompt : null;
+    // (its recorded ticket starts the run after setup). A setup session holds nothing either.
+    const held = setupOnly ? null : plan?.held ? plan.held(seed!, getModelSettings(this.db).contextWindow) : task ? input.prompt : null;
     // The phase releaseHeld moves the session to when a held prompt is released.
     const heldPhase = held ? (plan ? plan.phase : mode === "pipeline" ? "grill" : "direct") : null;
     this.db
@@ -566,7 +591,7 @@ export class SessionManager extends EventEmitter {
     const s = this.state(id);
     s.loaded = true;
     await this.start(id);
-    if (needsSetup) {
+    if (setupOnly || needsSetup) {
       s.setupRunning = true;
       await this.send(id, SETUP_PROMPT);
     } else if (plan?.tickets) {

@@ -51,6 +51,7 @@ export async function addRepo(db: Db, input: { owner: string; name: string; defa
     private: input.private ? 1 : 0,
     added_at: Date.now(),
     setup_state: null,
+    setup_session: null,
   };
   await syncClone(row, env);
   db.prepare(

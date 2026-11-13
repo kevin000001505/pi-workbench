@@ -12,7 +12,8 @@ import type { AddressInfo } from "node:net";
  * - "ask" → ask_user with two options
  * - "list" → bash `ls`
  * - "load skill" / "load typesafe" → the extension's Skill tool for `tdd` / `typesafe-ai`
- * - "setup-matt-pocock-skills" → writes docs/agents/issue-tracker.md, then commits
+ * - "setup-matt-pocock-skills" → writes docs/agents/issue-tracker.md, then commits; a setup skill
+ *   body that says SETUP_ASK asks the user a question first
  * - anything else → "Hello from the mock model."
  *
  * It also answers the workbench's local risk judge (issue #20): a non-streaming call for the judge
@@ -285,6 +286,22 @@ function retroScript(userText: string, step: number): Reply {
   return { text: "Retro done." };
 }
 
+const writeMarker = () => ({ tool: { name: "bash", args: { command: "mkdir -p docs/agents && printf 'GitHub issues\\n' > docs/agents/issue-tracker.md && echo wrote" } } });
+const commitSetup = () => ({ tool: { name: "bash", args: { command: 'git add -A && git commit -qm "Set up agent skills"' } } });
+
+/**
+ * The agent-skills setup run (the session that runs setup-matt-pocock-skills): write the marker file,
+ * then commit it. A setup skill whose body says SETUP_ASK — the setup-session tests' skill file —
+ * asks the user which issue tracker the repo uses before it writes anything.
+ */
+function setupScript(userText: string, step: number): Reply | undefined {
+  if (!userText.includes("setup-matt-pocock-skills")) return undefined;
+  const turns: Reply[] = userText.includes("SETUP_ASK")
+    ? [{ tool: { name: "ask_user", args: { question: "Which issue tracker does this repo use?", options: ["GitHub Issues", "No tracker"] } } }, writeMarker(), commitSetup()]
+    : [writeMarker(), commitSetup()];
+  return turns[step] ?? { text: "Setup done." };
+}
+
 function script(messages: { role: string; content: unknown }[]): Reply {
   const last = messages[messages.length - 1];
   const lastUserIdx = messages.map((m) => m.role).lastIndexOf("user");
@@ -294,20 +311,11 @@ function script(messages: { role: string; content: unknown }[]): Reply {
   const conversation = messages.filter((m) => m.role === "user").map((m) => textOf(m.content)).join("\n");
   const piped = pipelineScript(userText, step, last?.role === "tool" ? textOf(last.content) : "", conversation);
   if (piped) return piped;
+  const setup = setupScript(userText, step);
+  if (setup) return setup;
   if (last?.role === "tool") {
     const result = textOf(last.content).split("\n")[0].slice(0, 80);
-    if (userText.includes("setup-matt-pocock-skills") && !messages.some((m) => m.role === "assistant" && JSON.stringify(m).includes("git commit"))) {
-      return { tool: { name: "bash", args: { command: 'git add -A && git commit -qm "Set up agent skills"' } } };
-    }
     return { text: `Done: ${result}` };
-  }
-  if (userText.includes("setup-matt-pocock-skills")) {
-    return {
-      tool: {
-        name: "bash",
-        args: { command: "mkdir -p docs/agents && printf 'GitHub issues\\n' > docs/agents/issue-tracker.md && echo wrote" },
-      },
-    };
   }
   if (/\bssh\b/i.test(userText)) return { tool: { name: "bash", args: { command: "ssh Media true" } } };
   if (/\btwice\b/i.test(userText)) {
