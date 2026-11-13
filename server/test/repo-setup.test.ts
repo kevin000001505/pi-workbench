@@ -101,6 +101,16 @@ const remoteHasMarker = (owner: string, name: string) => {
   }
 };
 
+/** The worktree is mid-merge. */
+const mergeHeadExists = (dir: string) => {
+  try {
+    sh(dir, "rev-parse", "-q", "--verify", "MERGE_HEAD");
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const repoRow = (id: string) => {
   const d = db();
   try {
@@ -275,6 +285,9 @@ test("a setup run that cannot land its commit on the default branch leaves the r
   });
   assert.equal(flagged.column, "todo");
   assert.match(flagged.attention, /could not land its commit on kevin\/conflicted's main branch/, "the landing failed on the moved default branch");
+
+  // The worktree is left clean: the merge the workbench could not settle is aborted.
+  assert.equal(mergeHeadExists(path.join(dataDir, "worktrees", started.json.id)), false, "the merge the workbench could not settle is aborted");
   assert.equal(await setupState("kevin/conflicted"), "not_set_up");
   assert.equal(repoRow("kevin/conflicted").setup_session, null);
 

@@ -1196,6 +1196,7 @@ export class SessionManager extends EventEmitter {
     if (!repo) return;
     const env = await this.gitEnv();
     const base = row.base_branch;
+    let mergeAttempted = false;
     const landingFailed = (err: unknown) => {
       recordSetupState(this.db, repo.id, "not_set_up");
       recordSetupSession(this.db, repo.id, null);
@@ -1211,11 +1212,14 @@ export class SessionManager extends EventEmitter {
           await git(row.worktree, ["push", "origin", `HEAD:refs/heads/${base}`], env);
         } catch {
           // The default branch moved while setup ran: merge it in and push the result.
+          mergeAttempted = true;
           await git(row.worktree, ["merge", "--no-edit", `origin/${base}`], env);
           await git(row.worktree, ["push", "origin", `HEAD:refs/heads/${base}`], env);
         }
       }
     } catch (err) {
+      // A merge that conflicted stays aborted: the card flags the landing, and no half-done merge is left.
+      if (mergeAttempted) await git(row.worktree, ["merge", "--abort"], env).catch(() => {});
       landingFailed(err);
       return;
     }
