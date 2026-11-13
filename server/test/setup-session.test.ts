@@ -19,6 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 import { startReviewServer } from "./review-server.ts";
+import { ISSUE_TRACKER_DOC } from "./remote-repo.ts";
 
 const { hasPi, tmp, base, gh, api, waitFor, summary, board, llm } = await startReviewServer("setup-session");
 const skip = !hasPi && "pi CLI not found";
@@ -26,8 +27,6 @@ const skip = !hasPi && "pi CLI not found";
 // process.env too early, see review-server.ts).
 const { SETUP_MARKER } = await import("../src/config.ts");
 
-/** What setup-matt-pocock-skills commits: the marker the recorded setup state was read from. */
-const ISSUE_TRACKER_DOC = "# Issue tracker\n\nGitHub Issues.\n";
 /** The mock model's setup skill writes this into the marker file. */
 const MARKER_TEXT = "GitHub issues";
 

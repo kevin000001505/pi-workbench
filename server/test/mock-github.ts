@@ -3,6 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
+import { seedBareRepo } from "./remote-repo.ts";
 
 /**
  * Just enough of the GitHub REST API for the workbench, backed by bare repos under `root`
@@ -47,21 +48,8 @@ export function startMockGitHub(root: string, login = "kevin") {
   };
 
   /** `seedFiles` are extra paths on the default branch, e.g. the agent-skills setup marker. */
-  const createBare = (owner: string, name: string, seedFiles: Record<string, string> = {}) => {
-    const bare = path.join(root, owner, `${name}.git`);
-    const seed = fs.mkdtempSync(path.join(root, ".seed-"));
-    sh(seed, "init", "-q", "-b", "main");
-    fs.writeFileSync(path.join(seed, "README.md"), `# ${name}\n`);
-    for (const [rel, content] of Object.entries(seedFiles)) {
-      fs.mkdirSync(path.join(seed, path.dirname(rel)), { recursive: true });
-      fs.writeFileSync(path.join(seed, rel), content);
-    }
-    sh(seed, "add", ".");
-    sh(seed, "-c", "user.name=gh", "-c", "user.email=gh@x", "commit", "-qm", "Initial commit");
-    fs.mkdirSync(path.dirname(bare), { recursive: true });
-    sh(root, "clone", "-q", "--bare", seed, bare);
-    fs.rmSync(seed, { recursive: true, force: true });
-  };
+  const createBare = (owner: string, name: string, seedFiles: Record<string, string> = {}) =>
+    seedBareRepo(root, owner, name, seedFiles);
   const repoJson = (owner: string, name: string) => ({
     full_name: `${owner}/${name}`,
     name,

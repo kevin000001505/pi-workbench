@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import { startMockGitHub } from "./mock-github.ts";
+import { ISSUE_TRACKER_DOC, editRemoteFile } from "./remote-repo.ts";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wb-gh-"));
 const remotes = path.join(tmp, "remotes");
@@ -400,24 +401,8 @@ const addLocalRepo = async (db: any, name: string) => {
   return addRepo(db, { owner: "kevin", name, defaultBranch: "main", private: true }, env);
 };
 
-/** A stand-in for the file `setup-matt-pocock-skills` commits: the repo's setup marker. */
-const ISSUE_TRACKER_DOC = "# Issue tracker\n\nGitHub Issues.\n";
-
 /** Put `file` on a local remote's default branch (`content`), or take it off (`null`). */
-const changeRemoteFile = (name: string, file: string, content: string | null) => {
-  const work = fs.mkdtempSync(path.join(remotes, ".edit-"));
-  const git = (...args: string[]) => execFileSync("git", args, { cwd: work });
-  execFileSync("git", ["clone", "-q", path.join(remotes, "kevin", `${name}.git`), work]);
-  if (content === null) fs.rmSync(path.join(work, file));
-  else {
-    fs.mkdirSync(path.join(work, path.dirname(file)), { recursive: true });
-    fs.writeFileSync(path.join(work, file), content);
-  }
-  git("add", "-A");
-  git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", content === null ? `Remove ${file}` : `Add ${file}`);
-  git("push", "-q", "origin", "main");
-  fs.rmSync(work, { recursive: true, force: true });
-};
+const changeRemoteFile = (name: string, file: string, content: string | null) => editRemoteFile(remotes, "kevin", name, file, content);
 
 test("adding a repo whose default branch carries the setup marker records it as set up", async () => {
   const { openDb } = await import("../src/db.ts");
@@ -503,7 +488,7 @@ test("re-adding a repo already recorded as set up keeps it set up when git no lo
   const { config, SETUP_MARKER } = await import("../src/config.ts");
   const { recordedSetupState, repoNeedsSetup, repoSetupState } = await import("../src/repos.ts");
   const db = openDb(config.dbFile);
-  gh.createBare("kevin", "setup-keep", { [SETUP_MARKER]: "# Issue tracker\n\nGitHub Issues.\n" });
+  gh.createBare("kevin", "setup-keep", { [SETUP_MARKER]: ISSUE_TRACKER_DOC });
   const added = await addLocalRepo(db, "setup-keep");
   assert.equal(recordedSetupState(db, added.id), "set_up");
   // The marker goes off the default branch: git now says the repo needs setup, and the record says it does not.

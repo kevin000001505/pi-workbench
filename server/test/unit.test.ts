@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { after, before, test } from "node:test";
+import { after, before, mock, test } from "node:test";
 import { startMockJudge } from "./mock-judge.ts";
 import { applyEvent, emptyTranscript, withMessages } from "../../shared/transcript.ts";
 import { autoApproveView, configureAutoApprove, getAutoApproveSettings, judgePermission, localJudge, reviewPermission, saveAutoApproveKey, saveAutoApproveSettings, savedJudgeToken, savedReviewerKey, testJudge, transcriptExcerpt } from "../src/autoapprove.ts";
@@ -12,7 +12,9 @@ import { waitsOnUser } from "../../shared/pending.ts";
 import { openDb } from "../src/db.ts";
 import { redact } from "../src/git.ts";
 import { checkRequestOrigin, Router } from "../src/http.ts";
-import { recordedSetupState, requireTrackedRepo } from "../src/repos.ts";
+import { needsSetupRun, recordedSetupState, requireTrackedRepo } from "../src/repos.ts";
+import { SETUP_MARKER } from "../src/config.ts";
+import { ISSUE_TRACKER_DOC } from "./remote-repo.ts";
 import { GLOBAL_SCOPE, assertUserScope, SecretStore, userSecrets } from "../src/secrets.ts";
 import { DEFAULT_RULES, getApprovalSettings, getPipelineSettings, LLM_KEY_ENV, saveApprovalSettings, saveModelSettings, savePipelineSettings } from "../src/settings.ts";
 import { listSkills, parseFrontmatter } from "../src/skills.ts";
@@ -689,6 +691,39 @@ test("an older repos table gains the setup_session column, which holds the sessi
   // The column takes a session id: the repo records the one session that sets it up.
   db.prepare("UPDATE repos SET setup_session = 's1' WHERE id = 'me/old'").run();
   assert.equal((db.prepare("SELECT setup_session FROM repos WHERE id = 'me/old'").get() as any).setup_session, "s1");
+});
+
+test("a session's setup run comes from the repo's record, and only a repo with no record gets a marker check", () => {
+  const db = tmpDb();
+  const insert = db.prepare("INSERT INTO repos (id, owner, name, default_branch, private, added_at, setup_state) VALUES (?, 'me', ?, 'main', 1, 0, ?)");
+  insert.run("me/set-up", "set-up", "set_up");
+  insert.run("me/not-set-up", "not-set-up", "not_set_up");
+  insert.run("me/unrecorded", "unrecorded", null);
+  // Two worktrees that disagree with the records: one carries the setup marker, one does not.
+  const noMarker = fs.mkdtempSync(path.join(os.tmpdir(), "wb-wt-"));
+  const withMarker = fs.mkdtempSync(path.join(os.tmpdir(), "wb-wt-"));
+  fs.mkdirSync(path.join(withMarker, path.dirname(SETUP_MARKER)), { recursive: true });
+  fs.writeFileSync(path.join(withMarker, SETUP_MARKER), ISSUE_TRACKER_DOC);
+
+  // Count the marker reads worktreeNeedsSetup makes: fs.existsSync on the marker path.
+  const isThere = fs.existsSync;
+  const markerChecks: string[] = [];
+  mock.method(fs, "existsSync", (p: string | URL) => {
+    if (String(p).endsWith(SETUP_MARKER)) markerChecks.push(String(p));
+    return isThere(p);
+  });
+  try {
+    assert.equal(needsSetupRun(db, "me/set-up", noMarker), false, "a repo recorded as set up runs no setup, even where its worktree lacks the marker");
+    assert.equal(needsSetupRun(db, "me/not-set-up", withMarker), true, "a repo recorded as not set up runs it, even where its worktree carries the marker");
+    assert.deepEqual(markerChecks, [], "a repo with a record gets no marker check at all: the record answers");
+    assert.equal(needsSetupRun(db, "me/unrecorded", noMarker), true, "no record: the worktree check answers, and the marker is missing");
+    assert.equal(markerChecks.length, 1, "one marker check for a repo with no record");
+    assert.equal(needsSetupRun(db, "me/unrecorded", withMarker), false, "no record: the marker in the fresh worktree answers");
+    assert.equal(markerChecks.length, 2, "one check per worktree, and never more");
+    assert.equal(recordedSetupState(db, "me/unrecorded"), null, "the worktree check records nothing: only the add-time check and a landed setup push write the record");
+  } finally {
+    mock.restoreAll();
+  }
 });
 
 test("old done pipeline rows with a PR number open as pr, once", async () => {
