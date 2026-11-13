@@ -747,10 +747,10 @@ test("the tickets and split prompts size every ticket to the model's context win
   assert.match(ticketsPrompt(null, 262144), /context window is 256K tokens/, "follows the Model settings value");
 });
 
-test("the unclaimed-card starts pick phase, tickets, held prompt and spec in one table", async () => {
+test("the card starts and the repo setup start pick phase, tickets, held prompt and spec in one table", async () => {
   const { START_PLANS, isStartFrom, isSkillCall, ticketFromIssue } = await import("../src/pipeline.ts");
-  assert.deepEqual(Object.keys(START_PLANS).sort(), ["grill", "issue", "spec", "split", "tickets"]);
-  assert.ok(isStartFrom("split"), "names the five starts");
+  assert.deepEqual(Object.keys(START_PLANS).sort(), ["grill", "issue", "setup", "spec", "split", "tickets"]);
+  assert.ok(isStartFrom("split"), "names the six starts");
   assert.ok(isStartFrom("grill"), "Grill is one of them");
   assert.ok(!isStartFrom(null));
   assert.ok(!isStartFrom(3));
@@ -770,6 +770,9 @@ test("the unclaimed-card starts pick phase, tickets, held prompt and spec in one
   assert.equal(START_PLANS.split.spec, true, "a split takes the issue body as its spec");
   assert.equal(START_PLANS.spec.spec, false, "a rework re-saves its spec in the to-spec step");
   assert.equal(START_PLANS.grill.spec, false, "a grill writes its spec; the issue body is not it");
+  assert.equal(START_PLANS.setup.phase, "setup", "Run setup starts at the setup step");
+  assert.equal(START_PLANS.setup.needsIssue, false, "the repo setup start names no issue and reads no tracker");
+  for (const name of ["tickets", "issue", "split", "spec", "grill"]) assert.equal(START_PLANS[name as keyof typeof START_PLANS].needsIssue, true, `${name} names an issue`);
   // Every held prompt is a full skill call, so setup releases it as it is: see releaseHeld.
   for (const [name, plan] of Object.entries(START_PLANS)) {
     if (plan.held) assert.ok(isSkillCall(plan.held!(seed)), `${name} holds a full skill call`);

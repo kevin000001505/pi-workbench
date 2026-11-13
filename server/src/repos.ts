@@ -50,13 +50,36 @@ export async function addRepo(db: Db, input: { owner: string; name: string; defa
     default_branch: input.defaultBranch,
     private: input.private ? 1 : 0,
     added_at: Date.now(),
+    setup_state: null,
+    setup_session: null,
   };
   await syncClone(row, env);
+  // A re-add refreshes the clone and the GitHub facts. The recorded setup state stays: the workbench
+  // writes it when it checks a repo once, and when its setup session lands the files.
   db.prepare(
     `INSERT INTO repos (id, owner, name, default_branch, private, added_at) VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET default_branch = excluded.default_branch, private = excluded.private`,
   ).run(row.id, row.owner, row.name, row.default_branch, row.private, row.added_at);
-  return row;
+  return getRepo(db, row.id)!;
+}
+
+/** What the workbench records about a repo's agent-skills setup. */
+export type RepoSetupState = "set_up" | "not_set_up" | "in_progress";
+
+const SETUP_STATES: RepoSetupState[] = ["set_up", "not_set_up", "in_progress"];
+
+/** The state recorded on the repo row; null for a repo added before states were recorded. */
+export function recordedSetupState(repo: RepoRow): RepoSetupState | null {
+  return SETUP_STATES.includes(repo.setup_state as RepoSetupState) ? (repo.setup_state as RepoSetupState) : null;
+}
+
+export function recordSetupState(db: Db, repoId: string, state: RepoSetupState) {
+  db.prepare("UPDATE repos SET setup_state = ? WHERE id = ?").run(state, repoId);
+}
+
+/** Record the session that runs the repo's setup, or clear it (pass null). */
+export function recordSetupSession(db: Db, repoId: string, sessionId: string | null) {
+  db.prepare("UPDATE repos SET setup_session = ? WHERE id = ?").run(sessionId, repoId);
 }
 
 /** Whether setup-matt-pocock-skills has been committed to the repo's default branch. */

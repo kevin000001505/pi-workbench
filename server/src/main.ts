@@ -102,7 +102,8 @@ async function repoView(r: ReturnType<typeof listRepos>[number]) {
     name: r.name,
     defaultBranch: r.default_branch,
     private: !!r.private,
-    needsSetup: fs.existsSync(clonePath(r)) ? await repoNeedsSetup(r) : true,
+    // The state the workbench recorded on the repo row; the git check runs only for a repo that has none.
+    setup: await sessions.setupState(r.id),
   };
 }
 
@@ -186,6 +187,10 @@ const router = new Router()
     fs.rmSync(clonePath(repo), { recursive: true, force: true });
     return { ok: true };
   })
+
+  // Run setup on a repo row: start that repo's agent-skills setup session. A repo whose setup
+  // session already works is refused with 409, so no repo runs the setup twice.
+  .on("POST", "/api/repos/:owner/:name/setup", async ({ params }) => sessions.startSetup(`${params.owner}/${params.name}`))
 
   // --- board ---------------------------------------------------------------------------------
   .on("GET", "/api/board", async ({ query }) => {

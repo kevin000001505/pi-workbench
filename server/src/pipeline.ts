@@ -200,14 +200,15 @@ export function ticketFromIssue(spec: { number: number; title: string; body: str
 }
 
 /** The start a session takes from an unclaimed card's move or action, picked by the issue's open ticket sub-issues. */
-export type StartFrom = "tickets" | "spec" | "issue" | "split" | "grill";
+export type StartFrom = "tickets" | "spec" | "issue" | "split" | "grill" | "setup";
 
 /**
  * What one StartFrom begins a session with: its phase, the prompt held until setup is done
- * (or sent at once), the tickets recorded at once, and its spec bookkeeping. The one table for
- * the unclaimed-card starts, so the move route, the grill route and SessionManager read them the
- * same way. A held prompt is always a full skill call (see isSkillCall): SessionManager sends it
- * as it is.
+ * (or sent at once), the tickets recorded at once, and its spec bookkeeping. The one table for the
+ * card starts and the repo setup start, so the move route, the grill route, the setup route and
+ * SessionManager read them the same way. A held prompt is always a full skill call (see
+ * isSkillCall): SessionManager sends it as it is. `needsIssue` is false only for the repo setup
+ * start, which names no issue and reads no tracker.
  */
 export type StartPlan = {
   phase: Phase;
@@ -222,6 +223,9 @@ export type StartPlan = {
   /** True when the seed issue is the session's spec from the start, so its URL is the session's spec ref.
    * A Grill starts from the issue as its origin only: grill and to-spec write the spec. */
   specRefFromSeed: boolean;
+  /** True when the start names an issue of the repo and reads its seed from the tracker. The repo
+   * setup start needs no issue: it carries no task and reads no tracker. */
+  needsIssue: boolean;
 };
 
 export const START_PLANS: Record<StartFrom, StartPlan> = {
@@ -231,6 +235,7 @@ export const START_PLANS: Record<StartFrom, StartPlan> = {
     needsSubIssues: true,
     spec: true,
     specRefFromSeed: true,
+    needsIssue: true,
   },
   issue: {
     phase: "implement",
@@ -238,6 +243,7 @@ export const START_PLANS: Record<StartFrom, StartPlan> = {
     needsSubIssues: false,
     spec: true,
     specRefFromSeed: true,
+    needsIssue: true,
   },
   split: {
     phase: "tickets",
@@ -245,6 +251,7 @@ export const START_PLANS: Record<StartFrom, StartPlan> = {
     needsSubIssues: false,
     spec: true,
     specRefFromSeed: true,
+    needsIssue: true,
   },
   spec: {
     phase: "grill",
@@ -252,6 +259,7 @@ export const START_PLANS: Record<StartFrom, StartPlan> = {
     needsSubIssues: true,
     spec: false,
     specRefFromSeed: true,
+    needsIssue: true,
   },
   grill: {
     phase: "grill",
@@ -259,10 +267,20 @@ export const START_PLANS: Record<StartFrom, StartPlan> = {
     needsSubIssues: false,
     spec: false,
     specRefFromSeed: false,
+    needsIssue: true,
+  },
+  setup: {
+    phase: "setup",
+    needsSubIssues: false,
+    spec: false,
+    specRefFromSeed: false,
+    needsIssue: false,
   },
 };
 
-/** True when an unchecked create body's startFrom names one of the unclaimed-card starts. */
+/** True when an unchecked value names one of the start plans. The create route names only "tickets";
+the other starts come from the move, grill, solve and setup routes, and the repo setup start has
+SessionManager.startSetup as its only way in. */
 export const isStartFrom = (v: unknown): v is StartFrom => typeof v === "string" && v in START_PLANS;
 
 function specSection(spec: string | null, specRef: string | null) {

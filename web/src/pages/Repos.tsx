@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
-import type { GhRepo, Repo } from "../types.ts";
+import type { GhRepo, Repo, RepoSetupState } from "../types.ts";
 import { Empty, Modal, PageHeader, Spinner } from "../ui.tsx";
 
 function AddRepoModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
@@ -104,6 +104,15 @@ function CreateRepoModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
   );
 }
 
+const setupTag = (state: RepoSetupState) =>
+  state === "set_up" ? (
+    <span className="tag tag-ok">skills set up</span>
+  ) : state === "in_progress" ? (
+    <span className="tag">setup in progress</span>
+  ) : (
+    <span className="tag tag-warn">skills not set up</span>
+  );
+
 export function Repos() {
   const { toast, sessions } = useStore();
   const [repos, setRepos] = useState<Repo[] | null>(null);
@@ -147,11 +156,7 @@ export function Repos() {
                 default branch <span className="mono">{r.defaultBranch}</span> · {count} session{count === 1 ? "" : "s"}
               </p>
               <p className="small">
-                {r.needsSetup ? (
-                  <span className="tag tag-warn">skills not set up: the next session runs setup</span>
-                ) : (
-                  <span className="tag tag-ok">skills set up</span>
-                )}
+                {setupTag(r.setup)}
               </p>
               <div className="row gap">
                 <a className="btn btn-sm btn-primary" href={`#/new/${encodeURIComponent(r.id)}`}>
