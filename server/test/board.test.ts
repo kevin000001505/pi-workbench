@@ -97,6 +97,20 @@ const columnOfCard = (repoId: string) => async (id: string) => (await board(repo
  * A test that lists a repo's feature cards drops that card with `featureCards`. */
 const SETUP_CARD = "Set up agent skills";
 const featureCards = async (repo?: string) => (await board(repo)).filter((c) => c.title !== SETUP_CARD);
+/** A board response's Done cards without the setup card (issue #99). */
+const doneCards = (cards: any[]) => cards.filter((c) => c.column === "done" && c.title !== SETUP_CARD);
+
+/**
+ * Commit the card's own work in its worktree, so its PR carries that work and nothing else. A new
+ * session may still run the setup step on its own branch (the repo's setup card may not have landed
+ * its commit yet, issue #100), so the card's work is what the test writes here.
+ */
+function commitWork(worktree: string, line = "the quick fix") {
+  fs.writeFileSync(path.join(worktree, "work.txt"), `${line}\n`);
+  const sh = (...args: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@x", ...args], { cwd: worktree, stdio: "pipe" });
+  sh("add", "work.txt");
+  sh("commit", "-qm", "Note the work");
+}
 
 /**
  * The ticket run starts the mock model got for one ticket: requests whose last message is that
@@ -1444,18 +1458,14 @@ test("a direct session's PR puts its card in Review with its PR badge; a backwar
   assert.equal((await api("POST", "/api/repos", { id: "kevin/directpr" })).status, 200);
   const col = columnOfCard("kevin/directpr");
 
-  // The card's own commit is what its PR carries: the repo's setup files are already on the default
-  // branch (issue #100), so the session's own work is the only commit the branch can have.
+  // A direct session may still run the setup step on its own branch, so the test commits the card's
+  // own work: that commit is what its PR carries.
   const d = await api("POST", "/api/sessions", { repoId: "kevin/directpr", title: "Quick", prompt: "say hello", mode: "direct" });
   assert.equal(d.status, 200, JSON.stringify(d.json));
   const id = d.json.id;
   await waitFor(async () => (await summary(id)).phase === "direct", 120_000);
   assert.equal(await col(id), "doing", "no PR yet: the card is in Doing");
-  const own = path.join(process.env.DATA_DIR!, "worktrees", id);
-  fs.writeFileSync(path.join(own, "work.txt"), "the quick fix\n");
-  const ownGit = (...args: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@x", ...args], { cwd: own, stdio: "pipe" });
-  ownGit("add", "work.txt");
-  ownGit("commit", "-qm", "Note the work");
+  commitWork(path.join(process.env.DATA_DIR!, "worktrees", id));
 
   const events = await boardEvents();
   const before = events.seen.length;
@@ -1512,19 +1522,15 @@ async function directToReview(repoId: string, title: string, opts: { issueRef?: 
     ...(opts.issueRef ? { issueRef: opts.issueRef } : {}),
   })).json;
   assert.ok(d.id, JSON.stringify(d));
-  // The card's own commit is what its PR carries: the repo's setup files may already be on the
-  // default branch (issue #100), so the session's setup step commits nothing of its own.
+  // A direct session may still run the setup step on its own branch, so the test commits the card's
+  // own work: that commit is what its PR carries.
   await waitFor(async () => (await summary(d.id)).phase === "direct", 120_000);
-  const ownWorktree = path.join(process.env.DATA_DIR!, "worktrees", d.id);
-  fs.writeFileSync(path.join(ownWorktree, "work.txt"), "the quick fix\n");
-  const ownGit = (...args: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@x", ...args], { cwd: ownWorktree, stdio: "pipe" });
-  ownGit("add", "work.txt");
-  ownGit("commit", "-qm", "Note the work");
+  const worktree = path.join(process.env.DATA_DIR!, "worktrees", d.id);
+  commitWork(worktree);
   const pr = await api("POST", `/api/sessions/${d.id}/pr`, { title, body: "## Summary\n- work.txt" });
   assert.equal(pr.status, 200, JSON.stringify(pr.json));
   const card = await waitFor(async () => (await board(repoId)).find((c) => c.id === d.id && c.column === "review"), 120_000);
   const pull = gh.pulls.find((p) => p.number === card.pr.number);
-  const worktree = path.join(process.env.DATA_DIR!, "worktrees", d.id);
   return { id: d.id as string, pr: pull, number: pr.json.number as number, worktree, branch: (await summary(d.id)).branch as string };
 }
 
@@ -1580,7 +1586,6 @@ test("Review → Done on a direct card is Approve: its PR merges with a merge co
   assert.equal(card.column, "done");
   assert.equal(card.pr.state, "merged");
   assert.equal(card.doneAt, moved.json.doneAt);
-  const doneCards = (cards: any[]) => cards.filter((c) => c.column === "done" && c.title !== SETUP_CARD);
   assert.deepEqual(
     doneCards(cards).map((c: any) => c.id),
     [id, older.id],
@@ -1600,7 +1605,7 @@ test("Review → Done on a direct card is Approve: its PR merges with a merge co
   assert.equal(issueCard.column, "done");
   assert.equal(issueCard.title, "Docs: setup guide");
   assert.ok(issueCard.doneAt >= at, "the issue carries its close time");
-  assert.deepEqual(after.filter((c: any) => c.column === "done" && c.title !== SETUP_CARD).map((c: any) => c.id), ["issue:3", older.id]);
+  assert.deepEqual(doneCards(after).map((c: any) => c.id), ["issue:3", older.id]);
 });
 
 test("a board load delivers a direct card whose PR was merged by hand on GitHub", { skip: !hasPi && "pi CLI not found" }, async () => {

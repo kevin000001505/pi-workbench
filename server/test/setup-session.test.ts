@@ -4,9 +4,9 @@
  * setup skill, so setup shows on the board and its questions reach the user; when its run settles
  * with the setup marker committed, the server pushes that commit to the default branch — no pull
  * request, no Approve — records the repo as set up and lands the card in Done. A push the remote
- * refuses flags the card and leaves the repo not set up. Drives the real server (main.ts) over HTTP
- * with a real `pi --mode rpc` against the scripted mock model and the mock GitHub. Skips when the
- * pi CLI isn't available.
+ * refuses flags the card and leaves the repo not set up, and a setup run the user stops lands
+ * nothing. Drives the real server (main.ts) over HTTP with a real `pi --mode rpc` against the
+ * scripted mock model and the mock GitHub. Skips when the pi CLI isn't available.
  *
  * Seams under test: the HTTP API the UI uses (POST /api/repos, POST /api/repos/create,
  * GET /api/sessions, GET /api/sessions/:id, GET /api/board, POST /api/sessions/:id/respond), the
@@ -54,13 +54,13 @@ async function boardEvents() {
   return { seen, close: () => ws.close() };
 }
 
-
 /** This test file's copy of the setup skill. Its body carries SETUP_ASK, which the mock model reads
- * as "this setup asks the user a question first". */
-fs.writeFileSync(
-  path.join(tmp, "skills", "setup-matt-pocock-skills", "SKILL.md"),
-  `---\nname: setup-matt-pocock-skills\ndescription: setup-matt-pocock-skills test skill\n---\nSETUP_ASK: ask which issue tracker the repo uses, then write the files.\n`,
-);
+ * as "this setup asks the user a question first". A body that also carries SETUP_SLOW keeps the
+ * mock's setup run open after its commit (see `setupScript` in mock-llm.ts). */
+const SETUP_SKILL = path.join(tmp, "skills", "setup-matt-pocock-skills", "SKILL.md");
+const setupSkillBody = (...flags: string[]) =>
+  `---\nname: setup-matt-pocock-skills\ndescription: setup-matt-pocock-skills test skill\n---\n${["SETUP_ASK: ask which issue tracker the repo uses, then write the files.", ...flags].join(" ")}\n`;
+fs.writeFileSync(SETUP_SKILL, setupSkillBody());
 
 let ready: Promise<void> | undefined;
 /** The token and model the server needs before it can add a repo. */
@@ -263,6 +263,40 @@ test("a refused setup push flags the card with the reason and leaves the repo re
   assert.equal(onMain("kevin", "protected", SETUP_MARKER), null, "the default branch has no setup file");
 });
 
+test("a setup run the user stops after its commit lands nothing: the card keeps To do with the reason, and the repo stays not set up", { skip }, async () => {
+  await init();
+  // The mock's setup run keeps working after its commit, so the stop lands between the two.
+  fs.writeFileSync(SETUP_SKILL, setupSkillBody("SETUP_SLOW: keep working after the commit."));
+  gh.createBare("kevin", "stopped");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/stopped" })).status, 200);
+  const s = (await sessionsOf("kevin/stopped"))[0];
+  await answerSetupAsk(s.id);
+
+  const worktree = path.join(process.env.DATA_DIR!, "worktrees", s.id);
+  try {
+    await waitFor(() => {
+      try {
+        return sh(worktree, "log", "--format=%s", "-1").includes("Set up agent skills");
+      } catch {
+        return false;
+      }
+    }, 60_000);
+    assert.equal((await api("POST", `/api/sessions/${s.id}/abort`, {})).status, 200);
+
+    const stopped = await waitFor(async () => {
+      const sum = await summary(s.id);
+      return sum.attention && sum.status !== "running" ? sum : undefined;
+    }, 60_000);
+
+    assert.match(stopped.attention, /setup run was stopped/, JSON.stringify(stopped.attention));
+    assert.equal(stopped.phase, "setup", "a stopped setup run is not Done");
+    assert.equal((await board("kevin/stopped")).find((c) => c.id === s.id)?.column, "todo");
+    assert.equal((await repoRow("kevin/stopped")).needsSetup, true, "the repo stays recorded as not set up");
+    assert.equal(onMain("kevin", "stopped", SETUP_MARKER), null, "the stopped run's commit did not reach the default branch");
+  } finally {
+    fs.writeFileSync(SETUP_SKILL, setupSkillBody());
+  }
+});
 
 test("Abandon clears the repo's record of its setup session, so a later add gets a fresh one", { skip }, async () => {
   await init();

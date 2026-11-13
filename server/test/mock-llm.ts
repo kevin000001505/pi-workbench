@@ -288,17 +288,20 @@ function retroScript(userText: string, step: number): Reply {
 
 const writeMarker = () => ({ tool: { name: "bash", args: { command: "mkdir -p docs/agents && printf 'GitHub issues\\n' > docs/agents/issue-tracker.md && echo wrote" } } });
 const commitSetup = () => ({ tool: { name: "bash", args: { command: 'git add -A && git commit -qm "Set up agent skills"' } } });
+const keepWorking = () => ({ tool: { name: "bash", args: { command: "sleep 6 && echo still setting up" } } });
 
 /**
  * The agent-skills setup run (the session that runs setup-matt-pocock-skills): write the marker file,
  * then commit it. A setup skill whose body says SETUP_ASK — the setup-session tests' skill file —
- * asks the user which issue tracker the repo uses before it writes anything.
+ * asks the user which issue tracker the repo uses before it writes anything. A body that says
+ * SETUP_SLOW keeps the run open after the commit, so a test can stop it between the two.
  */
 function setupScript(userText: string, step: number): Reply | undefined {
   if (!userText.includes("setup-matt-pocock-skills")) return undefined;
-  const turns: Reply[] = userText.includes("SETUP_ASK")
-    ? [{ tool: { name: "ask_user", args: { question: "Which issue tracker does this repo use?", options: ["GitHub Issues", "No tracker"] } } }, writeMarker(), commitSetup()]
-    : [writeMarker(), commitSetup()];
+  const turns: Reply[] = [];
+  if (userText.includes("SETUP_ASK")) turns.push({ tool: { name: "ask_user", args: { question: "Which issue tracker does this repo use?", options: ["GitHub Issues", "No tracker"] } } });
+  turns.push(writeMarker(), commitSetup());
+  if (userText.includes("SETUP_SLOW")) turns.push(keepWorking());
   return turns[step] ?? { text: "Setup done." };
 }
 
