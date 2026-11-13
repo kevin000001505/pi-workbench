@@ -96,6 +96,53 @@ export async function repoSetupState(db: Db, repo: RepoRow): Promise<RepoSetupSt
   return recordedSetupState(db, repo.id) ?? (await recordRepoSetup(db, repo));
 }
 
+/** Record that the repo's agent-skills setup files are on its default branch: every later read says it is set up. */
+export function recordSetUp(db: Db, repoId: string) {
+  db.prepare("UPDATE repos SET setup_state = 'set_up' WHERE id = ?").run(repoId);
+}
+
+/** Why the setup commit did not land on the default branch, in git's own words plus the branch it failed on. */
+export type SetupPush = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Land the setup session's commit on the repo's default branch: no pull request, no Approve.
+ * Fetch the branch, then push the setup branch's HEAD onto it. When the push is refused because
+ * the branch moved, merge it into the setup branch and push again; a merge that stops on a
+ * conflict is undone, so the worktree stays as it was. Every way this can fail comes back as the
+ * reason, and the default branch keeps what it had.
+ */
+export async function pushSetupCommit(repo: RepoRow, worktree: string, env: GitEnv): Promise<SetupPush> {
+  const base = repo.default_branch;
+  const sh = (args: string[]) => git(worktree, args, env);
+  const push = () => sh(["push", "-q", "origin", `HEAD:refs/heads/${base}`]);
+  const words = (err: unknown) => (err as Error).message;
+  try {
+    await sh(["fetch", "-q", "origin", base]);
+  } catch (err) {
+    return { ok: false, reason: `fetching ${base} failed: ${words(err)}` };
+  }
+  try {
+    await push();
+    return { ok: true };
+  } catch (err) {
+    // Ask the remote whether it moved: a push git refuses for another reason is not a merge away.
+    await sh(["fetch", "-q", "origin", base]).catch(() => {});
+    const moved = !(await sh(["merge-base", "--is-ancestor", `origin/${base}`, "HEAD"]).then(() => true, () => false));
+    if (!moved) return { ok: false, reason: `pushing the setup commit to ${base} failed: ${words(err)}` };
+    const merged = await sh(["merge", "--no-edit", `origin/${base}`]).then(() => true, () => false);
+    if (!merged) {
+      await sh(["merge", "--abort"]).catch(() => {});
+      return { ok: false, reason: `${base} moved, and merging it into the setup branch stopped on a conflict` };
+    }
+    try {
+      await push();
+      return { ok: true };
+    } catch (err2) {
+      return { ok: false, reason: `pushing the setup commit to ${base} again after merging ${base} in failed: ${words(err2)}` };
+    }
+  }
+}
+
 export const worktreeNeedsSetup = (worktree: string) => !fs.existsSync(path.join(worktree, SETUP_MARKER));
 
 /** A fresh worktree on a new branch from origin/<base>, so parallel sessions never share a checkout. */

@@ -58,17 +58,16 @@ async function directToReview(repoId: string, title: string, opts: { issueRef?: 
     ...(opts.issueRef ? { issueRef: opts.issueRef } : {}),
   })).json;
   assert.ok(d.id, JSON.stringify(d));
-  // A fresh repo has no setup marker: setup commits on the branch, then the task runs.
+  // The card's own commit is what its PR carries: the repo's setup files may already be on the
+  // default branch (issue #100), so the session's setup step commits nothing of its own.
   await waitFor(async () => (await summary(d.id)).phase === "direct", 120_000);
   const worktree = path.join(process.env.DATA_DIR!, "worktrees", d.id);
-  if (opts.workLine) {
-    // The branch's own line in work.txt: a base branch that adds a line there conflicts with it.
-    fs.writeFileSync(path.join(worktree, "work.txt"), `${opts.workLine}\n`);
-    const sh = (...args: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@x", ...args], { cwd: worktree, stdio: "pipe" });
-    sh("add", "work.txt");
-    sh("commit", "-qm", "Note the work");
-  }
-  const pr = await api("POST", `/api/sessions/${d.id}/pr`, { title, body: "## Summary\n- docs/agents/issue-tracker.md" });
+  const workLine = opts.workLine ?? "the quick fix";
+  fs.writeFileSync(path.join(worktree, "work.txt"), `${workLine}\n`);
+  const sh = (...args: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@x", ...args], { cwd: worktree, stdio: "pipe" });
+  sh("add", "work.txt");
+  sh("commit", "-qm", "Note the work");
+  const pr = await api("POST", `/api/sessions/${d.id}/pr`, { title, body: "## Summary\n- work.txt" });
   assert.equal(pr.status, 200, JSON.stringify(pr.json));
   const card = await waitFor(async () => (await board(repoId)).find((c) => c.id === d.id && c.column === "review"), 120_000);
   return {
