@@ -13,7 +13,7 @@ import { checkRequestOrigin, type Ctx, HttpError, readJson, Router, sendJson, se
 import { listModelsAt, probeEndpoint } from "./llm.ts";
 import { githubDelivery } from "./delivery.ts";
 import { draftPr, openPr, changes } from "./prs.ts";
-import { addRepo, assertRepoName, clonePath, getRepo, listRepos, repoNeedsSetup, requireTrackedRepo } from "./repos.ts";
+import { addRepo, assertRepoName, clonePath, getRepo, listRepos, repoSetupState, requireTrackedRepo } from "./repos.ts";
 import { assertUserScope, GLOBAL_SCOPE, SecretStore, userSecrets } from "./secrets.ts";
 import { startRescueProxy } from "./rescue-proxy.ts";
 import { SessionManager } from "./sessions.ts";
@@ -102,7 +102,7 @@ async function repoView(r: ReturnType<typeof listRepos>[number]) {
     name: r.name,
     defaultBranch: r.default_branch,
     private: !!r.private,
-    needsSetup: fs.existsSync(clonePath(r)) ? await repoNeedsSetup(r) : true,
+    needsSetup: (await repoSetupState(db, r)) === "not_set_up",
   };
 }
 

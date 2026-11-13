@@ -50,13 +50,15 @@ export async function addRepo(db: Db, input: { owner: string; name: string; defa
     default_branch: input.defaultBranch,
     private: input.private ? 1 : 0,
     added_at: Date.now(),
+    setup_state: null,
   };
   await syncClone(row, env);
   db.prepare(
     `INSERT INTO repos (id, owner, name, default_branch, private, added_at) VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET default_branch = excluded.default_branch, private = excluded.private`,
   ).run(row.id, row.owner, row.name, row.default_branch, row.private, row.added_at);
-  return row;
+  await recordRepoSetup(db, row);
+  return getRepo(db, row.id)!;
 }
 
 /** Whether setup-matt-pocock-skills has been committed to the repo's default branch. */
@@ -68,6 +70,29 @@ export async function repoNeedsSetup(repo: RepoRow): Promise<boolean> {
   } catch {
     return true;
   }
+}
+
+/** What the workbench recorded about a repo's agent-skills setup. */
+export type RepoSetupState = "set_up" | "not_set_up";
+
+/** The state in the repo's row, or null when nothing was recorded (a repo added before this record existed). */
+export function recordedSetupState(db: Db, repoId: string): RepoSetupState | null {
+  const row = db.prepare("SELECT setup_state FROM repos WHERE id = ?").get(repoId) as { setup_state: string | null } | undefined;
+  return row?.setup_state === "set_up" || row?.setup_state === "not_set_up" ? row.setup_state : null;
+}
+
+/** Check the setup marker on the default branch once and record what was found. A repo already recorded as set up keeps that state and gets no new check. */
+export async function recordRepoSetup(db: Db, repo: RepoRow): Promise<RepoSetupState> {
+  const recorded = recordedSetupState(db, repo.id);
+  if (recorded === "set_up") return recorded;
+  const state: RepoSetupState = (await repoNeedsSetup(repo)) ? "not_set_up" : "set_up";
+  db.prepare("UPDATE repos SET setup_state = ? WHERE id = ?").run(state, repo.id);
+  return state;
+}
+
+/** The state the pages and sessions read: the record, or for a repo with no record (added before this change) one marker check that records what it finds. */
+export async function repoSetupState(db: Db, repo: RepoRow): Promise<RepoSetupState> {
+  return recordedSetupState(db, repo.id) ?? (await recordRepoSetup(db, repo));
 }
 
 export const worktreeNeedsSetup = (worktree: string) => !fs.existsSync(path.join(worktree, SETUP_MARKER));

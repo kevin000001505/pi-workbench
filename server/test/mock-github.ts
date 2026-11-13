@@ -46,11 +46,16 @@ export function startMockGitHub(root: string, login = "kevin") {
     }
   };
 
-  const createBare = (owner: string, name: string) => {
+  /** `seedFiles` are extra paths on the default branch, e.g. the agent-skills setup marker. */
+  const createBare = (owner: string, name: string, seedFiles: Record<string, string> = {}) => {
     const bare = path.join(root, owner, `${name}.git`);
     const seed = fs.mkdtempSync(path.join(root, ".seed-"));
     sh(seed, "init", "-q", "-b", "main");
     fs.writeFileSync(path.join(seed, "README.md"), `# ${name}\n`);
+    for (const [rel, content] of Object.entries(seedFiles)) {
+      fs.mkdirSync(path.join(seed, path.dirname(rel)), { recursive: true });
+      fs.writeFileSync(path.join(seed, rel), content);
+    }
     sh(seed, "add", ".");
     sh(seed, "-c", "user.name=gh", "-c", "user.email=gh@x", "commit", "-qm", "Initial commit");
     fs.mkdirSync(path.dirname(bare), { recursive: true });
