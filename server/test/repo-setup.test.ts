@@ -274,7 +274,7 @@ test("a setup run that cannot land its commit on the default branch leaves the r
     return c && c.attention ? c : undefined;
   });
   assert.equal(flagged.column, "todo");
-  assert.match(flagged.attention, /main/);
+  assert.match(flagged.attention, /could not land its commit on kevin\/conflicted's main branch/, "the landing failed on the moved default branch");
   assert.equal(await setupState("kevin/conflicted"), "not_set_up");
   assert.equal(repoRow("kevin/conflicted").setup_session, null);
 

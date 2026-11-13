@@ -12,7 +12,7 @@ import {
   withAutoAnswers,
   withMessages,
 } from "../../shared/transcript.ts";
-import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
+import { config, PROVIDER_ID, SETUP_MARKER, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
 import { doneIssuesOf, recordIssueDone, specWatchOf, specWatchRemove, type Db, type RepoRow, type SessionRow, type TicketRow } from "./db.ts";
 import { git, type GitEnv } from "./git.ts";
 import type { Delivery, MergeResult } from "./delivery.ts";
@@ -593,8 +593,9 @@ export class SessionManager extends EventEmitter {
     const branch = `pi/${slugify(title)}-${id.slice(0, 6)}`;
     const worktree = await createWorktree(repo, id, branch, base, await this.gitEnv());
     const now = Date.now();
-    // A repo setup session always runs the setup step: Run setup refused it unless the repo needs setup.
-    const needsSetup = plan?.phase === "setup" ? true : worktreeNeedsSetup(worktree);
+    // The recorded state decides, so no repo runs the setup twice: a repo the workbench set up starts
+    // every card past setup with no git check, and a repo setup session always runs the setup step.
+    const needsSetup = plan?.phase === "setup" ? true : recordedSetupState(repo) === "set_up" ? false : worktreeNeedsSetup(worktree);
     if (plan?.tickets && seed) {
       let ticketInputs: TicketInput[];
       try {
@@ -1171,16 +1172,52 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * A repo's setup run finished and left its setup files in the worktree. Nothing lands on the
-   * default branch yet: the repo goes back to not set up, its card says what is missing, and Run
-   * setup is available again.
+   * A repo's setup run finished with its setup files in the worktree. The commit lands on the repo's
+   * default branch, so the next card's worktree carries the files: the workbench pushes it there,
+   * and merges the default branch in first when it moved while setup ran. The recorded state follows
+   * what landed, and the card is Done. A landing that fails leaves the repo not set up, flags the
+   * card, and lets Run setup start again.
    */
   private async afterRepoSetupRun(id: string, row: SessionRow) {
     const repo = getRepo(this.db, row.repo_id);
     if (!repo) return;
-    recordSetupState(this.db, repo.id, "not_set_up");
+    const env = await this.gitEnv();
+    const base = row.base_branch;
+    const landingFailed = (err: unknown) => {
+      recordSetupState(this.db, repo.id, "not_set_up");
+      recordSetupSession(this.db, repo.id, null);
+      this.update(id, { attention: `Setup could not land its commit on ${repo.id}'s ${base} branch: ${(err as Error).message}` });
+      this.emit("board", repo.id);
+    };
+    try {
+      await git(row.worktree, ["fetch", "origin", base], env);
+      const head = (await git(row.worktree, ["rev-parse", "HEAD"], env)).trim();
+      const baseHead = (await git(row.worktree, ["rev-parse", `origin/${base}`], env)).trim();
+      if (head !== baseHead) {
+        try {
+          await git(row.worktree, ["push", "origin", `HEAD:refs/heads/${base}`], env);
+        } catch {
+          // The default branch moved while setup ran: merge it in and push the result.
+          await git(row.worktree, ["merge", "--no-edit", `origin/${base}`], env);
+          await git(row.worktree, ["push", "origin", `HEAD:refs/heads/${base}`], env);
+        }
+      }
+    } catch (err) {
+      landingFailed(err);
+      return;
+    }
+    // The pushed commit is the default branch now, so the worktree states what that branch carries.
+    if (worktreeNeedsSetup(row.worktree)) {
+      recordSetupState(this.db, repo.id, "not_set_up");
+      recordSetupSession(this.db, repo.id, null);
+      this.update(id, { attention: `Setup committed no ${SETUP_MARKER} to ${repo.id}'s ${base} branch. Run setup again.` });
+      this.emit("board", repo.id);
+      return;
+    }
+    recordSetupState(this.db, repo.id, "set_up");
     recordSetupSession(this.db, repo.id, null);
-    this.update(id, { attention: `Setup ran for ${repo.id}, but nothing landed on ${row.base_branch} yet. Run setup again.` });
+    this.update(id, { phase: "done", attention: null });
+    await removeWorktree(repo, row.worktree).catch(() => {});
     this.emit("board", repo.id);
   }
 
