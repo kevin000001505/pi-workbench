@@ -9,6 +9,8 @@ export type RepoRow = {
   default_branch: string;
   private: number;
   added_at: number;
+  /** The agent-skills setup state the workbench recorded: "set_up", "not_set_up", or null when nothing was recorded (a repo added before the record existed). */
+  setup_state: string | null;
 };
 
 export type SessionRow = {
@@ -181,6 +183,7 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ["tickets", "fix_run_id", "TEXT"],
   ["tickets", "rescue_state", "TEXT"],
   ["sessions", "solo_ticket", "INTEGER"],
+  ["repos", "setup_state", "TEXT"],
   ["issues_done", "parent", "INTEGER"],
   ["issues_done", "session_id", "TEXT"],
   ["issues_done", "not_planned", "INTEGER NOT NULL DEFAULT 0"],

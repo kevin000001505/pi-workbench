@@ -115,7 +115,7 @@ Then enable notifications under **Settings → Notifications**.
 | Approval gate, `ask_user`, `Skill`, and the pipeline tools (`save_grill_summary`, `save_spec`, `record_tickets`, `finish_ticket`, `finish_review`) | `pi-extension/workbench.ts` |
 | Pipeline phases, prompts, ticket order | `server/src/pipeline.ts`, `server/src/sessions.ts` |
 | pi config (`models.json`, `settings.json`, rules) generated from the db | `server/src/settings.ts` |
-| Clones, worktrees, setup detection (`docs/agents/issue-tracker.md`) | `server/src/repos.ts` |
+| Clones, worktrees, setup detection (`docs/agents/issue-tracker.md`) and the setup state recorded per repo | `server/src/repos.ts` |
 | PR drafting and opening | `server/src/prs.ts`, `server/src/github.ts` |
 | Encrypted secrets | `server/src/secrets.ts` |
 

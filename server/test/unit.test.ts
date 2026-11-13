@@ -12,7 +12,7 @@ import { waitsOnUser } from "../../shared/pending.ts";
 import { openDb } from "../src/db.ts";
 import { redact } from "../src/git.ts";
 import { checkRequestOrigin, Router } from "../src/http.ts";
-import { requireTrackedRepo } from "../src/repos.ts";
+import { recordedSetupState, requireTrackedRepo } from "../src/repos.ts";
 import { GLOBAL_SCOPE, assertUserScope, SecretStore, userSecrets } from "../src/secrets.ts";
 import { DEFAULT_RULES, getApprovalSettings, getPipelineSettings, LLM_KEY_ENV, saveApprovalSettings, saveModelSettings, savePipelineSettings } from "../src/settings.ts";
 import { listSkills, parseFrontmatter } from "../src/skills.ts";
@@ -653,6 +653,21 @@ test("old databases gain the issues_done columns; a done issue records its paren
     { number: 2, title: "A ticket", url: "https://x/2", closedAt: 200, parent: 1, sessionId: "s9", notPlanned: true },
     { number: 3, title: "A spec", url: "https://x/3", closedAt: 300, parent: null, sessionId: "s9", notPlanned: false },
   ]);
+});
+
+test("an older repos table gains the setup_state column on open", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wb-mig-")), "old.db");
+  // The repos table as it was before the setup record: no setup_state, one repo in it.
+  const old = new DatabaseSync(file);
+  old.exec("CREATE TABLE repos (id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, default_branch TEXT NOT NULL, private INTEGER NOT NULL DEFAULT 1, added_at INTEGER NOT NULL);");
+  old.prepare("INSERT INTO repos (id, owner, name, default_branch, private, added_at) VALUES ('me/old','me','old','main',1,0)").run();
+  old.close();
+  const db = openDb(file);
+  const cols = (db.prepare("PRAGMA table_info(repos)").all() as { name: string }[]).map((c) => c.name);
+  assert.ok(cols.includes("setup_state"), `the repos table has ${cols.join(", ")}`);
+  // The repo from before the record has nothing recorded, so its first read gets the one marker check.
+  assert.equal(recordedSetupState(db, "me/old"), null);
 });
 
 test("old done pipeline rows with a PR number open as pr, once", async () => {
