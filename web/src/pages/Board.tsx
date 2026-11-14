@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type BoardAction, type Card, type Column, type SubCard, boardCardActions, COLUMNS, DONE_PAGE, isApproveMove, isPlainUnclaimedCard, issueNumberOf, unclaimedNumber } from "../../../shared/board.ts";
+import { type BoardAction, type Card, type Column, type IssueQueueState, type SubCard, boardCardActions, COLUMNS, DONE_PAGE, isApproveMove, isPlainUnclaimedCard, issueNumberOf, unclaimedNumber } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import { abandonQuestion, approveQuestion, issueParts, CardDetail, TICKET_STATE } from "./CardDetail.tsx";
@@ -441,6 +441,9 @@ export function Board({ repoId }: { repoId?: string }) {
   // at a time, as the unclaimed spec card's row works today.
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [doneHidden, setDoneHidden] = useState(0);
+  // The Issue queue (issue #103): what GET /api/board states for this repo.
+  const [queue, setQueue] = useState<IssueQueueState | null>(null);
+  const [queueBusy, setQueueBusy] = useState(false);
   const [doneLimit, setDoneLimit] = useState(DONE_PAGE);
   const [creating, setCreating] = useState(false);
   const [searching, setSearching] = useState(false);
@@ -472,8 +475,8 @@ export function Board({ repoId }: { repoId?: string }) {
   useEffect(() => {
     if (!repo || pausedRef.current) return;
     let live = true;
-    api.get<{ cards: Card[]; doneHidden: number }>(`/api/board?repo=${encodeURIComponent(repo.id)}&done=${doneLimit}`).then(
-      (b) => live && (setCards(b.cards), setDoneHidden(b.doneHidden), setError(null)),
+    api.get<{ cards: Card[]; doneHidden: number; queue: IssueQueueState }>(`/api/board?repo=${encodeURIComponent(repo.id)}&done=${doneLimit}`).then(
+      (b) => live && (setCards(b.cards), setDoneHidden(b.doneHidden), setQueue(b.queue), setError(null)),
       (e) => live && setError(e.message),
     );
     return () => {
@@ -525,6 +528,24 @@ export function Board({ repoId }: { repoId?: string }) {
     if (question && !confirm(question)) return;
     setBusyId(card.id);
     void act().catch((e) => setError(e.message)).finally(() => setBusyId(null));
+  };
+
+  // The Issues column header's Solve all issues (issue #103, the Issue queue): the server snapshots
+  // the cards Issues holds now and starts them one at a time. The board refetches on every step.
+  const startQueue = () => {
+    if (!repo) return;
+    if (!confirm("Solve all issues starts every card in Issues one at a time, in issue-number order: the next card starts when the card the queue waits on reaches Review. Start the Issue queue?")) return;
+    setQueueBusy(true);
+    api.post<{ queued: number[]; skipped: number[] }>(`/api/repos/${repo.id}/issues/queue`, {}).then(
+      (r) => {
+        setError(null);
+        // The server snapshotted r.queued cards; the ones it skipped are not in the queue it runs.
+        const left = r.queued.length - r.skipped.length;
+        toast(`Issue queue: ${left} card${left === 1 ? "" : "s"} queued${r.skipped.length ? `, ${r.skipped.length} skipped` : ""}.`);
+        setRefetch((n) => n + 1);
+      },
+      (e) => setError(e.message),
+    ).finally(() => setQueueBusy(false));
   };
 
   const drop = (column: Column) => {
@@ -666,6 +687,19 @@ export function Board({ repoId }: { repoId?: string }) {
                 <StatusIcon column={col.id} />
                 {col.label}
                 <span className="count">{(list.length + (col.id === "done" && !words.length ? doneHidden : 0)) || ""}</span>
+                {/* The Issue queue (issue #103): the button while no queue runs and Issues has cards, the count while one runs. */}
+                {col.id === "issues" && repo && queue && (queue.running ? (
+                  <span className="queued" title={`The Issue queue starts the next card when the card it waits on reaches Review: ${queue.numbers.map((n) => `#${n}`).join(", ")}`}>
+                    {queue.numbers.length} queued
+                  </span>
+                ) : (
+                  (cards ?? []).some((c) => c.column === "issues") && (
+                    <button className="kz-btn kz-col-btn" disabled={queueBusy} onClick={startQueue} title="Solve every card in Issues, one at a time, by issue number">
+                      {queueBusy ? <Spinner /> : null}
+                      Solve all issues
+                    </button>
+                  )
+                ))}
               </h2>
               <div className="kz-cards">
                 {list.map((c) => (

@@ -22,7 +22,7 @@ _Avoid_: sub-issue
 
 **Solve all tickets**:
 The move of a card from Issues to Doing (for an unclaimed card, it creates the session): one pipeline session reads every open ticket sub-issue with its blocking edges from GitHub, skips grill/spec/tickets, implements the tickets one fresh run at a time in dependency order, and opens a PR whose merge closes the spec issue and every ticket issue.
-_Avoid_: solve all issues (that is the Start session flow, one session per issue)
+_Avoid_: solve all issues (that is the **Issue queue**'s button: it starts one card after another, not one session for every issue)
 
 **Solve one ticket**:
 The Solve button on a ticket row of a spec card's detail: the card's session runs only that ticket, in a fresh run, and when the ticket is done the card pauses back in Issues (for example 1/3 done). When the last ticket is done, the card goes on to the review and the PR. A Solve on a sub-issue row of an unclaimed spec card's detail creates the spec's session and runs only that sub-issue, as its solo ticket.
@@ -107,7 +107,7 @@ The column for a feature that is still being grilled, specced, or cut into ticke
 _Avoid_: backlog, draft
 
 **Issues** (column):
-The column for every unclaimed card — a plain issue and a spec issue with its open ticket sub-issues alike — and for a card that waits for Solve all.
+The column for every unclaimed card — a plain issue and a spec issue with its open ticket sub-issues alike — and for a card that waits for Solve all. Its header carries the **Issue queue**'s **Solve all issues** button, and the count of the cards its queue has left to start.
 _Avoid_: ready (as a column name)
 
 **Unclaimed card**:
@@ -115,7 +115,11 @@ A card for an open issue that no session claims yet. A plain issue (no open sub-
 
 **Solve**:
 To work a plain issue through a session that skips grill, spec and tickets: the issue becomes the card's only ticket, and the PR's merge closes the issue.
-_Avoid_: solve all (that is for a spec card's tickets), fix (a fix is one possible outcome; solving covers the whole flow)
+_Avoid_: solve all (that is for a spec card's tickets), solve all issues (that is the **Issue queue**'s button), fix (a fix is one possible outcome; solving covers the whole flow)
+
+**Issue queue**:
+The Issues column header's **Solve all issues** action. One click snapshots every card the Issues column holds at that moment, sorted by issue number, and stores that snapshot; the workbench starts the lowest-numbered card with its own move to Doing (**Solve**, **Solve all tickets**, or **Solve all**), and starts the next card when the card it waits on reaches **Review** with its PR open. Issues that appear after the click are not queued, a queued card that left Issues before its turn is skipped — moved or claimed by hand, or **Abandon**ed — and a repo has one queue at a time. A queued card that is blocked or stopped holds the queue until it reaches **Review** or you drop it. The queue ends when its last card reaches **Review**.
+_Avoid_: solve all issues batch, bulk solve, auto pipeline, worker
 
 **Split**:
 Breaking a plain issue into ticket sub-issues with `to-tickets`, so it becomes a spec issue that waits for Solve all.
@@ -164,6 +168,7 @@ _Avoid_: sync, poll, catch up
 - A **Card** from a pipeline session moves through the columns as its phase changes; the user's drag outranks the pipeline
 - A **Card** from a direct session sits in **Doing**, and follows its PR: recording the PR puts it in **Review**, and **Approve** or a merged PR puts it in **Done**. Only **Review** to **Done** is a command for it: a backward drag is refused, because it has no tickets to pause and no spec to rework
 - Dragging a **Card** from **Issues** to **Doing** starts **Solve** (a plain issue) or **Solve all** (a spec issue or a ready session); dragging it from **Review** to **Done** is **Approve**; any other forward drag is refused
+- The **Issue queue** takes the **Cards** the **Issues** column holds at the click, lowest issue number first, and starts each one with its own move to **Doing**: the next card starts when the card the queue waits on reaches **Review**
 - A **Solve one ticket** run on a spec card pauses the card in **Issues** when its ticket is done; **Solve all**, a backward drag, and Stop clear the pause, and **Solve all** runs every remaining ticket
 - Dragging a plain **Card** in **Issues** to **To do** is **Split**: the issue is cut into ticket sub-issues before any work starts
 - Dragging a **Card** back to **Issues** stops its run; dragging it to **Doing** again resumes the same session, and finished tickets stay finished

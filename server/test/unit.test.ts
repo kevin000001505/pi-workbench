@@ -349,6 +349,80 @@ test("unclaimed cards: a spec issue is a spec card, a plain one is not, and done
   assert.deepEqual(unclaimedCards(issues, [], "me/app", [1]).map((c) => c.id), ["issue:5"]);
 });
 
+test("the Issue queue's snapshot: every card the Issues column holds, lowest issue number first", async () => {
+  const { queueNumbers, unclaimedCards, claimRefs } = await import("../../shared/board.ts");
+  const issues = [
+    { number: 7, title: "A spec", url: "https://github.com/me/app/issues/7", openTickets: 2, hasParent: false },
+    { number: 3, title: "A plain issue", url: "https://github.com/me/app/issues/3", openTickets: 0, hasParent: false },
+    { number: 4, title: "A ticket sub-issue", url: "https://github.com/me/app/issues/4", openTickets: 0, hasParent: true },
+    { number: 9, title: "Claimed and running", url: "https://github.com/me/app/issues/9", openTickets: 0, hasParent: false },
+  ];
+  const sessions = [
+    // A card the pipeline paused in Issues: it is in the queue, at its issue's number.
+    { mode: "pipeline", phase: "ready", issueRef: "me/app#5", specRef: "https://github.com/me/app/issues/5" },
+    { mode: "pipeline", phase: "implement", issueRef: "me/app#9", specRef: null },
+  ];
+  const unclaimed = unclaimedCards(issues, claimRefs(sessions), "me/app");
+  assert.deepEqual(unclaimed.map((c) => c.id), ["issue:7", "issue:3"], "the unclaimed cards keep GitHub's order; the queue sorts them");
+  assert.deepEqual(queueNumbers(unclaimed, sessions, "me/app"), [3, 5, 7], "sorted by issue number, the paused card between the unclaimed ones");
+});
+
+test("the Issue queue's snapshot skips a card outside Issues, a card with no issue to order by, and another repo's issue", async () => {
+  const { queueNumbers } = await import("../../shared/board.ts");
+  const sessions = [
+    { mode: "pipeline", phase: "ready", issueRef: "me/app#5", specRef: null },
+    { mode: "pipeline", phase: "implement", issueRef: "me/app#6", specRef: null },     // Doing
+    { mode: "pipeline", phase: "review", issueRef: "me/app#7", specRef: null },        // QA
+    { mode: "pipeline", phase: "pr", issueRef: "me/app#8", specRef: null },            // Review
+    { mode: "pipeline", phase: "done", issueRef: "me/app#9", specRef: null },          // Done
+    { mode: "direct", phase: "implement", issueRef: "me/app#10", specRef: null },      // a direct card is in Doing
+    { mode: "pipeline", phase: "ready", issueRef: "notes.md", specRef: null },         // no GitHub issue behind the card
+    { mode: "pipeline", phase: "ready", issueRef: null, specRef: null },               // a card that names no issue
+    { mode: "pipeline", phase: "ready", issueRef: "other/repo#2", specRef: null },     // another repo's issue
+  ];
+  assert.deepEqual(queueNumbers([], sessions, "me/app"), [5]);
+});
+
+test("the stored Issue queue: the board states the numbers it still has to start, and says nothing when its rows go", async () => {
+  const { issueQueueState } = await import("../../shared/board.ts");
+  const { issueQueueSave, issueQueueOf, issueQueueStep, issueQueueClear } = await import("../src/db.ts");
+  const db = tmpDb();
+  issueQueueSave(db, "me/app", [3, 5, 7]);
+  issueQueueStep(db, "me/app", 3, "running", "s-1");
+  assert.deepEqual(
+    issueQueueOf(db, "me/app").map((r) => `${r.number}:${r.state}:${r.sessionId ?? ""}`),
+    ["3:running:s-1", "5:waiting:", "7:waiting:"],
+    "every snapshot number is a row, lowest first, the card the queue waits on named by its session",
+  );
+  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: true, numbers: [3, 5, 7] });
+
+  // #3 reached Review: the queue waits on #5 now, and #3 is no longer a number it has to start.
+  issueQueueStep(db, "me/app", 3, "done", "s-1");
+  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: true, numbers: [5, 7] });
+
+  // #5 was claimed by hand before its turn: the queue goes on without it.
+  issueQueueStep(db, "me/app", 5, "skipped", null);
+  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: true, numbers: [7] });
+
+  // The last card reached Review: the queue is over, and its rows go with it.
+  issueQueueClear(db, "me/app");
+  assert.deepEqual(issueQueueOf(db, "me/app"), []);
+  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: false, numbers: [] });
+
+  // One repo's queue says nothing about another repo's board.
+  issueQueueSave(db, "other/app", [9]);
+  assert.deepEqual(issueQueueOf(db, "me/app"), []);
+});
+
+test("a second Issue queue snapshot replaces the rows of the queue before it", async () => {
+  const { issueQueueSave, issueQueueOf, issueQueueClear } = await import("../src/db.ts");
+  const db = tmpDb();
+  issueQueueSave(db, "me/app", [1, 2, 3]);
+  issueQueueClear(db, "me/app");
+  issueQueueSave(db, "me/app", [4, 5]);
+  assert.deepEqual(issueQueueOf(db, "me/app").map((r) => r.number), [4, 5]);
+});
+
 test("cardOf specCard: a plain issue card and a card with no tickets are not spec cards; more than one ticket, or one that is not the card's own issue, is", async () => {
   const { cardOf } = await import("../../shared/board.ts");
   const t = (trackerRef: string | null, status = "ready") => ({ status, trackerRef });
