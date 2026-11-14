@@ -818,10 +818,10 @@ test("the tickets and split prompts size every ticket to the model's context win
   assert.match(ticketsPrompt(null, 262144), /context window is 256K tokens/, "follows the Model settings value");
 });
 
-test("the unclaimed-card starts pick phase, tickets, held prompt and spec in one table", async () => {
+test("the card starts pick phase, tickets, held prompt and spec in one table", async () => {
   const { START_PLANS, isStartFrom, isSkillCall, ticketFromIssue } = await import("../src/pipeline.ts");
   assert.deepEqual(Object.keys(START_PLANS).sort(), ["grill", "issue", "spec", "split", "tickets"]);
-  assert.ok(isStartFrom("split"), "names the five starts");
+  assert.ok(isStartFrom("split"), "names the six starts");
   assert.ok(isStartFrom("grill"), "Grill is one of them");
   assert.ok(!isStartFrom(null));
   assert.ok(!isStartFrom(3));

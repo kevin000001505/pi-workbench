@@ -112,7 +112,8 @@ export type Ticket = {
   fixRunId: string | null;
 };
 
-export type Repo = { id: string; owner: string; name: string; defaultBranch: string; private: boolean; needsSetup: boolean };
+export type RepoSetupState = "set_up" | "not_set_up" | "in_progress";
+export type Repo = { id: string; owner: string; name: string; defaultBranch: string; private: boolean; setup: RepoSetupState };
 
 export type GhRepo = {
   id: string;

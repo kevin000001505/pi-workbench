@@ -61,7 +61,7 @@ import {
   transcriptExcerpt,
   type ReviewContext,
 } from "./autoapprove.ts";
-import { createWorktree, getRepo, listRepos, needsSetupRun, pushSetupCommit, recordSetUp, removeWorktree, repoSetupState, requireTrackedRepo, slugify, worktreeNeedsSetup } from "./repos.ts";
+import { createWorktree, getRepo, listRepos, needsSetupRun, pushSetupCommit, recordSetUp, recordedSetupState, removeWorktree, repoSetupState, requireTrackedRepo, slugify, worktreeNeedsSetup, type RepoSetupState } from "./repos.ts";
 import { loadSshHosts } from "./ssh.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, getPipelineSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
@@ -509,6 +509,66 @@ export class SessionManager extends EventEmitter {
       : undefined;
     if (recorded?.repo_id === repo.id) return this.summary(recorded.id);
     return this.createSession({ repoId: repo.id, title: SETUP_TITLE, prompt: "", mode: "pipeline", setupOnly: true }, repo);
+  }
+
+  /**
+   * The agent-skills setup state the Repos page states (issue #102). The repo's record answers every
+   * read; one marker check records a repo that has none, and a repo whose recorded setup session works
+   * now reads as `in_progress`. A record naming a session that no longer works is not in progress, so
+   * the repo reads as not set up and Run setup is available again.
+   */
+  async setupState(repoId: string): Promise<RepoSetupState> {
+    const repo = requireTrackedRepo(this.db, repoId);
+    const recorded = recordedSetupState(this.db, repo.id);
+    if (recorded === "set_up") return "set_up";
+    if (this.setupRunWorks(repo)) return "in_progress";
+    return recorded ?? (await repoSetupState(this.db, repo));
+  }
+
+  /**
+   * The Repos page's Run setup (issue #102): start this repo's setup session. It refuses with 409 while
+   * that session works, and for a repo recorded as set up, so no repo runs the setup twice. A record
+   * naming a setup session that stopped keeps that card: reply to it, or Abandon it and Run setup starts
+   * a fresh one.
+   */
+  async runSetup(repoId: string): Promise<SessionSummary> {
+    const repo = requireTrackedRepo(this.db, repoId);
+    // Claim the repo before the first await: two Run setup taps at once make one setup session, and the second is refused.
+    if (this.setupRuns.has(repo.id))
+      throw Object.assign(new Error(`Setup already runs for ${repo.id}: its card is on the board.`), { status: 409 });
+    const run = this.startSetupFromRun(repo);
+    this.setupRuns.set(repo.id, run);
+    try {
+      return await run;
+    } finally {
+      this.setupRuns.delete(repo.id);
+    }
+  }
+
+  private async startSetupFromRun(repo: RepoRow): Promise<SessionSummary> {
+    // No repo runs the setup twice: a repo recorded as set up gets no new setup session.
+    if ((await repoSetupState(this.db, repo)) === "set_up")
+      throw Object.assign(new Error(`${repo.id} is already set up for the agent skills.`), { status: 409 });
+    if (this.setupRunWorks(repo))
+      throw Object.assign(new Error(`Setup already runs for ${repo.id}: its card is on the board.`), { status: 409 });
+    // The repo keeps the setup card it has: that card's whole job is still setup.
+    const kept = repo.setup_session
+      ? (this.db.prepare("SELECT id, repo_id FROM sessions WHERE id = ? AND archived = 0").get(repo.setup_session) as { id: string; repo_id: string } | undefined)
+      : undefined;
+    if (kept?.repo_id === repo.id)
+      throw Object.assign(new Error(`${repo.id} already has a setup card that stopped: open it and reply to it, or Abandon it to start a new setup.`), { status: 409 });
+    const s = await this.startSetupRun(repo.id);
+    if (!s) throw Object.assign(new Error(`${repo.id} is already set up for the agent skills.`), { status: 409 });
+    return s;
+  }
+
+  /** Whether the session this repo records as its setup session runs its setup now (see `Live.setupRunning`). */
+  private setupRunWorks(repo: RepoRow): boolean {
+    if (!repo.setup_session) return false;
+    const row = this.db.prepare("SELECT id, phase FROM sessions WHERE id = ? AND archived = 0").get(repo.setup_session) as { id: string; phase: string } | undefined;
+    if (row?.phase !== "setup") return false;
+    // Read the live state only when it exists: this must not create one for an idle session.
+    return this.live.get(row.id)?.setupRunning === true;
   }
 
   /** Whether this session is the one its repo records as its setup session. */

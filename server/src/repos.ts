@@ -74,25 +74,27 @@ export async function repoNeedsSetup(repo: RepoRow): Promise<boolean> {
 }
 
 /** What the workbench recorded about a repo's agent-skills setup. */
-export type RepoSetupState = "set_up" | "not_set_up";
+export type RecordedSetupState = "set_up" | "not_set_up";
+/** What the workbench states about a repo's agent-skills setup: the record, plus the setup that runs now. */
+export type RepoSetupState = RecordedSetupState | "in_progress";
 
 /** The state in the repo's row, or null when nothing was recorded (a repo added before this record existed). */
-export function recordedSetupState(db: Db, repoId: string): RepoSetupState | null {
+export function recordedSetupState(db: Db, repoId: string): RecordedSetupState | null {
   const row = db.prepare("SELECT setup_state FROM repos WHERE id = ?").get(repoId) as { setup_state: string | null } | undefined;
   return row?.setup_state === "set_up" || row?.setup_state === "not_set_up" ? row.setup_state : null;
 }
 
 /** Check the setup marker on the default branch once and record what was found. A repo already recorded as set up keeps that state and gets no new check. */
-export async function recordRepoSetup(db: Db, repo: RepoRow): Promise<RepoSetupState> {
+export async function recordRepoSetup(db: Db, repo: RepoRow): Promise<RecordedSetupState> {
   const recorded = recordedSetupState(db, repo.id);
   if (recorded === "set_up") return recorded;
-  const state: RepoSetupState = (await repoNeedsSetup(repo)) ? "not_set_up" : "set_up";
+  const state: RecordedSetupState = (await repoNeedsSetup(repo)) ? "not_set_up" : "set_up";
   db.prepare("UPDATE repos SET setup_state = ? WHERE id = ?").run(state, repo.id);
   return state;
 }
 
 /** The state the pages and sessions read: the record, or for a repo with no record (added before this change) one marker check that records what it finds. */
-export async function repoSetupState(db: Db, repo: RepoRow): Promise<RepoSetupState> {
+export async function repoSetupState(db: Db, repo: RepoRow): Promise<RecordedSetupState> {
   return recordedSetupState(db, repo.id) ?? (await recordRepoSetup(db, repo));
 }
 

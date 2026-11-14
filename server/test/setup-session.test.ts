@@ -124,7 +124,7 @@ test("adding a repo recorded as set up creates no session", { skip }, async () =
   gh.createBare("kevin", "ready", { [SETUP_MARKER]: ISSUE_TRACKER_DOC });
   const added = await api("POST", "/api/repos", { id: "kevin/ready" });
   assert.equal(added.status, 200);
-  assert.equal(added.json.needsSetup, false, "the repo is recorded as set up");
+  assert.equal(added.json.setup, "set_up", "the repo is recorded as set up");
   assert.deepEqual(await sessionsOf("kevin/ready"), []);
   assert.equal((await repoRow("kevin/ready")).setupSession, null);
 });
@@ -227,7 +227,7 @@ test("the setup run's commit lands on the default branch: the repo reads as set 
 
   // The default branch carries the setup file, so a later session's worktree starts with it.
   assert.equal(onMain("kevin", "landed", SETUP_MARKER), MARKER_TEXT);
-  assert.equal((await repoRow("kevin/landed")).needsSetup, false, "the repo reads as set up");
+  assert.equal((await repoRow("kevin/landed")).setup, "set_up", "the repo reads as set up");
 
   // The card's move to Done goes out as a board event, so open boards fetch GET /api/board again:
   // one event for the new card, one for its move.
@@ -258,7 +258,7 @@ test("a refused setup push flags the card with the reason and leaves the repo re
   assert.match(flagged.attention, /protected branch/, "the card carries git's own words");
   assert.equal(flagged.phase, "setup", "the card is not Done");
   assert.equal((await board("kevin/protected")).find((c) => c.id === s.id)?.column, "todo");
-  assert.equal((await repoRow("kevin/protected")).needsSetup, true, "the repo stays recorded as not set up");
+  assert.equal((await repoRow("kevin/protected")).setup, "not_set_up", "the repo stays recorded as not set up");
   assert.equal(onMain("kevin", "protected", SETUP_MARKER), null, "the default branch has no setup file");
 });
 
@@ -290,7 +290,7 @@ test("a setup run the user stops after its commit lands nothing: the card keeps 
     assert.match(stopped.attention, /setup run was stopped/, JSON.stringify(stopped.attention));
     assert.equal(stopped.phase, "setup", "a stopped setup run is not Done");
     assert.equal((await board("kevin/stopped")).find((c) => c.id === s.id)?.column, "todo");
-    assert.equal((await repoRow("kevin/stopped")).needsSetup, true, "the repo stays recorded as not set up");
+    assert.equal((await repoRow("kevin/stopped")).setup, "not_set_up", "the repo stays recorded as not set up");
     assert.equal(onMain("kevin", "stopped", SETUP_MARKER), null, "the stopped run's commit did not reach the default branch");
   } finally {
     fs.writeFileSync(SETUP_SKILL, setupSkillBody());

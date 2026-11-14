@@ -13,7 +13,7 @@ import { checkRequestOrigin, type Ctx, HttpError, readJson, Router, sendJson, se
 import { listModelsAt, probeEndpoint } from "./llm.ts";
 import { githubDelivery } from "./delivery.ts";
 import { draftPr, openPr, changes } from "./prs.ts";
-import { addRepo, assertRepoName, clonePath, getRepo, listRepos, repoSetupState, requireTrackedRepo } from "./repos.ts";
+import { addRepo, assertRepoName, clonePath, getRepo, listRepos, requireTrackedRepo } from "./repos.ts";
 import { assertUserScope, GLOBAL_SCOPE, SecretStore, userSecrets } from "./secrets.ts";
 import { startRescueProxy } from "./rescue-proxy.ts";
 import { SessionManager } from "./sessions.ts";
@@ -102,7 +102,8 @@ async function repoView(r: ReturnType<typeof listRepos>[number]) {
     name: r.name,
     defaultBranch: r.default_branch,
     private: !!r.private,
-    needsSetup: (await repoSetupState(db, r)) === "not_set_up",
+    // What the Repos page states: the recorded state, or `in_progress` while this repo's setup session works.
+    setup: await sessions.setupState(r.id),
     // The session that runs this repo's agent-skills setup, null when it has none.
     setupSession: r.setup_session ?? null,
   };
@@ -188,6 +189,8 @@ const router = new Router()
     });
     return trackRepo({ owner: gh.owner.login, name: gh.name, defaultBranch: gh.default_branch, private: gh.private });
   })
+  // The Repos page's Run setup (issue #102): start this repo's setup session, 409 while one runs.
+  .on("POST", "/api/repos/:owner/:name/setup", async ({ params }) => sessions.runSetup(`${params.owner}/${params.name}`))
   .on("DELETE", "/api/repos/:owner/:name", async ({ params }) => {
     const id = `${params.owner}/${params.name}`;
     const repo = getRepo(db, id);

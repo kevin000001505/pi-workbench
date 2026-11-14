@@ -124,7 +124,7 @@ export function NewSession({
               <span className="muted small">Send the task straight to the agent. For small fixes.</span>
             </button>
           </div>
-          {selected?.needsSetup && (
+          {selected?.setup === "not_set_up" && (
             <div className="alert alert-info">
               This repo hasn’t been set up for Matt Pocock’s skills yet. The session runs <code>/setup-matt-pocock-skills</code> first and
               asks you its questions; your task goes out right after.

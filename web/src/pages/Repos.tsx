@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
-import type { GhRepo, Repo } from "../types.ts";
+import type { GhRepo, Repo, RepoSetupState } from "../types.ts";
 import { Empty, Modal, PageHeader, Spinner } from "../ui.tsx";
 
 function AddRepoModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
@@ -20,8 +20,9 @@ function AddRepoModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =
   const add = async (id: string) => {
     setAdding(id);
     try {
-      await api.post("/api/repos", { id });
-      toast(`Cloned ${id}`);
+      const added = await api.post<{ setup: RepoSetupState }>("/api/repos", { id });
+      // A repo that is not set up starts its setup session at once: its card is on the board.
+      toast(added.setup === "in_progress" ? `Cloned ${id}: its agent-skills setup runs, its card is on the board` : `Cloned ${id}`);
       onAdded();
       onClose();
     } catch (e) {
@@ -64,7 +65,7 @@ function CreateRepoModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
     setBusy(true);
     try {
       const r = await api.post<Repo>("/api/repos/create", { name, description, private: priv, org: org || undefined });
-      toast(`Created ${r.id}`);
+      toast(r.setup === "in_progress" ? `Created ${r.id}: its agent-skills setup runs, its card is on the board` : `Created ${r.id}`);
       onAdded();
       onClose();
     } catch (e) {
@@ -103,6 +104,15 @@ function CreateRepoModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
     </Modal>
   );
 }
+
+const setupTag = (state: RepoSetupState) =>
+  state === "set_up" ? (
+    <span className="tag tag-ok">skills set up</span>
+  ) : state === "in_progress" ? (
+    <span className="tag">setup in progress</span>
+  ) : (
+    <span className="tag tag-warn">skills not set up</span>
+  );
 
 export function Repos() {
   const { toast, sessions } = useStore();
@@ -147,16 +157,27 @@ export function Repos() {
                 default branch <span className="mono">{r.defaultBranch}</span> · {count} session{count === 1 ? "" : "s"}
               </p>
               <p className="small">
-                {r.needsSetup ? (
-                  <span className="tag tag-warn">skills not set up: the next session runs setup</span>
-                ) : (
-                  <span className="tag tag-ok">skills set up</span>
-                )}
+                {setupTag(r.setup)}
               </p>
               <div className="row gap">
                 <a className="btn btn-sm btn-primary" href={`#/new/${encodeURIComponent(r.id)}`}>
                   New session
                 </a>
+                {r.setup === "not_set_up" && (
+                  <button
+                    className="btn btn-sm btn-ghost"
+                    onClick={async () => {
+                      // Run setup: the workbench starts this repo's setup session, and its commit lands on the default branch.
+                      const started = await api
+                        .post<{ id: string }>(`/api/repos/${r.id}/setup`)
+                        .catch((e) => (toast(e.message, "error"), null));
+                      if (started) toast(`Setup runs for ${r.id}: its card is on the board.`);
+                      load();
+                    }}
+                  >
+                    Run setup
+                  </button>
+                )}
                 <a className="btn btn-sm btn-ghost" href={`https://github.com/${r.id}`} target="_blank" rel="noopener">
                   GitHub ↗
                 </a>
