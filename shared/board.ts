@@ -292,6 +292,44 @@ export function unclaimedCards(issues: BoardIssue[], claims: (string | null)[], 
     }));
 }
 
+/** A card the Issue queue reads a repo's sessions for: the shape claimRefs reads. */
+export type QueueCardSource = { mode: string; phase: string; issueRef: string | null; specRef: string | null };
+
+/**
+ * The Issue queue's snapshot (issue #103): the issue numbers of the cards the Issues column holds
+ * now, lowest first. An unclaimed card is its own number; a card the pipeline paused in Issues is
+ * the issue its session works on. A card outside Issues, a card with no GitHub issue to order by,
+ * and another repo's issue are not in it. "Solve all issues" starts the cards one at a time in this
+ * order, and an issue that appears after the snapshot is not in it.
+ */
+export function queueNumbers(unclaimed: Card[], sessions: QueueCardSource[], repoId: string): number[] {
+  const numbers = new Set<number>();
+  for (const c of unclaimed) {
+    const n = unclaimedNumber(c.id);
+    if (n !== null) numbers.add(n);
+  }
+  for (const s of sessions) {
+    if (sessionColumn(s.mode, s.phase) !== "issues") continue;
+    const n = issueNumberOf(s.issueRef, repoId) ?? issueNumberOf(s.specRef, repoId);
+    if (n !== null) numbers.add(n);
+  }
+  return [...numbers].sort((a, b) => a - b);
+}
+
+/** The Issue queue's state, as the board reads it: the numbers it still has to start, plus the card it waits on. */
+export type IssueQueueState = { running: boolean; numbers: number[] };
+
+/**
+ * The Issue queue's state from its stored steps (the issue_queue rows): a queue runs while it has a
+ * card to start — one waiting, or the one it waits on — and its numbers are those cards, still in
+ * issue-number order. A step that reached Review (done) or was skipped is not one of them, and a
+ * queue with no steps left states nothing.
+ */
+export function issueQueueState(steps: { number: number; state: string }[]): IssueQueueState {
+  const numbers = steps.filter((s) => s.state === "waiting" || s.state === "running").map((s) => s.number);
+  return { running: numbers.length > 0, numbers };
+}
+
 /** An issue a merged card closed, as the board's Done column reads it. */
 export type DoneIssue = {
   number: number;

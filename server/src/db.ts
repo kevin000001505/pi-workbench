@@ -145,6 +145,13 @@ CREATE TABLE IF NOT EXISTS issues_done (
 CREATE TABLE IF NOT EXISTS spec_watch (
   repo_id TEXT NOT NULL, number INTEGER NOT NULL, PRIMARY KEY (repo_id, number)
 );
+-- The Issue queue (issue #103): the issue numbers "Solve all issues" snapshotted, in number order.
+-- state: waiting (its turn has not come), running (the card the queue waits on), done (it reached
+-- Review), skipped (it was claimed or moved by hand, or its start was refused). The rows go with the queue.
+CREATE TABLE IF NOT EXISTS issue_queue (
+  repo_id TEXT NOT NULL, number INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'waiting', session_id TEXT,
+  PRIMARY KEY (repo_id, number)
+);
 `;
 
 export function openDb(file: string) {
@@ -264,6 +271,40 @@ export function doneIssuesOf(db: Db, repoId: string): { number: number; title: s
     not_planned: number | null;
   }[];
   return rows.map((r) => ({ number: r.number, title: r.title, url: r.url, closedAt: r.closed_at, parent: r.parent, sessionId: r.session_id, notPlanned: !!r.not_planned }));
+}
+
+/** One Issue queue step (issue #103): the snapshotted issue number, its state, and the session the workbench started for it. */
+export type IssueQueueStepState = "waiting" | "running" | "done" | "skipped";
+export type IssueQueueRow = { number: number; state: IssueQueueStepState; sessionId: string | null };
+
+/**
+ * Save an Issue queue snapshot: one row per number, each waiting, in the order the click
+ * snapshotted them (lowest issue number first). It replaces the rows of the queue before it.
+ */
+export function issueQueueSave(db: Db, repoId: string, numbers: number[]) {
+  db.prepare("DELETE FROM issue_queue WHERE repo_id = ?").run(repoId);
+  const ins = db.prepare("INSERT INTO issue_queue (repo_id, number, state) VALUES (?, ?, 'waiting')");
+  for (const n of numbers) ins.run(repoId, n);
+}
+
+/** The repo's Issue queue in issue-number order — the order "Solve all issues" starts the cards in. */
+export function issueQueueOf(db: Db, repoId: string): IssueQueueRow[] {
+  const rows = db.prepare("SELECT number, state, session_id FROM issue_queue WHERE repo_id = ? ORDER BY number").all(repoId) as {
+    number: number;
+    state: string;
+    session_id: string | null;
+  }[];
+  return rows.map((r) => ({ number: r.number, state: r.state as IssueQueueStepState, sessionId: r.session_id }));
+}
+
+/** One step's state, and the session the queue started for it (null for a step that has none). */
+export function issueQueueStep(db: Db, repoId: string, number: number, state: IssueQueueStepState, sessionId: string | null = null) {
+  db.prepare("UPDATE issue_queue SET state = ?, session_id = ? WHERE repo_id = ? AND number = ?").run(state, sessionId, repoId, number);
+}
+
+/** The queue is over: its rows go with it, so the board states no queue for the repo. */
+export function issueQueueClear(db: Db, repoId: string) {
+  db.prepare("DELETE FROM issue_queue WHERE repo_id = ?").run(repoId);
 }
 
 /** The spec issues the board watches for this repo (the unclaimed spec cards it showed; see the spec_watch table). */
