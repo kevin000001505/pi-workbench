@@ -9,7 +9,11 @@
  * Seam: `POST /api/repos/:owner/:name/issues/queue`, the `queue` field of `GET /api/board`, and the
  * session each queued card gets. What these miss: the button in the Issues column header (the web has
  * no test harness; `cd web && npm run build` type-checks it), a queued card whose start the session
- * refuses, and a queued card that is blocked or stopped and so holds the queue.
+ * refuses, and a paused queue resumed by a rescue or fix run.
+ *
+ * A stuck card pauses the queue (issue #104): the card the queue waits on ends its run Blocked
+ * (BLOCKME) or Stopped (SILENTME), or waits on the user's answer (PUSHME's gated push, ASKME's
+ * decision), and the pause is stored with the queue's rows.
  */
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -99,7 +103,7 @@ const stopServer = async () => {
 
 const boardOf = async (repo: string) => (await api("GET", `/api/board?repo=${encodeURIComponent(repo)}`)).json as {
   cards: { id: string; column: string; number?: number }[];
-  queue: { running: boolean; numbers: number[] };
+  queue: { running: boolean; numbers: number[]; paused: number | null };
 };
 const queueOf = async (repo: string) => (await boardOf(repo)).queue;
 const cardsIn = async (repo: string, column: string) => (await boardOf(repo)).cards.filter((c) => c.column === column);
@@ -107,6 +111,14 @@ const cardColumn = async (repo: string, id: string) => (await boardOf(repo)).car
 const sessionsOf = async (repo: string) => ((await api("GET", "/api/sessions")).json as any[]).filter((s) => s.repoId === repo);
 const sessionForIssue = async (repo: string, n: number) => (await sessionsOf(repo)).find((s) => s.issueRef === `${repo}#${n}`);
 const solveAllIssues = (repo: string) => api("POST", `/api/repos/${repo}/issues/queue`, {});
+const summaryOf = async (id: string) => (await api("GET", `/api/sessions/${id}`)).json.summary as any;
+const pendingOf = async (id: string, kind: "permission" | "decision") => ((await summaryOf(id)).pending ?? []).find((p: any) => p.kind === kind);
+
+/** A repo whose Issues column holds exactly these plain issues, so a test drives a card it chose. */
+const seedPlainIssues = (repo: string, issues: { number: number; title: string; body: string }[]) => {
+  const [owner, name] = repo.split("/");
+  for (const i of issues) gh.seedIssue(owner, name, i);
+};
 
 /** A repo the record says is set up, so a queued card starts in its planned phase and not in setup. */
 const addRepo = async (repo: string) => {
@@ -127,20 +139,53 @@ const closeMockIssue = async (repo: string, n: number) => {
   assert.equal(res.status, 200);
 };
 
-/** Drive one card's runs to Review, answering the gated `git push` its review run asks for. */
-const toReview = async (repo: string, n: number) => {
-  const id = (await sessionForIssue(repo, n))?.id;
-  assert.ok(id, `no card works on issue #${n} of ${repo}`);
+/** Drive one card's runs until `done` holds, answering the gated call each run asks for. */
+const driveCard = async (id: string, done: (s: any) => boolean, message: string) => {
   await waitFor(
     async () => {
-      const s = (await api("GET", `/api/sessions/${id}`)).json.summary;
-      if (s.phase === "pr") return true;
+      const s = await summaryOf(id);
+      if (done(s)) return true;
       const p = (s.pending ?? []).find((x: any) => x.kind === "permission");
       if (p) await api("POST", `/api/sessions/${id}/respond`, { requestId: p.id, value: p.options[0] });
       return false;
     },
-    { timeout: 240_000, message: `issue #${n} of ${repo} never reached Review` },
+    { timeout: 240_000, message },
   );
+};
+
+/** Drive one card's runs to Review, answering the gated `git push` its review run asks for. */
+const toReview = async (repo: string, n: number) => {
+  const id = (await sessionForIssue(repo, n))?.id;
+  assert.ok(id, `no card works on issue #${n} of ${repo}`);
+  await driveCard(id, (s) => s.phase === "pr", `issue #${n} of ${repo} never reached Review`);
+  return id;
+};
+
+/** Drive the card the queue started until its run ends stuck, and check what the attention says. */
+const toStuck = async (id: string, says: RegExp, why: string) => {
+  await driveCard(id, (s) => !!s.attention, `the card ${id} never flagged`);
+  const s = await summaryOf(id);
+  assert.match(s.attention, says, why);
+  return s;
+};
+
+/**
+ * A repo with a queue whose first card is stuck: `marker` is the word in its ticket body that ends
+ * the run stuck. Returns the card the queue waits on.
+ */
+const startStuckQueue = async (repo: string, marker: string, says: RegExp, why: string) => {
+  seedPlainIssues(repo, [
+    { number: 1, title: "Write the guide", body: `Write a setup guide. ${marker}` },
+    { number: 2, title: "Fix the login page", body: "Fix the login page crash." },
+  ]);
+  await addRepo(repo);
+  const r = await solveAllIssues(repo);
+  assert.equal(r.status, 200, r.json.error);
+  assert.deepEqual(r.json.queued, [1, 2], "the snapshot is the two seeded cards, lowest number first");
+  assert.equal(r.json.started?.number, 1);
+  const id = r.json.started.sessionId;
+  await toStuck(id, says, why);
+  return id;
 };
 
 const repo1 = "kevin/queue1";
@@ -148,6 +193,11 @@ const repo2 = "kevin/queue2";
 const repo3 = "kevin/queue3";
 const repo4 = "kevin/queue4";
 const repo5 = "kevin/queue5";
+const repo6 = "kevin/queue6";
+const repo7 = "kevin/queue7";
+const repo8 = "kevin/queue8";
+const repo9 = "kevin/queue9";
+const repo10 = "kevin/queue10";
 let queue1First: string | undefined;
 
 before(async () => {
@@ -191,7 +241,7 @@ test(
     await addRepo(repo1);
     assert.equal((await sessionsOf(repo1)).length, 0, "a repo the record says is set up starts no session");
     assert.deepEqual((await cardsIn(repo1, "issues")).map((c) => c.id), ["issue:1", "issue:2", "issue:3"]);
-    assert.deepEqual(await queueOf(repo1), { running: false, numbers: [] });
+    assert.deepEqual(await queueOf(repo1), { running: false, numbers: [], paused: null });
 
     // The click is a write route: it goes through the JSON + Origin + Host check like every other write.
     const noJson = await fetch(`${base}/api/repos/kevin/queue1/issues/queue`, { method: "POST", body: "{}" });
@@ -219,7 +269,7 @@ test(
     const b = await boardOf(repo1);
     assert.deepEqual(b.cards.filter((c) => c.column === "issues").map((c) => c.id), ["issue:2", "issue:3"], "only the started card left Issues");
     assert.equal(b.cards.find((c) => c.id === queue1First)?.column, "doing");
-    assert.deepEqual(b.queue, { running: true, numbers: [1, 2, 3] }, "the board states the running queue");
+    assert.deepEqual(b.queue, { running: true, numbers: [1, 2, 3], paused: null }, "the board states the running queue");
 
     const again = await solveAllIssues(repo1);
     assert.equal(again.status, 409, "a repo has one Issue queue at a time: a second click while one runs is refused");
@@ -239,7 +289,7 @@ test(
     const second = await waitForValue(() => sessionForIssue(repo1, 2), { message: "the queue never started issue #2" });
     assert.equal(second.phase, "implement");
     assert.equal(await cardColumn(repo1, second.id), "doing");
-    assert.deepEqual(await queueOf(repo1), { running: true, numbers: [2, 3] }, "the queue waits on #2 now");
+    assert.deepEqual(await queueOf(repo1), { running: true, numbers: [2, 3], paused: null }, "the queue waits on #2 now");
     assert.deepEqual(
       (await cardsIn(repo1, "issues")).map((c) => c.id).sort(),
       ["issue:3", "issue:4"],
@@ -249,10 +299,10 @@ test(
     await toReview(repo1, 2);
     const third = await waitForValue(() => sessionForIssue(repo1, 3), { message: "the queue never started issue #3" });
     assert.equal(await cardColumn(repo1, third.id), "doing");
-    assert.deepEqual(await queueOf(repo1), { running: true, numbers: [3] });
+    assert.deepEqual(await queueOf(repo1), { running: true, numbers: [3], paused: null });
 
     await toReview(repo1, 3);
-    assert.deepEqual(await queueOf(repo1), { running: false, numbers: [] }, "the queue is over after the last card reaches Review");
+    assert.deepEqual(await queueOf(repo1), { running: false, numbers: [], paused: null }, "the queue is over after the last card reaches Review");
     assert.deepEqual(
       (await sessionsOf(repo1)).filter((s) => s.repoId === repo1).map((s) => s.issueRef).sort(),
       [`${repo1}#1`, `${repo1}#2`, `${repo1}#3`],
@@ -284,7 +334,7 @@ test("a queued card claimed by hand before its turn is skipped, and the queue go
   const ofThree = (await sessionsOf(repo2)).filter((s) => s.issueRef === `${repo2}#3`);
   assert.equal(ofThree.length, 1, "the queue started no second card for the hand-claimed issue");
   assert.equal(ofThree[0].id, hand.json.id);
-  assert.deepEqual(await queueOf(repo2), { running: false, numbers: [] });
+  assert.deepEqual(await queueOf(repo2), { running: false, numbers: [], paused: null });
 });
 
 test("an unclaimed spec card in Issues is started with Solve all tickets: its tickets come from its open sub-issues", skip, async () => {
@@ -312,7 +362,7 @@ test("an unclaimed spec card in Issues is started with Solve all tickets: its ti
     ],
     "Solve all tickets records the spec's open sub-issues as its tickets",
   );
-  assert.deepEqual(await queueOf(repo3), { running: true, numbers: [10] });
+  assert.deepEqual(await queueOf(repo3), { running: true, numbers: [10], paused: null });
 });
 
 test(
@@ -328,18 +378,18 @@ test(
     await stopServer();
     await startServer();
 
-    assert.deepEqual(await queueOf(repo4), { running: true, numbers: [1, 2, 3] }, "the restarted server still has the queue");
+    assert.deepEqual(await queueOf(repo4), { running: true, numbers: [1, 2, 3], paused: null }, "the restarted server still has the queue");
     assert.equal((await solveAllIssues(repo4)).status, 409, "the restarted queue still refuses a second start");
     assert.equal(await cardColumn(repo4, first), "doing", "the card the queue waits on is still on the board");
 
-    // The restart stopped the card's run: the user resumes it from Issues, as Solve all does.
-    assert.equal((await api("POST", `/api/sessions/${first}/move`, { column: "issues" })).status, 200);
-    assert.equal((await api("POST", `/api/sessions/${first}/move`, { column: "doing" })).status, 200);
+    // The restart stopped the card's run: the user resumes it with Retry. The queue still waits on it.
+    assert.equal((await api("POST", `/api/sessions/${first}/pipeline`, { action: "retry" })).status, 200);
+    assert.deepEqual(await queueOf(repo4), { running: true, numbers: [1, 2, 3], paused: null }, "the queue waits on the resumed card and starts no next card");
     await toReview(repo4, 1);
 
     const second = await waitForValue(() => sessionForIssue(repo4, 2), { message: "the restarted queue never started issue #2" });
     assert.equal(await cardColumn(repo4, second.id), "doing");
-    assert.deepEqual(await queueOf(repo4), { running: true, numbers: [2, 3] });
+    assert.deepEqual(await queueOf(repo4), { running: true, numbers: [2, 3], paused: null });
   },
 );
 
@@ -374,6 +424,142 @@ test(
       return (await sessionsOf(repo5)).filter((s) => s.issueRef === `${repo5}#3`).length === 0;
     }, { message: "the queue did not finish by skipping the Abandoned card #3: it started a fresh card for it, or it is still waiting" });
     assert.ok(finished);
-    assert.deepEqual(await queueOf(repo5), { running: false, numbers: [] }, "the queue is over: its last step was skipped, not started");
+    assert.deepEqual(await queueOf(repo5), { running: false, numbers: [], paused: null }, "the queue is over: its last step was skipped, not started");
+  },
+);
+
+test(
+  "a queued card that waits on the user's answer pauses the queue; the pause survives a restart, and a Retry that reaches Review starts the next card",
+  skip,
+  async () => {
+    // The card's own ticket pushes: its `git push` is a gated call, so the run waits on the user.
+    seedPlainIssues(repo6, [
+      { number: 1, title: "Add dark mode", body: "Support a dark theme. PUSHME" },
+      { number: 2, title: "Fix the login page", body: "Fix the login page crash." },
+      { number: 3, title: "Write the setup guide", body: "Write a setup guide." },
+    ]);
+    await addRepo(repo6);
+    const r = await solveAllIssues(repo6);
+    assert.equal(r.status, 200, r.json.error);
+    assert.deepEqual(r.json.queued, [1, 2, 3]);
+    assert.equal(r.json.started?.number, 1);
+    const first = r.json.started.sessionId;
+
+    // The ticket's gated `git push` is the answer the card waits on.
+    const ask = await waitForValue(() => pendingOf(first, "permission"), { message: `issue #1 of ${repo6} never asked the user` });
+    assert.ok(ask, "the card asks the user about its push");
+    assert.equal(await cardColumn(repo6, first), "doing", "the card that waits for the user is still in Doing");
+    assert.deepEqual(
+      await queueOf(repo6),
+      { running: true, numbers: [1, 2, 3], paused: 1 },
+      "the queue is paused on the card that waits for the user, and keeps its numbers",
+    );
+    assert.equal(await sessionForIssue(repo6, 2), undefined, "no next card starts while the queue is paused");
+
+    // The pause is stored with the queue, not with the live run.
+    await stopServer();
+    await startServer();
+    assert.deepEqual(await queueOf(repo6), { running: true, numbers: [1, 2, 3], paused: 1 }, "the restarted server keeps the pause");
+    assert.equal(await sessionForIssue(repo6, 2), undefined, "the restarted queue still starts no next card");
+    const again = await solveAllIssues(repo6);
+    assert.equal(again.status, 409, "a paused queue is still one queue: a second click is refused");
+    assert.match(again.json.error, /#1/, "the refusal names the card the queue waits on");
+
+    // The user resolves the card: Retry re-runs its ticket, and the card goes on to Review.
+    assert.equal((await api("POST", `/api/sessions/${first}/pipeline`, { action: "retry" })).status, 200);
+    await driveCard(first, (s) => s.phase === "pr", `issue #1 of ${repo6} never reached Review after a Retry`);
+    assert.equal(await cardColumn(repo6, first), "review");
+
+    const second = await waitForValue(() => sessionForIssue(repo6, 2), { message: "the paused queue never started issue #2" });
+    assert.equal(await cardColumn(repo6, second.id), "doing");
+    assert.deepEqual(await queueOf(repo6), { running: true, numbers: [2, 3], paused: null }, "the queue goes on with the next card by issue number");
+    await api("POST", `/api/sessions/${second.id}/stop`, {});
+  },
+);
+
+test("a queued card whose ticket is blocked holds the queue, and Abandoning it starts the next card", skip, async () => {
+  const first = await startStuckQueue(repo7, "BLOCKME", /is blocked/, "the stuck card is blocked");
+  assert.deepEqual(await queueOf(repo7), { running: true, numbers: [1, 2], paused: 1 }, "the blocked card holds the queue");
+  assert.equal(await sessionForIssue(repo7, 2), undefined, "no next card starts while the queue is held");
+
+  assert.equal((await api("POST", `/api/sessions/${first}/abandon`, {})).status, 200);
+  assert.equal(await cardColumn(repo7, first), undefined, "the Abandoned card is off the board");
+  const second = await waitForValue(() => sessionForIssue(repo7, 2), { message: "Abandoning the stuck card never started the next card" });
+  assert.equal(await cardColumn(repo7, second.id), "doing");
+  assert.deepEqual(await queueOf(repo7), { running: true, numbers: [2], paused: null }, "the queue is not paused: it waits on #2 now");
+  await api("POST", `/api/sessions/${second.id}/stop`, {});
+});
+
+test("moving the stuck queued card backward out of Doing starts the next card, and the card stays on the board", skip, async () => {
+  const first = await startStuckQueue(repo8, "BLOCKME", /is blocked/, "the stuck card is blocked");
+  assert.deepEqual(await queueOf(repo8), { running: true, numbers: [1, 2], paused: 1 }, "the stuck card holds the queue");
+  assert.equal(await sessionForIssue(repo8, 2), undefined, "no next card starts while the queue is held");
+
+  // The user drags the stuck card back to Issues: the queue is not waiting on it any more.
+  assert.equal((await api("POST", `/api/sessions/${first}/move`, { column: "issues" })).status, 200);
+  const second = await waitForValue(() => sessionForIssue(repo8, 2), { message: "the backward move never started the next card" });
+  assert.equal(await cardColumn(repo8, second.id), "doing");
+  assert.equal(await cardColumn(repo8, first), "issues", "the card the user moved back is still a card in Issues");
+  assert.deepEqual(
+    await queueOf(repo8),
+    { running: true, numbers: [2], paused: null },
+    "the queue moved on to the next card, and starts no second card for the card the user moved",
+  );
+  await api("POST", `/api/sessions/${second.id}/stop`, {});
+});
+
+test(
+  "a queued card whose ticket asks the user a decision pauses the queue, and answering it resumes the queue on the same card",
+  skip,
+  async () => {
+    seedPlainIssues(repo9, [
+      { number: 1, title: "Add dark mode", body: "Support a dark theme. ASKME" },
+      { number: 2, title: "Fix the login page", body: "Fix the login page crash." },
+    ]);
+    await addRepo(repo9);
+    const r = await solveAllIssues(repo9);
+    assert.equal(r.status, 200, r.json.error);
+    assert.equal(r.json.started?.number, 1);
+    const first = r.json.started.sessionId;
+
+    // The ticket's ask_user is the answer the card waits on.
+    const ask = await waitForValue(() => pendingOf(first, "decision"), { message: `issue #1 of ${repo9} never asked the user` });
+    assert.equal(await cardColumn(repo9, first), "doing", "the card that waits for the answer is still in Doing");
+    assert.deepEqual(
+      await queueOf(repo9),
+      { running: true, numbers: [1, 2], paused: 1 },
+      "the queue is paused on the card that waits on a decision, and keeps its numbers",
+    );
+    assert.equal(await sessionForIssue(repo9, 2), undefined, "no next card starts while the queue is paused");
+
+    // The user answers: the card works again, so the queue waits on it as a working card, not a stuck one.
+    assert.equal((await api("POST", `/api/sessions/${first}/respond`, { requestId: ask.id, value: ask.options[0] })).status, 200);
+    assert.deepEqual(await queueOf(repo9), { running: true, numbers: [1, 2], paused: null }, "the answer resumes the queue on the same card");
+    assert.equal(await sessionForIssue(repo9, 2), undefined, "the queue still waits on this card, so no next card starts");
+
+    await driveCard(first, (s) => s.phase === "pr", `issue #1 of ${repo9} never reached Review after the answer`);
+    const second = await waitForValue(() => sessionForIssue(repo9, 2), { message: "the paused queue never started issue #2" });
+    assert.equal(await cardColumn(repo9, second.id), "doing");
+    assert.deepEqual(await queueOf(repo9), { running: true, numbers: [2], paused: null }, "the queue goes on with the next card");
+    await api("POST", `/api/sessions/${second.id}/stop`, {});
+  },
+);
+
+test(
+  "a queued card whose run stopped without finishing holds the queue, and marking its ticket done starts the next card",
+  skip,
+  async () => {
+    const first = await startStuckQueue(repo10, "SILENTME", /stopped without finishing/, "the stuck run stopped without finishing");
+    assert.deepEqual(await queueOf(repo10), { running: true, numbers: [1, 2], paused: 1 }, "the stopped card holds the queue");
+    assert.equal(await sessionForIssue(repo10, 2), undefined, "no next card starts while the queue is held");
+
+    // Mark done: the ticket is done, the card goes on to the review, and the queue moves with it.
+    assert.equal((await api("POST", `/api/sessions/${first}/pipeline`, { action: "skip" })).status, 200, "mark the ticket done");
+    await driveCard(first, (s) => s.phase === "pr", `issue #1 of ${repo10} never reached Review after Mark done`);
+    assert.equal(await cardColumn(repo10, first), "review");
+    const second = await waitForValue(() => sessionForIssue(repo10, 2), { message: "marking the ticket done never started the next card" });
+    assert.equal(await cardColumn(repo10, second.id), "doing");
+    assert.deepEqual(await queueOf(repo10), { running: true, numbers: [2], paused: null }, "the queue goes on with the next card");
+    await api("POST", `/api/sessions/${second.id}/stop`, {});
   },
 );

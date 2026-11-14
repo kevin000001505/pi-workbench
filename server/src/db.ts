@@ -146,9 +146,10 @@ CREATE TABLE IF NOT EXISTS spec_watch (
   repo_id TEXT NOT NULL, number INTEGER NOT NULL, PRIMARY KEY (repo_id, number)
 );
 -- The Issue queue (issue #103): the issue numbers "Solve all issues" snapshotted, in number order.
--- state: waiting (its turn has not come), running (the card the queue waits on), done (it reached
--- Review), skipped (it was claimed or moved by hand, its start was refused, or its card was Abandoned
--- or archived before its turn). The rows go with the queue.
+-- state: waiting (its turn has not come), running (the card the queue waits on), paused (that card is
+-- stuck — blocked, stopped, or waiting on the user's answer — so the queue starts no next card, issue
+-- #104), done (it reached Review), skipped (it was claimed or moved by hand, its start was refused, or
+-- its card was Abandoned or archived before its turn). The rows go with the queue.
 CREATE TABLE IF NOT EXISTS issue_queue (
   repo_id TEXT NOT NULL, number INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'waiting', session_id TEXT,
   PRIMARY KEY (repo_id, number)
@@ -276,7 +277,7 @@ export function doneIssuesOf(db: Db, repoId: string): { number: number; title: s
 
 /** One Issue queue step (issue #103): the snapshotted issue number, its state, and the session the
  * queue started for it — the card it waits on, or the card the user dropped before its turn. */
-export type IssueQueueStepState = "waiting" | "running" | "done" | "skipped";
+export type IssueQueueStepState = "waiting" | "running" | "paused" | "done" | "skipped";
 export type IssueQueueRow = { number: number; state: IssueQueueStepState; sessionId: string | null };
 
 /**

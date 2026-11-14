@@ -112,6 +112,24 @@ export function startMockGitHub(root: string, login = "kevin") {
         labels: [], assignees: [], updated_at: updatedAt, html_url: `https://github.com/${owner}/${name}/issues/${start + i}`,
       });
   };
+  /**
+   * One plain feed issue with a body the test chooses — a ticket body that carries BLOCKME, for
+   * example. Seeding it first means the repo's feed holds only what the test seeded.
+   */
+  const seedIssue = (owner: string, name: string, issue: { number: number; title: string; body: string; updatedAt?: string }) => {
+    issues.push({
+      owner,
+      name,
+      number: issue.number,
+      title: issue.title,
+      body: issue.body,
+      state: "open",
+      labels: [],
+      assignees: [],
+      updated_at: issue.updatedAt ?? "2025-01-05T00:00:00Z",
+      html_url: `https://github.com/${owner}/${name}/issues/${issue.number}`,
+    });
+  };
   /** Drop a spec's seed: the issue no longer resolves, as a deleted issue does not. */
   const forgetSubIssues = (owner: string, name: string, number: number) => {
     delete subIssueSeeds[`${owner}/${name}#${number}`];
@@ -391,7 +409,7 @@ export function startMockGitHub(root: string, login = "kevin") {
     send(404, { message: `mock has no ${req.method} ${p}` });
   });
 
-  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; checkRuns: typeof checkRuns; closed: typeof closed; lockedIssues: typeof lockedIssues; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; bulkSeedIssues: typeof bulkSeedIssues; forgetSubIssues: typeof forgetSubIssues; close: () => Promise<void>; pullFailures: boolean; issueFailures: boolean; graphqlCalls: number; slowMs: number }>((resolve) => {
+  return new Promise<{ url: string; pulls: any[]; issues: any[]; comments: any[]; checkRuns: typeof checkRuns; closed: typeof closed; lockedIssues: typeof lockedIssues; createBare: typeof createBare; seedSubIssues: typeof seedSubIssues; seedIssue: typeof seedIssue; bulkSeedIssues: typeof bulkSeedIssues; forgetSubIssues: typeof forgetSubIssues; close: () => Promise<void>; pullFailures: boolean; issueFailures: boolean; graphqlCalls: number; slowMs: number }>((resolve) => {
     server.listen(Number(process.env.MOCK_GH_PORT ?? 0), "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
       resolve({
@@ -404,6 +422,7 @@ export function startMockGitHub(root: string, login = "kevin") {
         lockedIssues,
         createBare,
         seedSubIssues,
+        seedIssue,
         bulkSeedIssues,
         forgetSubIssues,
         close: () => new Promise((r) => server.close(() => r())),

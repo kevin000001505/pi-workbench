@@ -317,17 +317,30 @@ export function queueNumbers(unclaimed: Card[], sessions: IssueClaimSource[], re
 }
 
 /** The Issue queue's state, as the board reads it: the numbers it still has to start, plus the card it waits on. */
-export type IssueQueueState = { running: boolean; numbers: number[] };
+export type IssueQueueState = { running: boolean; numbers: number[]; paused: number | null };
+
+/**
+ * The one rule for a queue step that names the card the queue waits on: `running` while that card
+ * works, `paused` while it is stuck (issue #104). The server holds the queue on such a step, and the
+ * board states it. A step in any other state (`waiting`, `done`, `skipped`) is no card in the queue's way.
+ */
+export const holdsQueue = (state: string) => state === "running" || state === "paused";
 
 /**
  * The Issue queue's state from its stored steps (the issue_queue rows): a queue runs while it has a
  * card to start — one waiting, or the one it waits on — and its numbers are those cards, still in
- * issue-number order. A step that reached Review (done) or was skipped is not one of them, and a
- * queue with no steps left states nothing.
+ * issue-number order. A card the queue waits on that is stuck holds its place in the numbers and is
+ * the `paused` number (issue #104): the queue starts no next card until the user resolves it or drops
+ * it. A step that reached Review (done) or was skipped is not one of them, and a queue with no steps
+ * left states nothing.
  */
 export function issueQueueState(steps: { number: number; state: string }[]): IssueQueueState {
-  const numbers = steps.filter((s) => s.state === "waiting" || s.state === "running").map((s) => s.number);
-  return { running: numbers.length > 0, numbers };
+  const live = steps.filter((s) => s.state === "waiting" || holdsQueue(s.state));
+  return {
+    running: live.length > 0,
+    numbers: live.map((s) => s.number),
+    paused: steps.find((s) => s.state === "paused")?.number ?? null,
+  };
 }
 
 /** An issue a merged card closed, as the board's Done column reads it. */

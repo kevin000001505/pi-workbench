@@ -115,7 +115,8 @@ function textOf(content: unknown): string {
  * - to-tickets: ask to approve → write .scratch files → record_tickets (3 tickets) → done; a
  *   "Change it" answer ends the run with a question instead
  * - tdd (a ticket): commit a line for the ticket (and `git push`, a gated call, if the ticket says
- *   PUSHME) → finish_ticket (blocked if the ticket says BLOCKME) → done
+ *   PUSHME) → finish_ticket (blocked if the ticket says BLOCKME) → done; a ticket that says ASKME
+ *   (with SLOWME, or alone) asks the user a decision first and waits on that answer
  * - code-review: commit a fix and `git push` it (a gated call) → finish_review → done
  * - resolving-merge-conflicts (the base's work.txt keeps every word an earlier test pushed, so the
  *   newest word is checked first): keep both sides of every conflicted hunk in work.txt and commit the
@@ -198,9 +199,13 @@ function pipelineScript(userText: string, step: number, lastResult: string, conv
     if (fixing && userText.includes("FIXLOOPME")) return { tool: { name: "bash", args: { command: "echo fixing; exit 1" } } };
     const stuck = fixing ? undefined : stuckTicket(userText, step);
     if (stuck) return stuck;
+    // ASKME alone (not with SLOWME, which stuckTicket answers first): the ticket asks the user a
+    // decision before it works, so the run waits on that answer.
+    const asks = !fixing && userText.includes("ASKME");
+    if (asks && step === 0) return { tool: { name: "ask_user", args: { question: "Which file does this ticket change?", options: ["work.txt", "notes.txt"] } } };
     const push = userText.includes("PUSHME") ? " && git push -q origin HEAD" : "";
-    if (step === 0) return { tool: { name: "bash", args: { command: `echo "ticket ${num}" >> work.txt && git add -A && git commit -qm "Ticket ${num}"${push} && echo committed` } } };
-    if (step === 1) {
+    if (step === (asks ? 1 : 0)) return { tool: { name: "bash", args: { command: `echo "ticket ${num}" >> work.txt && git add -A && git commit -qm "Ticket ${num}"${push} && echo committed` } } };
+    if (step === (asks ? 2 : 1)) {
       const blocked = userText.includes("BLOCKME");
       return { tool: { name: "finish_ticket", args: { status: blocked ? "blocked" : "done", note: blocked ? "Needs a docs folder decision" : `Ticket ${num} appended to work.txt` } } };
     }

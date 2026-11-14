@@ -46,7 +46,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { claimRefs, type Column, COLUMNS, issueNumberOf, type IssueQueueState, issueQueueState, type PrState, resolvedNote, sessionColumn } from "../../shared/board.ts";
+import { claimRefs, type Column, COLUMNS, holdsQueue, issueNumberOf, type IssueQueueState, issueQueueState, type PrState, resolvedNote, sessionColumn } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
   configureAutoApprove,
@@ -869,7 +869,9 @@ export class SessionManager extends EventEmitter {
       this.touch(id);
       s.lastSettleAborted = !!rec.aborted;
       void this.afterSettled(id, s).catch((err) => {
-        this.update(id, { attention: `Pipeline error: ${err.message}` });
+        // A phase transition that threw leaves the card stuck with the reason: the same stuck point
+        // flag names, so the Issue queue pauses on it too (issue #104).
+        this.flag(id, `Pipeline error: ${err.message}`);
         this.emitSummary(id, true);
       });
     }
@@ -944,6 +946,7 @@ export class SessionManager extends EventEmitter {
       });
     }
     s.pending.set(req.id, req);
+    this.pauseForPending(id, req);
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
     this.emitSummary(id, true);
   }
@@ -971,6 +974,7 @@ export class SessionManager extends EventEmitter {
     }
     if (verdict.outcome === "failed") {
       req.judge = { state: "failed", by: verdict.by, note: verdict.note };
+      this.pauseForPending(id, req);
       this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
       this.emitSummary(id, true);
       return;
@@ -979,6 +983,7 @@ export class SessionManager extends EventEmitter {
     const reviewerKey = savedReviewerKey(this.secrets);
     if (!settings.reviewer.model || !reviewerKey.reviewerKey) {
       req.judge = { state: "waiting", by: verdict.by, rating: verdict.rating, note: verdict.note };
+      this.pauseForPending(id, req);
       this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
       this.emitSummary(id, true);
       return;
@@ -1000,6 +1005,7 @@ export class SessionManager extends EventEmitter {
     // An escalation or a reviewer failure: the card waits for the user with the note.
     req.review = { state: rv.outcome === "escalate" ? "escalated" : "failed", by: rv.by, note: rv.outcome === "escalate" ? rv.reason : rv.note };
     req.reviewer = { state: rv.outcome === "escalate" ? "waiting" : "failed", by: rv.by, note: rv.outcome === "escalate" ? rv.reason : rv.note };
+    this.pauseForPending(id, req);
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
     this.emitSummary(id, true);
   }
@@ -1096,6 +1102,8 @@ export class SessionManager extends EventEmitter {
     s.pending.delete(req.id);
     s.reviews.get(req.id)?.abort();
     s.reviews.delete(req.id);
+    // The user answered: the card works again, so the Issue queue is no longer paused on it (issue #104).
+    this.resumeQueueStep(id);
     this.emit("event", id, { type: "wb_pending", pending: [...s.pending.values()] });
     this.emitSummary(id, true);
   }
@@ -1121,6 +1129,8 @@ export class SessionManager extends EventEmitter {
       this.update(id, { attention: null });
       this.emitSummary(id, true);
     }
+    // A reply continues the card: the Issue queue waits on it as a working card again (issue #104).
+    this.resumeQueueStep(id);
     this.touch(id);
     return s.proc!.call<{ disposition: string }>(cmd);
   }
@@ -1566,6 +1576,8 @@ export class SessionManager extends EventEmitter {
 
   private flag(id: string, reason: string) {
     this.update(id, { attention: reason });
+    // The card the Issue queue waits on is stuck: the queue pauses on it (issue #104).
+    this.pauseQueueStep(id);
     this.emit("event", id, { type: "wb_notify", message: reason, level: "warning" });
   }
 
@@ -1667,6 +1679,8 @@ export class SessionManager extends EventEmitter {
     this.update(id, { phase: "ready", attention: null, solo_ticket: null });
     await this.stop(id);
     await this.dropRun(id, merging);
+    // The card left Doing: the queue is not waiting on it any more, so the next card starts (issue #104).
+    await this.releaseQueueStep(id, "skipped");
   }
 
   /** Whether the run on screen is the merge run: it works, or the card still shows it after a restart. */
@@ -1707,6 +1721,8 @@ export class SessionManager extends EventEmitter {
     await this.dropRun(id, merging);
     // A ticket the stopped run left `running` is not worked on while the card is in To do.
     for (const t of this.tickets(id)) if (t.status === "running") this.updateTicket(id, t.num, { status: "ready" });
+    // The card left Doing for a new plan: the queue goes on to its next card (issue #104).
+    await this.releaseQueueStep(id, "skipped");
     await this.send(id, reworkPrompt(this.row(id).spec_ref));
   }
 
@@ -1726,7 +1742,10 @@ export class SessionManager extends EventEmitter {
    * phase `pr`) before it starts the next one. A card the queue starts makes its own move to Doing:
    * Solve for a plain issue, Solve all tickets for a spec issue, Solve all for a session paused in
    * Issues. A queued card that left Issues by hand before its turn is skipped, and a card whose start
-   * is refused is skipped too, so the queue never stops on one card. A repo has one queue at a time:
+   * is refused is skipped too, so the queue never stops on one card. A card the queue started that is
+   * blocked, stopped, or waiting on the user's answer pauses the queue instead (issue #104): it starts
+   * no next card until the user resolves that card and it reaches Review, or drops it or moves it back
+   * out of Doing. A repo has one queue at a time:
    * a second click while one runs is refused with 409.
    */
   async startQueue(repoId: string, numbers: number[]): Promise<{ queued: number[]; skipped: number[]; started: { number: number; sessionId: string } | null }> {
@@ -1735,9 +1754,11 @@ export class SessionManager extends EventEmitter {
     if (this.queueRuns.has(repo.id)) throw Object.assign(new Error(`The Issue queue starts ${repo.id}'s cards now: one card works already.`), { status: 409 });
     const rows = issueQueueOf(this.db, repo.id);
     if (rows.length) {
-      const running = rows.find((s) => s.state === "running");
+      const held = rows.find((s) => holdsQueue(s.state));
       throw Object.assign(
-        new Error(`The Issue queue already runs for ${repo.id}: it works on issue #${(running ?? rows[0]).number}, and ${rows.length} card${rows.length === 1 ? "" : "s"} are left in it.`),
+        new Error(
+          `The Issue queue already runs for ${repo.id}: it ${held?.state === "paused" ? "waits on stuck issue" : "works on issue"} #${(held ?? rows[0]).number}, and ${rows.length} card${rows.length === 1 ? "" : "s"} are left in it.`,
+        ),
         { status: 409 },
       );
     }
@@ -1758,13 +1779,56 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * The Issue queue's step for this card in this state, or null when the card is in no queue.
+   * A session the db does not have (one the user just deleted) changes nothing.
+   */
+  private queueStepOf(id: string, state: IssueQueueStepState): { repoId: string; number: number } | null {
+    const row = this.db.prepare("SELECT repo_id FROM sessions WHERE id = ?").get(id) as { repo_id: string } | undefined;
+    if (!row) return null;
+    const step = issueQueueOf(this.db, row.repo_id).find((s) => s.sessionId === id && s.state === state);
+    return step ? { repoId: row.repo_id, number: step.number } : null;
+  }
+
+  /**
+   * The card the Issue queue waits on is stuck: its run ended Blocked or Stopped, or it waits on the
+   * user's answer to a permission or a decision (issue #104). The queue pauses on it and starts no
+   * next card. The pause is a stored row, not live-session state, so a server restart reads it back.
+   */
+  private pauseQueueStep(id: string) {
+    const step = this.queueStepOf(id, "running");
+    if (!step) return;
+    issueQueueStep(this.db, step.repoId, step.number, "paused", id);
+    // The queue's state is part of the board: open boards fetch GET /api/board again.
+    this.emit("board", step.repoId);
+  }
+
+  /** A pending request the card will not get past without the user: pause the queue on it (issue #104). */
+  private pauseForPending(id: string, req: UiRequest) {
+    if (waitsOnUser(req)) this.pauseQueueStep(id);
+  }
+
+  /** The card works again — the user answered, replied, or started a fresh run: the queue waits on it running. */
+  private resumeQueueStep(id: string) {
+    const step = this.queueStepOf(id, "paused");
+    if (!step) return;
+    // The card is not working again while it still waits on an answer the user has not given.
+    if ([...(this.live.get(id)?.pending ?? []).values()].some(waitsOnUser)) return;
+    issueQueueStep(this.db, step.repoId, step.number, "running", id);
+    this.emit("board", step.repoId);
+  }
+
+  /**
    * Start the next card the queue has not started, lowest number first, and skip the numbers that are
    * no longer a card in Issues. With nothing left the queue is over: its rows go, and the board says so.
    */
   private async startNextQueuedCard(repoId: string): Promise<{ started: { number: number; sessionId: string } | null; skipped: number[] }> {
     const skipped: number[] = [];
     for (;;) {
-      const step = issueQueueOf(this.db, repoId).find((s) => s.state === "waiting");
+      const rows = issueQueueOf(this.db, repoId);
+      // The queue holds one card at a time (issue #104): the card it waits on works now, or is stuck
+      // and pauses the queue. Neither a next card starting nor the rows going is right while it is there.
+      if (rows.some((s) => holdsQueue(s.state))) return { started: null, skipped };
+      const step = rows.find((s) => s.state === "waiting");
       if (!step) {
         issueQueueClear(this.db, repoId);
         this.emit("board", repoId);
@@ -1827,11 +1891,11 @@ export class SessionManager extends EventEmitter {
 
   /**
    * The Issue queue's step for this card. The card the queue waited on reached Review (its PR is
-   * open) or Done, or the user dropped it (Abandon or archive). A card the queue never started
-   * changes nothing, unless the queue still has a waiting card for the issue this card works on:
-   * the user dropped that card with this one, and the queue starts no fresh card for the issue.
-   * `state` says how the card left: `done` for Review or Done, `skipped` for a card the user
-   * dropped, so the queue never waits on a card that is gone.
+   * open) or Done, or the user dropped it (Abandon or archive) or moved it backward out of Doing.
+   * A card the queue never started changes nothing, unless the queue still has a waiting card for
+   * the issue this card works on: the user dropped that card with this one, and the queue starts no
+   * fresh card for the issue. `state` says how the card left: `done` for Review or Done, `skipped`
+   * for a card the user dropped or moved out of Doing, so the queue never waits on a card that is gone.
    */
   private async releaseQueueStep(id: string, state: IssueQueueStepState) {
     const row = this.db
@@ -1840,7 +1904,8 @@ export class SessionManager extends EventEmitter {
     if (!row) return;
     const steps = issueQueueOf(this.db, row.repo_id);
     if (!steps.length) return;
-    const running = steps.find((s) => s.state === "running" && s.sessionId === id);
+    // The step is the card the queue waits on: running while it works, paused while it is stuck.
+    const running = steps.find((s) => holdsQueue(s.state) && s.sessionId === id);
     if (running) {
       issueQueueStep(this.db, row.repo_id, running.number, state, id);
       await this.startNextQueuedCard(row.repo_id);
