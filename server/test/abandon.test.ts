@@ -34,8 +34,7 @@ async function boardEvents() {
 /** A repo of its own, so a direct card's branch, PR and worktree are only its own. */
 async function directRepo(name: string) {
   await setup();
-  // A repo already set up for the agent skills: its card's session is the only session on it.
-  gh.createBare("kevin", name, { setup: true });
+  gh.createBare("kevin", name);
   assert.equal((await api("POST", "/api/repos", { id: `kevin/${name}` })).status, 200);
   return `kevin/${name}`;
 }
@@ -49,6 +48,18 @@ function gitOf(repoId: string) {
   };
 }
 
+/**
+ * Commit the card's own work in its worktree, so its PR carries that work and nothing else. A new
+ * session may still run the setup step on its own branch (the repo's setup card may not have landed
+ * its commit yet, issue #100), so the card's work is what the test writes here.
+ */
+function commitWork(worktree: string, line = "the quick fix") {
+  fs.writeFileSync(path.join(worktree, "work.txt"), `${line}\n`);
+  const sh = (...args: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@x", ...args], { cwd: worktree, stdio: "pipe" });
+  sh("add", "work.txt");
+  sh("commit", "-qm", "Note the work");
+}
+
 /** A direct session with its PR recorded: its card is in Review, its branch is on GitHub. */
 async function directToReview(repoId: string, title: string, opts: { issueRef?: string; workLine?: string } = {}) {
   const d = (await api("POST", "/api/sessions", {
@@ -59,15 +70,12 @@ async function directToReview(repoId: string, title: string, opts: { issueRef?: 
     ...(opts.issueRef ? { issueRef: opts.issueRef } : {}),
   })).json;
   assert.ok(d.id, JSON.stringify(d));
-  // A repo already set up starts a direct session past setup, so its branch needs its own commit
-  // before a PR can open: its line in work.txt. A base branch that adds a line there conflicts with it.
+  // A direct session may still run the setup step on its own branch, so the test commits the card's
+  // own work: that commit is what its PR carries.
   await waitFor(async () => (await summary(d.id)).phase === "direct", 120_000);
   const worktree = path.join(process.env.DATA_DIR!, "worktrees", d.id);
-  const sh = (...args: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@x", ...args], { cwd: worktree, stdio: "pipe" });
-  fs.writeFileSync(path.join(worktree, "work.txt"), `${opts.workLine ?? "note the work"}\n`);
-  sh("add", "work.txt");
-  sh("commit", "-qm", "Note the work");
-  const pr = await api("POST", `/api/sessions/${d.id}/pr`, { title, body: "## Summary\n- docs/agents/issue-tracker.md" });
+  commitWork(worktree, opts.workLine ?? "the quick fix");
+  const pr = await api("POST", `/api/sessions/${d.id}/pr`, { title, body: "## Summary\n- work.txt" });
   assert.equal(pr.status, 200, JSON.stringify(pr.json));
   const card = await waitFor(async () => (await board(repoId)).find((c) => c.id === d.id && c.column === "review"), 120_000);
   return {

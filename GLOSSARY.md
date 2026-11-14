@@ -5,7 +5,7 @@ Self-hosted web UI that drives the pi coding agent on your repos. This glossary 
 ## Language
 
 **Agent-skills setup**:
-The one time a tracked repo gets the files the agent skills need (the setup marker file `docs/agents/issue-tracker.md` and its companions). The workbench records the state on the repo row — `set_up`, `in_progress`, or `not_set_up` — and the Repos page states it. A repo that is not set up starts its **setup session** when the workbench adds it, and it has a **Run setup** action to start one: that session runs `/setup-matt-pocock-skills`, and when that run settles the workbench lands its commit on the repo's default branch, records `set_up`, and puts the card in Done. A repo recorded `set_up` starts every card past setup, so no repo runs the setup twice.
+The one time a tracked repo gets the files the agent skills need (the setup marker file `docs/agents/issue-tracker.md` and its companions). The workbench records `set_up` or `not_set_up` on the repo row, and the Repos page states that, or **setup in progress** while the repo's setup session runs its setup. A repo that is not set up starts its **setup session** when the workbench adds it, and it has a **Run setup** action to start one when no setup session runs: that session runs `/setup-matt-pocock-skills`, and when that run settles the workbench lands its commit on the repo's default branch, records `set_up`, and puts the card in Done. A repo recorded `set_up` starts every card past setup, so no repo runs the setup twice.
 _Avoid_: repo setup (say **Run setup** for the action, **setup session** for the session it starts), setup check (the workbench checks the marker file once, then reads the record)
 
 **Issue**:
@@ -83,6 +83,14 @@ _Avoid_: retry (a retry re-runs the same ticket with the same model; a fix run s
 **Retro run**:
 A run at the end of a spec that reviews the rescued tickets with the `retro` skill and only proposes changes.
 _Avoid_: code review (the review phase reads every change; the retro reads only the rescued tickets)
+
+**Setup session**:
+The one session the workbench starts when you add a repo recorded as not set up, or when you tap **Run setup** on a repo that has none; it runs only the agent-skills setup skill and holds no task. Its card sits in To do while it works, and lands in Done when the workbench pushes its setup commit to the repo's default branch — no pull request, no Approve.
+_Avoid_: setup run (a setup run is the setup step inside any session, not the session whose whole job is setup)
+
+**Setup run**:
+The setup step a session runs first, on a repo its recorded setup state does not hold as set up. The record decides it, not the worktree, so no repo runs the setup twice.
+_Avoid_: setup session (that is the one session whose whole job is this step, and whose commit lands on the default branch)
 
 ### Board
 

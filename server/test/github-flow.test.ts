@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import { startMockGitHub } from "./mock-github.ts";
+import { ISSUE_TRACKER_DOC, editRemoteFile } from "./remote-repo.ts";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wb-gh-"));
 const remotes = path.join(tmp, "remotes");
@@ -391,4 +392,110 @@ test("a bad token surfaces GitHub's message", async () => {
   const { GitHub, GitHubError } = await import("../src/github.ts");
   await assert.rejects(new GitHub("nope").user(), (e: any) => e instanceof GitHubError && e.status === 401 && /Bad credentials/.test(e.message));
   assert.throws(() => new GitHub(undefined), /GITHUB_TOKEN/);
+});
+
+// --- the repo's recorded agent-skills setup state ----------------------------------------------
+
+const addLocalRepo = async (db: any, name: string) => {
+  const { addRepo } = await import("../src/repos.ts");
+  return addRepo(db, { owner: "kevin", name, defaultBranch: "main", private: true }, env);
+};
+
+/** Put `file` on a local remote's default branch (`content`), or take it off (`null`). */
+const changeRemoteFile = (name: string, file: string, content: string | null) => editRemoteFile(remotes, "kevin", name, file, content);
+
+test("adding a repo whose default branch carries the setup marker records it as set up", async () => {
+  const { openDb } = await import("../src/db.ts");
+  const { config, SETUP_MARKER } = await import("../src/config.ts");
+  const { recordedSetupState } = await import("../src/repos.ts");
+  const db = openDb(config.dbFile);
+  gh.createBare("kevin", "setup-set", { [SETUP_MARKER]: ISSUE_TRACKER_DOC });
+
+  const repo = await addLocalRepo(db, "setup-set");
+
+  assert.equal(recordedSetupState(db, repo.id), "set_up");
+});
+
+test("adding a repo without the setup marker records it as not set up, and starts no session", async () => {
+  const { openDb } = await import("../src/db.ts");
+  const { config } = await import("../src/config.ts");
+  const { recordedSetupState } = await import("../src/repos.ts");
+  const db = openDb(config.dbFile);
+  gh.createBare("kevin", "setup-missing");
+
+  const repo = await addLocalRepo(db, "setup-missing");
+
+  assert.equal(recordedSetupState(db, repo.id), "not_set_up");
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE repo_id = ?").get(repo.id) as { n: number }).n, 0, "this ticket starts no setup session");
+});
+
+test("the recorded setup state answers later reads with no git check", async () => {
+  const { openDb } = await import("../src/db.ts");
+  const { config, SETUP_MARKER } = await import("../src/config.ts");
+  const { clonePath, getRepo, recordedSetupState, repoSetupState } = await import("../src/repos.ts");
+  const db = openDb(config.dbFile);
+  gh.createBare("kevin", "setup-cached", { [SETUP_MARKER]: ISSUE_TRACKER_DOC });
+  const added = await addLocalRepo(db, "setup-cached");
+  assert.equal(recordedSetupState(db, added.id), "set_up");
+  // The clone is gone, so git cannot answer at all: only the record can. A git check would answer
+  // "not_set_up" here and overwrite the record.
+  const repo = getRepo(db, "kevin/setup-cached")!;
+  fs.rmSync(clonePath(repo), { recursive: true, force: true });
+
+  assert.equal(await repoSetupState(db, repo), "set_up");
+  assert.equal(recordedSetupState(db, repo.id), "set_up", "the read left the record alone");
+});
+
+test("a repo added before this record existed gets one marker check, which records what it finds", async () => {
+  const { openDb } = await import("../src/db.ts");
+  const { config, SETUP_MARKER } = await import("../src/config.ts");
+  const { recordedSetupState, repoSetupState } = await import("../src/repos.ts");
+  const db = openDb(config.dbFile);
+  gh.createBare("kevin", "setup-old-set", { [SETUP_MARKER]: ISSUE_TRACKER_DOC });
+  gh.createBare("kevin", "setup-old-missing");
+  const withMarker = await addLocalRepo(db, "setup-old-set");
+  const withoutMarker = await addLocalRepo(db, "setup-old-missing");
+  // Their rows as they were before the record existed: nothing recorded.
+  db.prepare("UPDATE repos SET setup_state = NULL WHERE id IN (?, ?)").run(withMarker.id, withoutMarker.id);
+
+  assert.equal(await repoSetupState(db, withMarker), "set_up");
+  assert.equal(recordedSetupState(db, withMarker.id), "set_up", "the check recorded what it found");
+  assert.equal(await repoSetupState(db, withoutMarker), "not_set_up");
+  assert.equal(recordedSetupState(db, withoutMarker.id), "not_set_up", "the check recorded what it found");
+});
+
+test("a repo recorded as not set up keeps that record on a later read, even when git now sees the marker", async () => {
+  const { openDb } = await import("../src/db.ts");
+  const { config, SETUP_MARKER } = await import("../src/config.ts");
+  const { clonePath, getRepo, recordedSetupState, repoNeedsSetup, repoSetupState } = await import("../src/repos.ts");
+  const db = openDb(config.dbFile);
+  gh.createBare("kevin", "setup-stale");
+  const added = await addLocalRepo(db, "setup-stale");
+  assert.equal(recordedSetupState(db, added.id), "not_set_up");
+  // The marker lands on the default branch and the clone fetches it: git now says the repo is set
+  // up. A read still answers from the record, which is what "check it once" costs the pages.
+  changeRemoteFile("setup-stale", SETUP_MARKER, ISSUE_TRACKER_DOC);
+  const repo = getRepo(db, "kevin/setup-stale")!;
+  execFileSync("git", ["-C", clonePath(repo), "fetch", "-q", "origin"]);
+
+  assert.equal(await repoNeedsSetup(repo), false, "git now reads the marker as there");
+  assert.equal(await repoSetupState(db, repo), "not_set_up", "the read took the record, not a new check");
+  assert.equal(recordedSetupState(db, repo.id), "not_set_up", "the read left the record alone");
+});
+
+test("re-adding a repo already recorded as set up keeps it set up when git no longer sees the marker", async () => {
+  const { openDb } = await import("../src/db.ts");
+  const { config, SETUP_MARKER } = await import("../src/config.ts");
+  const { recordedSetupState, repoNeedsSetup, repoSetupState } = await import("../src/repos.ts");
+  const db = openDb(config.dbFile);
+  gh.createBare("kevin", "setup-keep", { [SETUP_MARKER]: ISSUE_TRACKER_DOC });
+  const added = await addLocalRepo(db, "setup-keep");
+  assert.equal(recordedSetupState(db, added.id), "set_up");
+  // The marker goes off the default branch: git now says the repo needs setup, and the record says it does not.
+  changeRemoteFile("setup-keep", SETUP_MARKER, null);
+  const repo = await addLocalRepo(db, "setup-keep");
+
+  assert.equal(await repoNeedsSetup(repo), true, "git now reads the marker as gone");
+  assert.equal(recordedSetupState(db, repo.id), "set_up", "the record is not downgraded, so setup never runs twice");
+  assert.equal(await repoSetupState(db, repo), "set_up");
 });

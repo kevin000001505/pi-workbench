@@ -93,6 +93,25 @@ const columnOf = async (id: string) => (await board()).find((c) => c.id === id)?
 /** The column a session card sits in on a repo's board, for a repo other than the demo's. */
 const columnOfCard = (repoId: string) => async (id: string) => (await board(repoId)).find((c) => c.id === id)?.column;
 
+/** Adding a repo that is not set up starts a setup session (issue #99), and its card sits on the board.
+ * A test that lists a repo's feature cards drops that card with `featureCards`. */
+const SETUP_CARD = "Set up agent skills";
+const featureCards = async (repo?: string) => (await board(repo)).filter((c) => c.title !== SETUP_CARD);
+/** A board response's Done cards without the setup card (issue #99). */
+const doneCards = (cards: any[]) => cards.filter((c) => c.column === "done" && c.title !== SETUP_CARD);
+
+/**
+ * Commit the card's own work in its worktree, so its PR carries that work and nothing else. A new
+ * session may still run the setup step on its own branch (the repo's setup card may not have landed
+ * its commit yet, issue #100), so the card's work is what the test writes here.
+ */
+function commitWork(worktree: string, line = "the quick fix") {
+  fs.writeFileSync(path.join(worktree, "work.txt"), `${line}\n`);
+  const sh = (...args: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@x", ...args], { cwd: worktree, stdio: "pipe" });
+  sh("add", "work.txt");
+  sh("commit", "-qm", "Note the work");
+}
+
 /**
  * The ticket run starts the mock model got for one ticket: requests whose last message is that
  * ticket's start prompt. The mock repeats the whole history in every request of a run, so a later
@@ -110,33 +129,22 @@ after(async () => {
   if (hasPi) process.kill(process.pid, "SIGTERM");
 });
 
-/** A commit of the card's own on its branch: a repo already set up starts its session past setup. */
-function commitInWorktree(worktree: string, line: string) {
-  fs.writeFileSync(path.join(worktree, "work.txt"), `${line}\n`);
-  const sh = (...args: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@x", ...args], { cwd: worktree, stdio: "pipe" });
-  sh("add", "work.txt");
-  sh("commit", "-qm", "Note the work");
-}
-
-/** Setup abandoned on a fresh repo: it reads as not set up, and no setup card sits on its board. */
-async function dropSetup(repoId: string) {
-  const s = (await api("GET", "/api/sessions")).json.find((x: any) => x.repoId === repoId && x.title === "Set up agent skills");
-  assert.ok(s, "the repo's setup session");
-  assert.equal((await api("POST", `/api/sessions/${s.id}/abandon`, {})).status, 200);
-  await waitFor(async () => (await api("GET", "/api/repos")).json.find((r: any) => r.id === repoId)?.setup === "not_set_up");
-}
-
 test("the board lists a repo's pipeline sessions as cards in column order; a feature stops in Issues", { skip: !hasPi && "pi CLI not found" }, async () => {
   await waitFor(async () => (await fetch(`${base}/api/health`).catch(() => null))?.ok);
   assert.equal((await api("PUT", "/api/secrets", { scope: "global", name: "GITHUB_TOKEN", value: "ghp_test" })).status, 200);
   assert.equal((await api("PUT", "/api/settings/model", { baseUrl: mock.url })).status, 200);
   gh.createBare("kevin", "demo");
   assert.equal((await api("POST", "/api/repos", { id: "kevin/demo" })).status, 200);
-  // Setup is abandoned on it: its sessions run the setup step themselves, and the board shows only issues.
-  await dropSetup("kevin/demo");
 
-  // A fresh board shows the repo's plain open issues in Issues; no sessions yet.
+  // Adding the repo, which is recorded as not set up, starts its setup session (issue #99).
+  const setupRuns = (await api("GET", "/api/sessions")).json.filter((s: any) => s.repoId === "kevin/demo");
+  assert.equal(setupRuns.length, 1, JSON.stringify(setupRuns.map((s: any) => s.title)));
+  assert.equal(setupRuns[0].title, SETUP_CARD);
+  assert.equal(setupRuns[0].phase, "setup");
+
+  // A fresh board shows that card beside the repo's plain open issues in Issues.
   assert.deepEqual(await board(), [
+    { id: setupRuns[0].id, title: SETUP_CARD, column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: null, doneAt: null, specCard: false, subs: null },
     { id: "issue:1", title: "Add dark mode", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/1", doneAt: null, specCard: false, subs: null },
     { id: "issue:2", title: "Fix login Crash", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/2", doneAt: null, specCard: false, subs: null },
     { id: "issue:3", title: "Docs: setup guide", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/3", doneAt: null, specCard: false, subs: null },
@@ -180,11 +188,13 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
   const b = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Farewell", prompt: "add a farewell" })).json;
   await waitFor(async () => (await summary(b.id)).pending.some((p: any) => p.kind === "decision"));
   assert.equal((await summary(b.id)).phase, "grill");
-  // A direct session is a card in Doing too, even while it sets up.
+  // A direct session is a card in Doing too. The repo's setup card already landed its setup files
+  // on the default branch (issue #100), so this session starts with them and runs no setup step of
+  // its own; a fresh repo's direct session, which does set up, is the test after this one.
   const d = (await api("POST", "/api/sessions", { repoId: "kevin/demo", title: "Quick", prompt: "hello there", mode: "direct" })).json;
-  assert.equal(d.phase, "setup");
-  // The session cards, beside the plain issue cards, in column order.
-  const cards = (await board()).filter((c) => !c.id.startsWith("issue:"));
+  assert.equal(d.phase, "direct");
+  // The feature cards, beside the plain issue cards, in column order (the repo's setup card is no feature).
+  const cards = (await featureCards()).filter((c) => !c.id.startsWith("issue:"));
   assert.deepEqual(
     cards.map((c) => [c.title, c.column]),
     [
@@ -195,9 +205,9 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
   );
 
   // Each repo has its own board; its plain issues show too.
-  gh.createBare("kevin", "other", { setup: true });
+  gh.createBare("kevin", "other");
   assert.equal((await api("POST", "/api/repos", { id: "kevin/other" })).status, 200);
-  assert.deepEqual((await board("kevin/other")).map((c) => [c.title, c.column]), [
+  assert.deepEqual((await featureCards("kevin/other")).map((c) => [c.title, c.column]), [
     ["Add dark mode", "issues"],
     ["Fix login Crash", "issues"],
     ["Docs: setup guide", "issues"],
@@ -286,7 +296,7 @@ test("a card started from a spec's ticket issues skips Issues: Doing, then QA, t
   assert.equal((await summary(s.id)).reviewNote, "Fixed one naming issue");
 
   // The newest session card still sorts by column, after the older ones in To do and Issues.
-  const sessionCards = (await board()).filter((c) => !c.id.startsWith("issue:"));
+  const sessionCards = (await featureCards()).filter((c) => !c.id.startsWith("issue:"));
   assert.deepEqual(sessionCards.map((c) => c.column), ["todo", "issues", "doing", "review"]);
 
   // The badge follows the PR on GitHub: every check passed, a check failed, then a merge conflict.
@@ -306,7 +316,7 @@ function markDone(id: string) {
 }
 
 test("Done lists merged cards newest first, and a done limit hides the older ones", { skip: !hasPi && "pi CLI not found" }, async () => {
-  gh.createBare("kevin", "history", { setup: true });
+  gh.createBare("kevin", "history");
   assert.equal((await api("POST", "/api/repos", { id: "kevin/history" })).status, 200);
   const ids: string[] = [];
   for (const title of ["First", "Second", "Third"]) {
@@ -324,7 +334,7 @@ test("Done lists merged cards newest first, and a done limit hides the older one
   assert.equal((await api("POST", `/api/sessions/${ids[0]}/prompt`, { message: "one more thing" })).status, 200);
   assert.ok((await summary(ids[0])).updatedAt > touched, "the older card's session is now the latest updated");
   const all = await api("GET", "/api/board?repo=kevin/history");
-  const sessionTitles = (cards: any[]) => cards.filter((c) => !c.id.startsWith("issue:"));
+  const sessionTitles = (cards: any[]) => cards.filter((c) => !c.id.startsWith("issue:") && c.title !== SETUP_CARD);
   assert.deepEqual(
     sessionTitles(all.json.cards).map((c: any) => [c.title, c.column]),
     [["Third", "done"], ["Second", "done"], ["First", "done"]],
@@ -334,7 +344,7 @@ test("Done lists merged cards newest first, and a done limit hides the older one
   const two = await api("GET", "/api/board?repo=kevin/history&done=2");
   assert.equal(two.status, 200);
   assert.deepEqual(sessionTitles(two.json.cards).map((c: any) => c.title), ["Third", "Second"]);
-  assert.equal(two.json.doneHidden, 1);
+  assert.equal(two.json.doneHidden, 2, "the limit hides the oldest pipeline card and the repo's landed setup card");
   // "Show more" raises the limit.
   assert.equal(sessionTitles((await api("GET", "/api/board?repo=kevin/history&done=3")).json.cards).length, 3);
   assert.equal((await api("GET", "/api/board?repo=kevin/history&done=nope")).status, 400);
@@ -1444,23 +1454,24 @@ test("a Done card and a direct session do not claim their issue: the unclaimed c
 });
 
 test("a direct session's PR puts its card in Review with its PR badge; a backward drag of it is refused", { skip: !hasPi && "pi CLI not found" }, async () => {
-  gh.createBare("kevin", "directpr", { setup: true });
-  assert.equal((await api("POST", "/api/repos", { id: "kevin/directpr" })).json.setup, "set_up");
+  gh.createBare("kevin", "directpr");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/directpr" })).status, 200);
   const col = columnOfCard("kevin/directpr");
 
-  // A repo already set up starts the direct session past setup: its card stays in Doing until its PR opens.
+  // A direct session may still run the setup step on its own branch, so the test commits the card's
+  // own work: that commit is what its PR carries.
   const d = await api("POST", "/api/sessions", { repoId: "kevin/directpr", title: "Quick", prompt: "say hello", mode: "direct" });
   assert.equal(d.status, 200, JSON.stringify(d.json));
   const id = d.json.id;
-  await waitFor(async () => (await summary(id)).phase === "direct");
+  await waitFor(async () => (await summary(id)).phase === "direct", 120_000);
   assert.equal(await col(id), "doing", "no PR yet: the card is in Doing");
-  commitInWorktree(path.join(process.env.DATA_DIR!, "worktrees", id), "note the work");
+  commitWork(path.join(process.env.DATA_DIR!, "worktrees", id));
 
   const events = await boardEvents();
   const before = events.seen.length;
 
   // The session page's open-PR action records the PR: the phase is `pr`, and Done time stays unset.
-  const pr = await api("POST", `/api/sessions/${id}/pr`, { title: "Set up agent skills", body: "## Summary\n- docs/agents/issue-tracker.md" });
+  const pr = await api("POST", `/api/sessions/${id}/pr`, { title: "Quick fix", body: "## Summary\n- work.txt" });
   assert.equal(pr.status, 200, JSON.stringify(pr.json));
   const sum = await summary(id);
   assert.equal(sum.phase, "pr");
@@ -1511,21 +1522,21 @@ async function directToReview(repoId: string, title: string, opts: { issueRef?: 
     ...(opts.issueRef ? { issueRef: opts.issueRef } : {}),
   })).json;
   assert.ok(d.id, JSON.stringify(d));
+  // A direct session may still run the setup step on its own branch, so the test commits the card's
+  // own work: that commit is what its PR carries.
   await waitFor(async () => (await summary(d.id)).phase === "direct", 120_000);
-  // A repo already set up starts a direct session past setup, so its branch needs its own commit
-  // before a PR can open.
-  commitInWorktree(path.join(process.env.DATA_DIR!, "worktrees", d.id), "note the work");
-  const pr = await api("POST", `/api/sessions/${d.id}/pr`, { title, body: "## Summary\n- docs/agents/issue-tracker.md" });
+  const worktree = path.join(process.env.DATA_DIR!, "worktrees", d.id);
+  commitWork(worktree);
+  const pr = await api("POST", `/api/sessions/${d.id}/pr`, { title, body: "## Summary\n- work.txt" });
   assert.equal(pr.status, 200, JSON.stringify(pr.json));
   const card = await waitFor(async () => (await board(repoId)).find((c) => c.id === d.id && c.column === "review"), 120_000);
   const pull = gh.pulls.find((p) => p.number === card.pr.number);
-  const worktree = path.join(process.env.DATA_DIR!, "worktrees", d.id);
   return { id: d.id as string, pr: pull, number: pr.json.number as number, worktree, branch: (await summary(d.id)).branch as string };
 }
 
 test("Review → Done on a direct card is Approve: its PR merges with a merge commit, its branch and worktree go, and it lands in Done with its Done time, newest first beside the merged pipeline cards", { skip: !hasPi && "pi CLI not found" }, async () => {
-  gh.createBare("kevin", "directmerge", { setup: true });
-  assert.equal((await api("POST", "/api/repos", { id: "kevin/directmerge" })).json.setup, "set_up");
+  gh.createBare("kevin", "directmerge");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/directmerge" })).status, 200);
   const { sh, hasRef } = gitInBare("kevin/directmerge");
 
   // A pipeline card already in Done, with an older Done time: the direct card must land before it.
@@ -1576,7 +1587,7 @@ test("Review → Done on a direct card is Approve: its PR merges with a merge co
   assert.equal(card.pr.state, "merged");
   assert.equal(card.doneAt, moved.json.doneAt);
   assert.deepEqual(
-    cards.filter((c) => c.column === "done").map((c) => c.id),
+    doneCards(cards).map((c: any) => c.id),
     [id, older.id],
     "the Done cards, newest first, with no flat card for the closed issue",
   );
@@ -1594,12 +1605,12 @@ test("Review → Done on a direct card is Approve: its PR merges with a merge co
   assert.equal(issueCard.column, "done");
   assert.equal(issueCard.title, "Docs: setup guide");
   assert.ok(issueCard.doneAt >= at, "the issue carries its close time");
-  assert.deepEqual(after.filter((c) => c.column === "done").map((c) => c.id), ["issue:3", older.id]);
+  assert.deepEqual(doneCards(after).map((c: any) => c.id), ["issue:3", older.id]);
 });
 
 test("a board load delivers a direct card whose PR was merged by hand on GitHub", { skip: !hasPi && "pi CLI not found" }, async () => {
-  gh.createBare("kevin", "directhand", { setup: true });
-  assert.equal((await api("POST", "/api/repos", { id: "kevin/directhand" })).json.setup, "set_up");
+  gh.createBare("kevin", "directhand");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/directhand" })).status, 200);
   const { hasRef } = gitInBare("kevin/directhand");
   const { id, worktree, branch, number } = await directToReview("kevin/directhand", "Hand merge");
   assert.ok(hasRef(`refs/heads/${branch}`), "the branch is on GitHub");

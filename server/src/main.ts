@@ -13,7 +13,7 @@ import { checkRequestOrigin, type Ctx, HttpError, readJson, Router, sendJson, se
 import { listModelsAt, probeEndpoint } from "./llm.ts";
 import { githubDelivery } from "./delivery.ts";
 import { draftPr, openPr, changes } from "./prs.ts";
-import { addRepo, assertRepoName, clonePath, getRepo, listRepos, repoNeedsSetup, requireTrackedRepo } from "./repos.ts";
+import { addRepo, assertRepoName, clonePath, getRepo, listRepos, requireTrackedRepo } from "./repos.ts";
 import { assertUserScope, GLOBAL_SCOPE, SecretStore, userSecrets } from "./secrets.ts";
 import { startRescueProxy } from "./rescue-proxy.ts";
 import { SessionManager } from "./sessions.ts";
@@ -95,16 +95,6 @@ const sessions = new SessionManager(
   delivery,
 );
 
-/**
- * Track a repo, and start its agent-skills setup session at once when it reads as not set up, so
- * setup shows on the board and its questions reach the user. A repo already set up gets no session.
- */
-async function addAndSetup(input: { owner: string; name: string; defaultBranch: string; private: boolean }) {
-  const added = await addRepo(db, input, await gitEnv());
-  await sessions.ensureSetup(added.id);
-  return repoView(getRepo(db, added.id)!);
-}
-
 async function repoView(r: ReturnType<typeof listRepos>[number]) {
   return {
     id: r.id,
@@ -112,9 +102,22 @@ async function repoView(r: ReturnType<typeof listRepos>[number]) {
     name: r.name,
     defaultBranch: r.default_branch,
     private: !!r.private,
-    // The state the workbench recorded on the repo row; the git check runs only for a repo that has none.
+    // What the Repos page states: the recorded state, or `in_progress` while this repo's setup session works.
     setup: await sessions.setupState(r.id),
+    // The session that runs this repo's agent-skills setup, null when it has none.
+    setupSession: r.setup_session ?? null,
   };
+}
+
+/**
+ * Track a repo and start its setup session (issue #99): a repo recorded as not set up gets one
+ * session at once, a repo recorded as set up gets none. The response reads the row again, because
+ * the session is recorded on it.
+ */
+async function trackRepo(input: { owner: string; name: string; defaultBranch: string; private: boolean }) {
+  const repo = await addRepo(db, input, await gitEnv());
+  await sessions.startSetupSession(repo.id);
+  return repoView(getRepo(db, repo.id) ?? repo);
 }
 
 const router = new Router()
@@ -173,7 +176,7 @@ const router = new Router()
     const [owner, name] = String(body.id ?? "").split("/");
     assertRepoName(owner ?? "", name ?? "");
     const gh = await github().getRepo(owner, name);
-    return addAndSetup({ owner, name, defaultBranch: gh.default_branch, private: gh.private });
+    return trackRepo({ owner, name, defaultBranch: gh.default_branch, private: gh.private });
   })
   .on("POST", "/api/repos/create", async ({ body }) => {
     const name = String(body.name ?? "").trim();
@@ -184,8 +187,10 @@ const router = new Router()
       private: body.private !== false,
       org: body.org ? String(body.org) : undefined,
     });
-    return addAndSetup({ owner: gh.owner.login, name: gh.name, defaultBranch: gh.default_branch, private: gh.private });
+    return trackRepo({ owner: gh.owner.login, name: gh.name, defaultBranch: gh.default_branch, private: gh.private });
   })
+  // The Repos page's Run setup (issue #102): start this repo's setup session, 409 while one runs.
+  .on("POST", "/api/repos/:owner/:name/setup", async ({ params }) => sessions.runSetup(`${params.owner}/${params.name}`))
   .on("DELETE", "/api/repos/:owner/:name", async ({ params }) => {
     const id = `${params.owner}/${params.name}`;
     const repo = getRepo(db, id);
@@ -195,10 +200,6 @@ const router = new Router()
     fs.rmSync(clonePath(repo), { recursive: true, force: true });
     return { ok: true };
   })
-
-  // Run setup on a repo row: start that repo's agent-skills setup session. A repo whose setup
-  // session already works is refused with 409, so no repo runs the setup twice.
-  .on("POST", "/api/repos/:owner/:name/setup", async ({ params }) => sessions.startSetup(`${params.owner}/${params.name}`))
 
   // --- board ---------------------------------------------------------------------------------
   .on("GET", "/api/board", async ({ query }) => {

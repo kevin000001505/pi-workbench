@@ -12,7 +12,7 @@ import {
   withAutoAnswers,
   withMessages,
 } from "../../shared/transcript.ts";
-import { config, PROVIDER_ID, SETUP_MARKER, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
+import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
 import { doneIssuesOf, recordIssueDone, specWatchOf, specWatchRemove, type Db, type RepoRow, type SessionRow, type TicketRow } from "./db.ts";
 import { git, type GitEnv } from "./git.ts";
 import type { Delivery, MergeResult } from "./delivery.ts";
@@ -61,21 +61,7 @@ import {
   transcriptExcerpt,
   type ReviewContext,
 } from "./autoapprove.ts";
-import {
-  clonePath,
-  createWorktree,
-  getRepo,
-  listRepos,
-  recordedSetupState,
-  recordSetupSession,
-  recordSetupState,
-  removeWorktree,
-  repoNeedsSetup,
-  requireTrackedRepo,
-  type RepoSetupState,
-  slugify,
-  worktreeNeedsSetup,
-} from "./repos.ts";
+import { createWorktree, getRepo, listRepos, needsSetupRun, pushSetupCommit, recordSetUp, recordedSetupState, removeWorktree, repoSetupState, requireTrackedRepo, slugify, worktreeNeedsSetup, type RepoSetupState } from "./repos.ts";
 import { loadSshHosts } from "./ssh.ts";
 import type { SecretStore } from "./secrets.ts";
 import { getModelSettings, getPipelineSettings, LLM_KEY_ENV, rulesFile } from "./settings.ts";
@@ -140,7 +126,7 @@ export type UiResponse = { value?: string; confirmed?: boolean; cancelled?: bool
 export type Run = { id: string; label: string };
 
 /** What POST /api/sessions (and an unclaimed card's move) asks SessionManager.create for. */
-export type CreateInput = { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: StartFrom; soloTicket?: number };
+export type CreateInput = { repoId: string; title: string; baseBranch?: string; prompt: string; mode?: string; issueRef?: string; autoApprove?: unknown; typesafeSkill?: unknown; startFrom?: StartFrom; soloTicket?: number; /** The session runs only the agent-skills setup skill and holds no task. */ setupOnly?: boolean };
 
 export type SessionSummary = {
   id: string;
@@ -230,10 +216,10 @@ function latestTask(t: Transcript): { task: string; skill?: string } {
   return { task: task.length > 2000 ? `${task.slice(0, 2000)}…` : task, ...(expanded ? { skill: expanded[1] } : {}) };
 }
 
-/** The title of the session that runs a repo's agent-skills setup. */
-const REPO_SETUP_TITLE = "Set up agent skills";
+/** The title of the session that runs only the setup skill (see `SessionManager.startSetupSession`). */
+const SETUP_TITLE = "Set up agent skills";
 
-const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs for a repository the workbench has not set up for its agent skills yet. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push: the workbench lands your commit on the repository's default branch.`;
+const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs automatically on a repo the workbench has not recorded as set up. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push: the workbench pushes this commit to the repo's default branch.`;
 
 /** Standing instruction appended to every pi system prompt: explanations follow the asd-ste100 skill. */
 const EXPLAIN_PROMPT =
@@ -295,8 +281,8 @@ export class SessionManager extends EventEmitter {
   private reconciling = new Map<string, Promise<ReconcileResult>>();
   /** Issues (`owner/name#n`) whose new session is being created now. */
   private claiming = new Set<string>();
-  /** Repos whose setup session is being started now, so two Run setup calls at once start one. */
-  private startingSetup = new Set<string>();
+  /** Repos whose setup session is being created now; a second add of the same repo waits for the run. */
+  private setupRuns = new Map<string, Promise<SessionSummary | null>>();
 
   constructor(db: Db, secrets: SecretStore, gitEnv: () => Promise<GitEnv>, refreshSsh?: () => void, fetchTicketSeed?: (ref: string) => Promise<TicketSeed>, rescueProxy?: RescueProxy, delivery?: Delivery) {
     super();
@@ -471,76 +457,6 @@ export class SessionManager extends EventEmitter {
     s.loaded = true;
   }
 
-  /** Whether this session is the one recorded as its repo's agent-skills setup run. */
-  private isRepoSetupRun(row: SessionRow) {
-    const repo = getRepo(this.db, row.repo_id);
-    return !!repo?.setup_session && repo.setup_session === row.id;
-  }
-
-  /**
-   * The Repos page's Run setup: start the repo's agent-skills setup session, which sends the setup
-   * skill prompt and nothing else. A repo whose setup session already works is refused with 409, so
-   * no repo runs the setup twice, and a repo the workbench recorded as set up is refused too.
-   */
-  async startSetup(repoId: string): Promise<SessionSummary> {
-    const repo = requireTrackedRepo(this.db, repoId);
-    const state = await this.setupState(repo.id);
-    if (state === "set_up") throw Object.assign(new Error(`${repo.id} is already set up for the agent skills.`), { status: 409 });
-    if (state === "in_progress" || this.startingSetup.has(repo.id))
-      throw Object.assign(new Error(`Setup already runs for ${repo.id}: its card is on the board.`), { status: 409 });
-    // Held from the check until the session exists and its state is recorded, so a second Run setup
-    // at once is refused.
-    this.startingSetup.add(repo.id);
-    try {
-      const s = await this.create({ repoId: repo.id, title: REPO_SETUP_TITLE, prompt: "", mode: "pipeline", startFrom: "setup" });
-      // The repo is setting up now, and the session that does it is recorded: the Repos page states it,
-      // and a second Run setup reads it.
-      recordSetupState(this.db, repo.id, "in_progress");
-      recordSetupSession(this.db, repo.id, s.id);
-      return this.summary(s.id);
-    } finally {
-      this.startingSetup.delete(repo.id);
-    }
-  }
-
-  /**
-   * The agent-skills setup state the Repos page reads, from what the workbench recorded. A repo
-   * added before states were recorded gets one git check, and its answer is recorded, so later
-   * reads need none. A recorded `in_progress` whose setup session no longer works settles back to
-   * `not_set_up`, so the page can start setup again.
-   */
-  async setupState(repoId: string): Promise<RepoSetupState> {
-    const repo = requireTrackedRepo(this.db, repoId);
-    const recorded = recordedSetupState(repo);
-    if (recorded === "in_progress") {
-      if (this.setupRunWorks(repo)) return "in_progress";
-      recordSetupState(this.db, repo.id, "not_set_up");
-      recordSetupSession(this.db, repo.id, null);
-      return "not_set_up";
-    }
-    if (recorded) return recorded;
-    // No clone yet: nothing to check, and nothing to record.
-    if (!fs.existsSync(clonePath(repo))) return "not_set_up";
-    const found: RepoSetupState = (await repoNeedsSetup(repo)) ? "not_set_up" : "set_up";
-    recordSetupState(this.db, repo.id, found);
-    return found;
-  }
-
-  /** Adding a repo starts its agent-skills setup session at once, when the repo reads as not set up. */
-  async ensureSetup(repoId: string): Promise<SessionSummary | null> {
-    if ((await this.setupState(repoId)) !== "not_set_up") return null;
-    return this.startSetup(repoId);
-  }
-
-  /** Whether the repo's recorded setup session is still working. */
-  private setupRunWorks(repo: RepoRow) {
-    if (!repo.setup_session) return false;
-    const row = this.db.prepare("SELECT * FROM sessions WHERE id = ? AND archived = 0").get(repo.setup_session) as SessionRow | undefined;
-    if (!row || row.phase !== "setup") return false;
-    const s = this.live.get(row.id);
-    return !!s?.proc && !s.proc.exited;
-  }
-
   /**
    * A new session. A pipeline session whose issue ref names an issue of its repo claims it: a
    * second one for an issue that a card works on already (see claimRefs) is refused with 409.
@@ -565,6 +481,106 @@ export class SessionManager extends EventEmitter {
     }
   }
 
+  /**
+   * The session that sets up a repo's agent skills: one pipeline session that runs only the setup
+   * skill and holds no task. main.ts's repo routes call it when a repo is added (issue #99). The
+   * repo records the session as soon as its row exists (createSession), so a reader can tell that
+   * setup is in progress, and adding the repo again keeps the session it already has instead of
+   * starting a second one. A repo recorded as set up (see `repoSetupState`) needs none, so this
+   * returns null for it. A setup run that cannot start flags the session rather than failing the add.
+   */
+  async startSetupSession(repoId: string): Promise<SessionSummary | null> {
+    // Two adds of one repo at once share one run, so they make one setup session, as `create` does
+    // for two moves of one issue.
+    const inFlight = this.setupRuns.get(repoId);
+    if (inFlight) return inFlight;
+    const run = this.startSetupRun(repoId).finally(() => this.setupRuns.delete(repoId));
+    this.setupRuns.set(repoId, run);
+    return run;
+  }
+
+  private async startSetupRun(repoId: string): Promise<SessionSummary | null> {
+    const repo = requireTrackedRepo(this.db, repoId);
+    if ((await repoSetupState(this.db, repo)) === "set_up") return null;
+    // The recorded session is this repo's setup session: adding the repo again keeps it instead of
+    // starting a second one. A recorded session that is gone (Abandon or archive) leaves nothing to keep.
+    const recorded = repo.setup_session
+      ? (this.db.prepare("SELECT id, repo_id FROM sessions WHERE id = ? AND archived = 0").get(repo.setup_session) as { id: string; repo_id: string } | undefined)
+      : undefined;
+    if (recorded?.repo_id === repo.id) return this.summary(recorded.id);
+    return this.createSession({ repoId: repo.id, title: SETUP_TITLE, prompt: "", mode: "pipeline", setupOnly: true }, repo);
+  }
+
+  /**
+   * The agent-skills setup state the Repos page states (issue #102). The repo's record answers every
+   * read; one marker check records a repo that has none, and a repo whose recorded setup session works
+   * now reads as `in_progress`. A record naming a session that no longer works is not in progress, so
+   * the repo reads as not set up and Run setup is available again.
+   */
+  async setupState(repoId: string): Promise<RepoSetupState> {
+    const repo = requireTrackedRepo(this.db, repoId);
+    const recorded = recordedSetupState(this.db, repo.id);
+    if (recorded === "set_up") return "set_up";
+    if (this.setupRunWorks(repo)) return "in_progress";
+    return recorded ?? (await repoSetupState(this.db, repo));
+  }
+
+  /**
+   * The Repos page's Run setup (issue #102): start this repo's setup session. It refuses with 409 while
+   * that session works, and for a repo recorded as set up, so no repo runs the setup twice. A record
+   * naming a setup session that stopped keeps that card: reply to it, or Abandon it and Run setup starts
+   * a fresh one.
+   */
+  async runSetup(repoId: string): Promise<SessionSummary> {
+    const repo = requireTrackedRepo(this.db, repoId);
+    // Claim the repo before the first await: two Run setup taps at once make one setup session, and the second is refused.
+    if (this.setupRuns.has(repo.id))
+      throw Object.assign(new Error(`Setup already runs for ${repo.id}: its card is on the board.`), { status: 409 });
+    const run = this.startSetupFromRun(repo);
+    this.setupRuns.set(repo.id, run);
+    try {
+      return await run;
+    } finally {
+      this.setupRuns.delete(repo.id);
+    }
+  }
+
+  private async startSetupFromRun(repo: RepoRow): Promise<SessionSummary> {
+    // No repo runs the setup twice: a repo recorded as set up gets no new setup session.
+    if ((await repoSetupState(this.db, repo)) === "set_up")
+      throw Object.assign(new Error(`${repo.id} is already set up for the agent skills.`), { status: 409 });
+    if (this.setupRunWorks(repo))
+      throw Object.assign(new Error(`Setup already runs for ${repo.id}: its card is on the board.`), { status: 409 });
+    // The repo keeps the setup card it has: that card's whole job is still setup.
+    const kept = repo.setup_session
+      ? (this.db.prepare("SELECT id, repo_id FROM sessions WHERE id = ? AND archived = 0").get(repo.setup_session) as { id: string; repo_id: string } | undefined)
+      : undefined;
+    if (kept?.repo_id === repo.id)
+      throw Object.assign(new Error(`${repo.id} already has a setup card that stopped: open it and reply to it, or Abandon it to start a new setup.`), { status: 409 });
+    const s = await this.startSetupRun(repo.id);
+    if (!s) throw Object.assign(new Error(`${repo.id} is already set up for the agent skills.`), { status: 409 });
+    return s;
+  }
+
+  /** Whether the session this repo records as its setup session runs its setup now (see `Live.setupRunning`). */
+  private setupRunWorks(repo: RepoRow): boolean {
+    if (!repo.setup_session) return false;
+    const row = this.db.prepare("SELECT id, phase FROM sessions WHERE id = ? AND archived = 0").get(repo.setup_session) as { id: string; phase: string } | undefined;
+    if (row?.phase !== "setup") return false;
+    // Read the live state only when it exists: this must not create one for an idle session.
+    return this.live.get(row.id)?.setupRunning === true;
+  }
+
+  /** Whether this session is the one its repo records as its setup session. */
+  private isRepoSetupSession(row: SessionRow): boolean {
+    return getRepo(this.db, row.repo_id)?.setup_session === row.id;
+  }
+
+  /** Drop a repo's record of its setup session when that session goes away, so the record never names one that is gone. */
+  private clearSetupSession(row: SessionRow) {
+    this.db.prepare("UPDATE repos SET setup_session = NULL WHERE id = ? AND setup_session = ?").run(row.repo_id, row.id);
+  }
+
   private async createSession(input: CreateInput, repo: RepoRow) {
     const autoApprove = autoApproveMode(input.autoApprove);
     // Absent or null means no, as null means inherit for autoApprove.
@@ -586,17 +602,17 @@ export class SessionManager extends EventEmitter {
     if (startFrom && input.mode === "direct")
       throw Object.assign(new Error("Solving an issue needs a pipeline session"), { status: 400 });
     const task = (input.prompt ?? "").trim();
-    if (mode === "pipeline" && !task && !startFrom) throw Object.assign(new Error("Describe what you want built; grill-me starts from it"), { status: 400 });
+    // A setup session (see `startSetupSession`) carries no task: the setup skill is its whole job.
+    const setupOnly = input.setupOnly === true;
+    if (mode === "pipeline" && !task && !startFrom && !setupOnly) throw Object.assign(new Error("Describe what you want built; grill-me starts from it"), { status: 400 });
     const issueRef = input.issueRef?.trim() || null;
-    // Every card start names an issue of the repo and reads its seed from the tracker. The repo setup
-    // start names none: it carries no task and reads no tracker.
-    if (startFrom && plan!.needsIssue) {
+    if (startFrom) {
       if (!issueRef) throw Object.assign(new Error("Solving an issue needs its issue ref (issueRef)"), { status: 400 });
       if (!this.fetchTicketSeed) throw Object.assign(new Error("This workbench has no GitHub connection to read tickets from"), { status: 400 });
     }
     // The issue's title, body, URL and parent, and its ticket sub-issues, for startFrom sessions.
     let seed: TicketSeed | undefined;
-    if (startFrom && plan!.needsIssue) {
+    if (startFrom) {
       seed = await this.fetchTicketSeed!(issueRef!);
       if (plan!.needsSubIssues && seed.subIssues.length === 0)
         throw Object.assign(new Error(`Issue ${issueRef} has no open ticket sub-issues`), { status: 404 });
@@ -609,9 +625,9 @@ export class SessionManager extends EventEmitter {
     const branch = `pi/${slugify(title)}-${id.slice(0, 6)}`;
     const worktree = await createWorktree(repo, id, branch, base, await this.gitEnv());
     const now = Date.now();
-    // The recorded state decides, so no repo runs the setup twice: a repo the workbench set up starts
-    // every card past setup with no git check, and a repo setup session always runs the setup step.
-    const needsSetup = plan?.phase === "setup" ? true : recordedSetupState(repo) === "set_up" ? false : worktreeNeedsSetup(worktree);
+    // The repo's record decides whether this session starts with a setup run (issue #101): no repo
+    // runs the setup twice, and a repo with a record gets no marker check at all.
+    const needsSetup = needsSetupRun(this.db, repo.id, worktree);
     if (plan?.tickets && seed) {
       let ticketInputs: TicketInput[];
       try {
@@ -621,11 +637,11 @@ export class SessionManager extends EventEmitter {
       }
       this.insertTickets(id, ticketInputs);
     }
-    const phase: Phase = needsSetup ? "setup" : plan ? plan.phase : mode === "pipeline" ? "grill" : "direct";
+    const phase: Phase = setupOnly || needsSetup ? "setup" : plan ? plan.phase : mode === "pipeline" ? "grill" : "direct";
     // The first prompt; a setup run holds it until setup is done. A rework holds its rework
     // prompt, a split its split prompt, a plain task the task itself; Solve holds nothing
-    // (its recorded ticket starts the run after setup).
-    const held = plan?.held ? plan.held(seed!, getModelSettings(this.db).contextWindow) : task ? input.prompt : null;
+    // (its recorded ticket starts the run after setup). A setup session holds nothing either.
+    const held = setupOnly ? null : plan?.held ? plan.held(seed!, getModelSettings(this.db).contextWindow) : task ? input.prompt : null;
     // The phase releaseHeld moves the session to when a held prompt is released.
     const heldPhase = held ? (plan ? plan.phase : mode === "pipeline" ? "grill" : "direct") : null;
     this.db
@@ -656,22 +672,33 @@ export class SessionManager extends EventEmitter {
         needsSetup ? heldPhase : null,
         input.soloTicket ?? null,
       );
+    // The repo records its setup session as soon as the row exists: a setup run that cannot start
+    // still leaves the repo one setup session, so adding the repo again keeps it (issue #99).
+    if (setupOnly) this.db.prepare("UPDATE repos SET setup_session = ? WHERE id = ?").run(id, repo.id);
     const s = this.state(id);
     s.loaded = true;
-    await this.start(id);
-    if (needsSetup) {
-      s.setupRunning = true;
-      await this.send(id, SETUP_PROMPT);
-    } else if (plan?.tickets) {
-      // grill/spec/tickets are skipped: the first ticket run starts now.
-      await this.runNext(id);
-    } else if (plan?.held) {
-      await this.send(id, held!);
-    } else if (mode === "pipeline") {
-      // A task that is already a skill call (the session form's ✦ Skills pick) goes out as it is.
-      await this.send(id, isSkillCall(input.prompt) ? input.prompt : grillPrompt(input.prompt));
-    } else if (task) {
-      await this.send(id, input.prompt);
+    try {
+      await this.start(id);
+      if (setupOnly || needsSetup) {
+        s.setupRunning = true;
+        await this.send(id, SETUP_PROMPT);
+      } else if (plan?.tickets) {
+        // grill/spec/tickets are skipped: the first ticket run starts now.
+        await this.runNext(id);
+      } else if (plan?.held) {
+        await this.send(id, held!);
+      } else if (mode === "pipeline") {
+        // A task that is already a skill call (the session form's ✦ Skills pick) goes out as it is.
+        await this.send(id, isSkillCall(input.prompt) ? input.prompt : grillPrompt(input.prompt));
+      } else if (task) {
+        await this.send(id, input.prompt);
+      }
+    } catch (err) {
+      // A setup session travels with a repo add, and the repo is tracked already: a setup run that
+      // cannot start must not fail the add, so the card carries the reason instead.
+      if (!setupOnly) throw err;
+      s.setupRunning = false;
+      this.flag(id, `Setup could not start: ${(err as Error).message}. Open this card to try again.`);
     }
     this.emitSummary(id);
     // A new session is a new card on its repo's board (a direct session's card starts in Doing).
@@ -1146,15 +1173,6 @@ export class SessionManager extends EventEmitter {
 
   private async afterSettled(id: string, s: Live) {
     const row = this.row(id);
-    // A repo's setup session runs no task: it never goes on to grill, spec or a ticket. Its commit
-    // lands on the repo's default branch, and the recorded state follows what landed.
-    if (this.isRepoSetupRun(row) && s.setupRunning) {
-      s.setupRunning = false;
-      if (worktreeNeedsSetup(row.worktree)) this.repoSetupCommittedNothing(id, row);
-      else await this.afterRepoSetupRun(id, row);
-      this.emitSummary(id, true);
-      return;
-    }
     // The setup step keys on the setup run, not only on the stored phase: recording a direct
     // session's PR while setup runs moves its phase to `pr`, and its held task must still release.
     if (row.phase === "setup" || (s.setupRunning && row.held_prompt)) {
@@ -1165,8 +1183,19 @@ export class SessionManager extends EventEmitter {
           // A session started from existing tickets skips grill/spec/tickets after setup.
           this.update(id, { phase: "implement" });
           await this.runNext(id);
-        } else {
+        } else if (!this.isRepoSetupSession(row)) {
+          // A session with no held task and no ticket to run goes on to the grill. The repo's setup
+          // session is the exception: its whole job was the setup skill, so it never reads as
+          // grilling a task, and its commit lands on the default branch instead.
           this.update(id, { phase: row.mode === "pipeline" ? "grill" : "direct" });
+        } else if (s.lastSettleAborted) {
+          // The user stopped the setup run. A run the user cut short does not land its files on the
+          // default branch: its work may be half-done, and the repo would read as set up on it.
+          this.flag(id, "The setup run was stopped. Its setup files do not reach the repo's default branch until the run finishes: reply to continue it.");
+        } else {
+          // The repo's setup session committed its setup files: the server lands them on the default
+          // branch, so the repo reads as set up and its card is Done (issue #100).
+          await this.landSetupCommit(id, row);
         }
       }
     } else if (row.phase === "grill" && row.grill_summary) {
@@ -1188,63 +1217,6 @@ export class SessionManager extends EventEmitter {
       await this.afterRetroRun(id, s);
     }
     this.emitSummary(id, true);
-  }
-
-  /**
-   * A repo's setup run finished with its setup files in the worktree. The commit lands on the repo's
-   * default branch, so the next card's worktree carries the files: the workbench pushes it there,
-   * and merges the default branch in first when it moved while setup ran. The recorded state follows
-   * what landed, and the card is Done. A landing that fails leaves the repo not set up, flags the
-   * card, and lets Run setup start again.
-   */
-  private async afterRepoSetupRun(id: string, row: SessionRow) {
-    const repo = getRepo(this.db, row.repo_id);
-    if (!repo) return;
-    const env = await this.gitEnv();
-    const base = row.base_branch;
-    let mergeAttempted = false;
-    const landingFailed = (err: unknown) => {
-      recordSetupState(this.db, repo.id, "not_set_up");
-      recordSetupSession(this.db, repo.id, null);
-      this.update(id, { attention: `Setup could not land its commit on ${repo.id}'s ${base} branch: ${(err as Error).message}` });
-      this.emit("board", repo.id);
-    };
-    try {
-      await git(row.worktree, ["fetch", "origin", base], env);
-      const head = (await git(row.worktree, ["rev-parse", "HEAD"], env)).trim();
-      const baseHead = (await git(row.worktree, ["rev-parse", `origin/${base}`], env)).trim();
-      if (head !== baseHead) {
-        try {
-          await git(row.worktree, ["push", "origin", `HEAD:refs/heads/${base}`], env);
-        } catch {
-          // The default branch moved while setup ran: merge it in and push the result.
-          mergeAttempted = true;
-          await git(row.worktree, ["merge", "--no-edit", `origin/${base}`], env);
-          await git(row.worktree, ["push", "origin", `HEAD:refs/heads/${base}`], env);
-        }
-      }
-    } catch (err) {
-      // A merge that conflicted stays aborted: the card flags the landing, and no half-done merge is left.
-      if (mergeAttempted) await git(row.worktree, ["merge", "--abort"], env).catch(() => {});
-      landingFailed(err);
-      return;
-    }
-    // The pushed commit is the default branch now, so the repo is set up for the agent skills.
-    recordSetupState(this.db, repo.id, "set_up");
-    recordSetupSession(this.db, repo.id, null);
-    this.update(id, { phase: "done", attention: null });
-    await removeWorktree(repo, row.worktree).catch(() => {});
-    this.emit("board", repo.id);
-  }
-
-  /** A setup run settled with no setup file in its worktree: the repo stays not set up, and its card says what is missing. */
-  private repoSetupCommittedNothing(id: string, row: SessionRow) {
-    const repo = getRepo(this.db, row.repo_id);
-    if (!repo) return;
-    recordSetupState(this.db, repo.id, "not_set_up");
-    recordSetupSession(this.db, repo.id, null);
-    this.update(id, { attention: `Setup committed no ${SETUP_MARKER} to ${repo.id}'s ${row.base_branch} branch. Run setup again.` });
-    this.emit("board", repo.id);
   }
 
   private async afterTicketRun(id: string, s: Live) {
@@ -1591,6 +1563,32 @@ export class SessionManager extends EventEmitter {
   private flag(id: string, reason: string) {
     this.update(id, { attention: reason });
     this.emit("event", id, { type: "wb_notify", message: reason, level: "warning" });
+  }
+
+  /**
+   * Land the repo's setup session's commit on the repo's default branch (issue #100): no pull
+   * request, no Approve. The push goes through `pushSetupCommit`, which merges the branch in when
+   * it moved and refuses to report success when no commit carries the setup files. When the commit
+   * lands, the repo records its setup state as set up (issue #98) so every later read says it is
+   * set up, the card is Done, and open boards fetch GET /api/board again. When it cannot land, the
+   * repo keeps its not_set_up record and the card carries git's reason, so the card says what waits.
+   */
+  private async landSetupCommit(id: string, row: SessionRow) {
+    const repo = getRepo(this.db, row.repo_id);
+    if (!repo) {
+      this.flag(id, "The setup commit has no repo to land on: this repo is no longer tracked.");
+      return;
+    }
+    const base = repo.default_branch;
+    const landed = await pushSetupCommit(repo, row.worktree, await this.gitEnv());
+    if (!landed.ok) {
+      this.flag(id, `The setup commit did not reach ${base}: ${landed.reason}. The setup files stay in this card's worktree, and the repo is still recorded as not set up.`);
+      return;
+    }
+    recordSetUp(this.db, repo.id);
+    await removeWorktree(repo, row.worktree).catch(() => {});
+    this.update(id, { phase: "done", attention: null });
+    this.emit("board", repo.id);
   }
 
   /** User actions on a stopped pipeline: retry or skip the current ticket, or stop the pipeline. */
@@ -2129,6 +2127,7 @@ export class SessionManager extends EventEmitter {
     const repo = getRepo(this.db, row.repo_id);
     if (repo && fs.existsSync(row.worktree)) await removeWorktree(repo, row.worktree);
     this.update(id, { archived: 1, updated_at: Date.now() });
+    this.clearSetupSession(row);
     this.live.delete(id);
     this.emit("removed", id);
   }
@@ -2153,6 +2152,7 @@ export class SessionManager extends EventEmitter {
     this.db.prepare("DELETE FROM tickets WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM auto_decisions WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+    this.clearSetupSession(row);
     this.live.delete(id);
     this.emit("removed", id);
     this.emit("board", row.repo_id);

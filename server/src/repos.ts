@@ -54,32 +54,12 @@ export async function addRepo(db: Db, input: { owner: string; name: string; defa
     setup_session: null,
   };
   await syncClone(row, env);
-  // A re-add refreshes the clone and the GitHub facts. The recorded setup state stays: the workbench
-  // writes it when it checks a repo once, and when its setup session lands the files.
   db.prepare(
     `INSERT INTO repos (id, owner, name, default_branch, private, added_at) VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET default_branch = excluded.default_branch, private = excluded.private`,
   ).run(row.id, row.owner, row.name, row.default_branch, row.private, row.added_at);
+  await recordRepoSetup(db, row);
   return getRepo(db, row.id)!;
-}
-
-/** What the workbench records about a repo's agent-skills setup. */
-export type RepoSetupState = "set_up" | "not_set_up" | "in_progress";
-
-const SETUP_STATES: RepoSetupState[] = ["set_up", "not_set_up", "in_progress"];
-
-/** The state recorded on the repo row; null for a repo added before states were recorded. */
-export function recordedSetupState(repo: RepoRow): RepoSetupState | null {
-  return SETUP_STATES.includes(repo.setup_state as RepoSetupState) ? (repo.setup_state as RepoSetupState) : null;
-}
-
-export function recordSetupState(db: Db, repoId: string, state: RepoSetupState) {
-  db.prepare("UPDATE repos SET setup_state = ? WHERE id = ?").run(state, repoId);
-}
-
-/** Record the session that runs the repo's setup, or clear it (pass null). */
-export function recordSetupSession(db: Db, repoId: string, sessionId: string | null) {
-  db.prepare("UPDATE repos SET setup_session = ? WHERE id = ?").run(sessionId, repoId);
 }
 
 /** Whether setup-matt-pocock-skills has been committed to the repo's default branch. */
@@ -90,6 +70,107 @@ export async function repoNeedsSetup(repo: RepoRow): Promise<boolean> {
     return false;
   } catch {
     return true;
+  }
+}
+
+/** What the workbench recorded about a repo's agent-skills setup. */
+export type RecordedSetupState = "set_up" | "not_set_up";
+/** What the workbench states about a repo's agent-skills setup: the record, plus the setup that runs now. */
+export type RepoSetupState = RecordedSetupState | "in_progress";
+
+/** The state in the repo's row, or null when nothing was recorded (a repo added before this record existed). */
+export function recordedSetupState(db: Db, repoId: string): RecordedSetupState | null {
+  const row = db.prepare("SELECT setup_state FROM repos WHERE id = ?").get(repoId) as { setup_state: string | null } | undefined;
+  return row?.setup_state === "set_up" || row?.setup_state === "not_set_up" ? row.setup_state : null;
+}
+
+/** Check the setup marker on the default branch once and record what was found. A repo already recorded as set up keeps that state and gets no new check. */
+export async function recordRepoSetup(db: Db, repo: RepoRow): Promise<RecordedSetupState> {
+  const recorded = recordedSetupState(db, repo.id);
+  if (recorded === "set_up") return recorded;
+  const state: RecordedSetupState = (await repoNeedsSetup(repo)) ? "not_set_up" : "set_up";
+  db.prepare("UPDATE repos SET setup_state = ? WHERE id = ?").run(state, repo.id);
+  return state;
+}
+
+/** The state the pages and sessions read: the record, or for a repo with no record (added before this change) one marker check that records what it finds. */
+export async function repoSetupState(db: Db, repo: RepoRow): Promise<RecordedSetupState> {
+  return recordedSetupState(db, repo.id) ?? (await recordRepoSetup(db, repo));
+}
+
+/** Record that the repo's agent-skills setup files are on its default branch: every later read says it is set up. */
+export function recordSetUp(db: Db, repoId: string) {
+  db.prepare("UPDATE repos SET setup_state = 'set_up' WHERE id = ?").run(repoId);
+}
+
+/**
+ * Whether a session on this repo starts with a setup run (issue #101). The repo's record decides, so
+ * no repo runs the setup twice: a repo recorded as set up runs none, and a repo recorded as not set
+ * up runs one with no new marker check. Only a repo with no recorded state — added before the record
+ * existed — still reads the marker off its fresh worktree, and that check runs once and records
+ * nothing: the add-time check and a landed setup push are what write the record.
+ */
+export function needsSetupRun(db: Db, repoId: string, worktree: string): boolean {
+  const recorded = recordedSetupState(db, repoId);
+  return recorded === null ? worktreeNeedsSetup(worktree) : recorded === "not_set_up";
+}
+
+/** Why the setup commit did not land on the default branch, in git's own words plus the branch it failed on. */
+export type SetupPush = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Land the setup session's commit on the repo's default branch: no pull request, no Approve.
+ * Fetch the branch, then push the setup branch's HEAD onto it. When the push is refused because
+ * the branch moved, merge it into the setup branch and push again; a merge that stops is undone,
+ * so the worktree stays as it was. Only a *committed* setup marker can land: a marker the run
+ * wrote but never committed is in no ref, and pushing HEAD would report success while the default
+ * branch gained nothing. Every way this can fail comes back as the reason, and the default branch
+ * keeps what it had.
+ */
+export async function pushSetupCommit(repo: RepoRow, worktree: string, env: GitEnv): Promise<SetupPush> {
+  const base = repo.default_branch;
+  const sh = (args: string[]) => git(worktree, args, env);
+  const does = (args: string[]) => sh(args).then(() => true, () => false);
+  const push = () => sh(["push", "-q", "origin", `HEAD:refs/heads/${base}`]);
+  const words = (err: unknown) => (err as Error).message;
+  /** Whether a ref carries the setup marker as a committed file. */
+  const markerIn = (ref: string) => does(["cat-file", "-e", `${ref}:${SETUP_MARKER}`]);
+  try {
+    await sh(["fetch", "-q", "origin", base]);
+  } catch (err) {
+    return { ok: false, reason: `fetching ${base} failed: ${words(err)}` };
+  }
+  // Nothing to land when no commit carries the setup files. The branch may already carry them
+  // (someone landed them by hand), and then recording the repo as set up is still honest.
+  if (!(await markerIn("HEAD")) && !(await markerIn(`origin/${base}`)))
+    return { ok: false, reason: `no commit carries ${SETUP_MARKER}: the setup run left its setup files uncommitted` };
+  try {
+    await push();
+    return { ok: true };
+  } catch (err) {
+    // Ask the branch whether it moved: a push git refuses for another reason is not a merge away.
+    await sh(["fetch", "-q", "origin", base]).catch(() => {});
+    const branchMoved = !(await does(["merge-base", "--is-ancestor", `origin/${base}`, "HEAD"]));
+    if (!branchMoved) return { ok: false, reason: `pushing the setup commit to ${base} failed: ${words(err)}` };
+    try {
+      await sh(["merge", "--no-edit", `origin/${base}`]);
+    } catch (mergeErr) {
+      // git names the files it could not merge; anything else is git's own reason, not a conflict.
+      const conflicted = await sh(["diff", "--name-only", "--diff-filter=U"]).then((out) => out.split("\n").filter(Boolean), () => [] as string[]);
+      await sh(["merge", "--abort"]).catch(() => {});
+      return {
+        ok: false,
+        reason: conflicted.length
+          ? `${base} moved, and merging it into the setup branch stopped on a conflict in ${conflicted.join(", ")}`
+          : `${base} moved, but merging it into the setup branch failed: ${words(mergeErr)}`,
+      };
+    }
+    try {
+      await push();
+      return { ok: true };
+    } catch (err2) {
+      return { ok: false, reason: `pushing the setup commit to ${base} again after merging ${base} in failed: ${words(err2)}` };
+    }
   }
 }
 

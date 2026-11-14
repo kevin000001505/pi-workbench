@@ -1,377 +1,190 @@
 /**
- * The Repos page's agent-skills setup state over HTTP: each repo row states its recorded setup
- * state, Run setup starts a repo's setup session, and that session's commit lands on the default
- * branch. Drives the real server (main.ts) on an ephemeral port, with a real `pi --mode rpc`
- * against the scripted mock model and the mock GitHub. Skips when the pi CLI isn't available.
+ * The Repos page's agent-skills setup state over HTTP (issue #102): the repo view states what the
+ * page reads — `set_up`, `in_progress` while the repo's setup session runs its setup, or
+ * `not_set_up` — and **Run setup** starts that session for a repo that is not set up, refusing with
+ * 409 while one already runs, so no repo runs the setup twice. The recorded state itself, the
+ * add-time session, and the setup commit's landing are `setup-once.test.ts`, `setup-session.test.ts`
+ * and `setup-push.test.ts`. Skips when the pi CLI isn't available.
+ *
+ * Seam under test: the HTTP API the Repos page uses — GET /api/repos (its `setup` and `setupSession`
+ * fields), POST /api/repos/:owner/:name/setup, POST /api/sessions/:id/abandon, GET /api/board.
  */
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import http from "node:http";
-import os from "node:os";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
-import { fileURLToPath } from "node:url";
-import { after, test } from "node:test";
-import { startMockGitHub } from "./mock-github.ts";
-import { startMockLlm } from "./mock-llm.ts";
+import { test } from "node:test";
+import { startReviewServer } from "./review-server.ts";
+import { ISSUE_TRACKER_DOC } from "./remote-repo.ts";
 
-const piBin = process.env.PI_BIN ?? "pi";
-const hasPi = spawnSync(piBin, ["--version"]).status === 0;
+const { hasPi, tmp, base, gh, api, waitFor, summary, board, llm } = await startReviewServer("repo-setup");
+const skip = !hasPi && "pi CLI not found";
+// Read src modules only after startReviewServer set the environment (a static import would snapshot
+// process.env too early, see review-server.ts).
+const { SETUP_MARKER } = await import("../src/config.ts");
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wb-reposetup-"));
-const remotes = path.join(tmp, "remotes");
-fs.mkdirSync(remotes);
-const dataDir = path.join(tmp, "data");
-process.env.DATA_DIR = dataDir;
-process.env.WORKBENCH_MASTER_KEY = "reposetup-master-key-01234564789";
-process.env.SKILLS_DIR = path.join(tmp, "skills");
-process.env.HOME = path.join(tmp, "agent-home");
-process.env.GITHUB_CLONE_BASE = `file://${remotes}`;
-process.env.PI_BIN = piBin;
-process.env.PI_EXTENSION = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "pi-extension", "workbench.ts");
+const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString();
 
-for (const name of ["grill-with-docs", "to-spec", "to-tickets", "tdd", "code-review", "setup-matt-pocock-skills"]) {
-  fs.mkdirSync(path.join(process.env.SKILLS_DIR, name), { recursive: true });
-  fs.writeFileSync(path.join(process.env.SKILLS_DIR, name, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} test skill\n---\n${name} body\n`);
+/** This test file's copy of the setup skill: SETUP_ASK makes the run ask a question first, so the
+ * state stays "in progress" while a test reads it. SETUP_SLOW keeps the run open after its commit. */
+const SETUP_SKILL = path.join(tmp, "skills", "setup-matt-pocock-skills", "SKILL.md");
+const setupSkillBody = (...flags: string[]) =>
+  `---\nname: setup-matt-pocock-skills\ndescription: setup-matt-pocock-skills test skill\n---\n${["SETUP_ASK: ask which issue tracker the repo uses, then write the files.", ...flags].join(" ")}\n`;
+fs.writeFileSync(SETUP_SKILL, setupSkillBody());
+
+let ready: Promise<void> | undefined;
+/** The token and model the server needs before it can add a repo. */
+function init() {
+  ready ??= (async () => {
+    await waitFor(async () => (await fetch(`${base}/api/health`).catch(() => null))?.ok);
+    assert.equal((await api("PUT", "/api/secrets", { scope: "global", name: "GITHUB_TOKEN", value: "ghp_test" })).status, 200);
+    assert.equal((await api("PUT", "/api/settings/model", { baseUrl: llm.url })).status, 200);
+  })();
+  return ready;
 }
 
-const mock = await startMockLlm();
-const gh = await startMockGitHub(remotes);
-process.env.GITHUB_API_URL = gh.url;
-
-const freePort = await new Promise<number>((res, rej) => {
-  const srv = http.createServer();
-  srv.listen(0, "127.0.0.1", () => {
-    const p = (srv.address() as { port: number }).port;
-    srv.close(() => res(p));
-  });
-  srv.on("error", rej);
-});
-process.env.PORT = String(freePort);
-process.env.HOST = "127.0.0.1";
-const base = `http://127.0.0.1:${freePort}`;
-
-if (hasPi) await import("../src/main.ts");
-
-const api = async (method: string, url: string, body?: unknown) => {
-  const res = await fetch(`${base}${url}`, {
-    method,
-    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  return { status: res.status, json: (await res.json().catch(() => null)) as any };
-};
-
-async function waitFor<T>(fn: () => T | undefined | false | Promise<T | undefined | false>, ms = 90_000): Promise<T> {
-  const start = Date.now();
-  for (;;) {
-    const v = await fn();
-    if (v) return v;
-    if (Date.now() - start > ms) throw new Error("timed out");
-    await new Promise((r) => setTimeout(r, 50));
-  }
+const repoView = async (repoId: string) => ((await api("GET", "/api/repos")).json as any[]).find((r) => r.id === repoId);
+const sessionsOf = async (repoId: string) => ((await api("GET", "/api/sessions")).json as any[]).filter((s) => s.repoId === repoId);
+/** The repo's setup session, through the record on its row — the same read the page's state makes. */
+async function setupSessionOf(repoId: string) {
+  const id = (await repoView(repoId)).setupSession;
+  return id ? (await api("GET", `/api/sessions/${id}`)).json.summary : undefined;
 }
+/** Answer the setup skill's question, so its run can go on. */
+async function answerSetupAsk(id: string) {
+  const ask = await waitFor(async () => (await summary(id)).pending.find((p: any) => p.kind === "decision"), 20_000);
+  assert.equal((await api("POST", `/api/sessions/${id}/respond`, { requestId: ask.id, value: ask.options[0] })).status, 200);
+}
+const runSetup = (repoId: string) => api("POST", `/api/repos/${repoId}/setup`, {});
 
-const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
-const remote = (owner: string, name: string) => path.join(remotes, owner, `${name}.git`);
-const cloneDir = (id: string) => path.join(dataDir, "repos", ...id.split("/"));
-const db = () => {
-  const d = new DatabaseSync(path.join(dataDir, "workbench.db"));
-  return d;
-};
+test("the repo view states skills set up for a repo that carries the setup files, and setup in progress while its setup session runs", { skip }, async () => {
+  await init();
 
-/** origin/main of the mock's bare repo carries the setup marker file. */
-const seedMarker = (owner: string, name: string) => {
-  const work = fs.mkdtempSync(path.join(tmp, "seed-"));
-  sh(tmp, "clone", "-q", remote(owner, name), work);
-  fs.mkdirSync(path.join(work, "docs", "agents"), { recursive: true });
-  fs.writeFileSync(path.join(work, "docs", "agents", "issue-tracker.md"), "# seed tracker\n");
-  sh(work, "add", ".");
-  sh(work, "-c", "user.name=seed", "-c", "user.email=seed@x", "commit", "-qm", "Set up agent skills (setup-matt-pocock-skills)");
-  sh(work, "push", "-q", "origin", "main");
-  fs.rmSync(work, { recursive: true, force: true });
-};
-const remoteHasMarker = (owner: string, name: string) => {
-  try {
-    sh(remote(owner, name), "cat-file", "-e", "main:docs/agents/issue-tracker.md");
-    return true;
-  } catch {
-    return false;
-  }
-};
+  // A repo whose default branch carries the setup files: the page states it as set up, with no setup session.
+  gh.createBare("kevin", "statesetup", { [SETUP_MARKER]: ISSUE_TRACKER_DOC });
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/statesetup" })).status, 200);
+  const setUp = await repoView("kevin/statesetup");
+  assert.equal(setUp.setup, "set_up");
+  assert.equal(setUp.setupSession, null);
 
-/** The worktree is mid-merge. */
-const mergeHeadExists = (dir: string) => {
-  try {
-    sh(dir, "rev-parse", "-q", "--verify", "MERGE_HEAD");
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-const repoRow = (id: string) => {
-  const d = db();
-  try {
-    return d.prepare("SELECT * FROM repos WHERE id = ?").get(id) as any;
-  } finally {
-    d.close();
-  }
-};
-const setupState = async (id: string) => (await api("GET", "/api/repos")).json.find((r: any) => r.id === id)?.setup as string | undefined;
-/** A repos row written straight into the db: the repo is tracked, and no setup session starts. */
-/** A tracked repo with no setup session: a setup run that failed earlier, say. Its clone lands on demand. */
-const seedRepoRow = (id: string) => {
-  const d = db();
-  try {
-    d.prepare(
-      "INSERT INTO repos (id, owner, name, default_branch, private, added_at) VALUES (?, ?, ?, ?, ?, ?)",
-    ).run(id, id.split("/")[0], id.split("/")[1], "main", 1, Date.now());
-  } finally {
-    d.close();
-  }
-};
-
-/** The setup marker path on the remote's main is blocked by a regular file, so a setup run can write nothing. */
-const blockMarkerPath = (owner: string, name: string) => {
-  const work = fs.mkdtempSync(path.join(tmp, "block-"));
-  sh(tmp, "clone", "-q", remote(owner, name), work);
-  fs.mkdirSync(path.join(work, "docs"), { recursive: true });
-  fs.writeFileSync(path.join(work, "docs", "agents"), "not a directory\n");
-  sh(work, "add", ".");
-  sh(work, "-c", "user.name=hand", "-c", "user.email=hand@x", "commit", "-qm", "docs/agents is a file");
-  sh(work, "push", "-q", "origin", "main");
-  fs.rmSync(work, { recursive: true, force: true });
-};
-
-/** main carries its own version of the marker file, so a setup landing merge conflicts. */
-const handWriteMarker = (owner: string, name: string) => {
-  const work = fs.mkdtempSync(path.join(tmp, "move-"));
-  sh(tmp, "clone", "-q", remote(owner, name), work);
-  fs.mkdirSync(path.join(work, "docs", "agents"), { recursive: true });
-  fs.writeFileSync(path.join(work, "docs", "agents", "issue-tracker.md"), "# written by hand\n");
-  sh(work, "add", ".");
-  sh(work, "-c", "user.name=hand", "-c", "user.email=hand@x", "commit", "-qm", "Hand-written tracker");
-  sh(work, "push", "-q", "origin", "main");
-  fs.rmSync(work, { recursive: true, force: true });
-};
-
-const board = async (repo: string) => {
-  const r = await api("GET", `/api/board?repo=${repo}`);
-  assert.equal(r.status, 200);
-  return r.json.cards as any[];
-};
-
-after(async () => {
-  await mock.close();
-  await gh.close();
-  if (hasPi) process.kill(process.pid, "SIGTERM");
-});
-
-test("adding a repo that is not set up starts its setup session", { skip: !hasPi && "pi CLI not found" }, async () => {
-  await waitFor(async () => (await fetch(`${base}/api/health`).catch(() => null))?.ok);
-  assert.equal((await api("PUT", "/api/secrets", { scope: "global", name: "GITHUB_TOKEN", value: "ghp_test" })).status, 200);
-  assert.equal((await api("PUT", "/api/settings/model", { baseUrl: mock.url })).status, 200);
-
-  gh.createBare("kevin", "autostart");
-  const added = await api("POST", "/api/repos", { id: "kevin/autostart" });
+  // A repo that is not set up: its setup session already runs, so the page states setup in progress.
+  gh.createBare("kevin", "stateprogress");
+  const added = await api("POST", "/api/repos", { id: "kevin/stateprogress" });
   assert.equal(added.status, 200);
-  // The row states setup in progress at once: its setup session already runs.
-  assert.equal(added.json.setup, "in_progress");
-
-  const id = repoRow("kevin/autostart").setup_session;
-  assert.ok(id, "the repo records its setup session");
-
-  // It runs only the setup skill prompt, and it holds no task.
-  const snap = await waitFor(async () => {
-    const s = (await api("GET", `/api/sessions/${id}`)).json;
-    return JSON.stringify(s.transcript).includes("setup-matt-pocock-skills") ? s : undefined;
-  });
-  assert.equal(snap.summary.title, "Set up agent skills");
-  assert.equal(snap.summary.phase, "setup");
-  assert.equal(snap.summary.heldPrompt, null);
-  assert.equal(snap.summary.setupRunning, true);
-  assert.equal(snap.summary.prNumber, null);
-
-  // Its card is on that repo's board while its run works.
-  const card = await waitFor(async () => {
-    const c = (await board("kevin/autostart")).find((x) => x.id === id);
-    return c && c.column === "todo" ? c : undefined;
-  });
-  assert.equal(card.title, "Set up agent skills");
+  assert.equal(added.json.setup, "in_progress", "the add starts the setup session, and it works now");
+  assert.ok(added.json.setupSession, JSON.stringify(added.json));
+  const running = await setupSessionOf("kevin/stateprogress");
+  assert.equal(running.title, "Set up agent skills");
+  assert.equal(running.phase, "setup");
+  assert.equal(running.heldPrompt, null, "the setup session holds no task");
+  assert.equal(running.setupRunning, true);
+  assert.equal((await board("kevin/stateprogress")).find((c) => c.id === running.id)?.column, "todo", "its card is on the board");
 });
 
-test("adding a repo the workbench recorded as set up creates no setup session", { skip: !hasPi && "pi CLI not found" }, async () => {
-  gh.createBare("kevin", "autostarted", { setup: true });
-  assert.equal((await api("POST", "/api/repos", { id: "kevin/autostarted" })).json.setup, "set_up");
-  assert.equal(repoRow("kevin/autostarted").setup_session, null);
-  assert.equal((await api("GET", "/api/sessions")).json.filter((s: any) => s.repoId === "kevin/autostarted").length, 0);
+test("the repo view states not set up when no setup session runs its setup", { skip }, async () => {
+  await init();
+  gh.createBare("kevin", "statenone");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/statenone" })).status, 200);
+  const first = (await setupSessionOf("kevin/statenone"))!;
+
+  // Abandon the setup card: no session runs the setup, so the page states the repo as not set up.
+  assert.equal((await api("POST", `/api/sessions/${first.id}/abandon`, {})).status, 200);
+  const repo = await repoView("kevin/statenone");
+  assert.equal(repo.setup, "not_set_up");
+  assert.equal(repo.setupSession, null, "the record does not name a session that is gone");
 });
 
-test("a repo added with the setup files on its default branch reads as set up", { skip: !hasPi && "pi CLI not found" }, async () => {
-  gh.createBare("kevin", "setrepo");
-  seedMarker("kevin", "setrepo");
-  const added = await api("POST", "/api/repos", { id: "kevin/setrepo" });
-  assert.equal(added.json.setup, "set_up");
-  assert.equal(repoRow("kevin/setrepo").setup_state, "set_up");
-});
-
-test("the recorded state answers later reads, so no second git check runs", { skip: !hasPi && "pi CLI not found" }, async () => {
-  gh.createBare("kevin", "recorded");
-  seedMarker("kevin", "recorded");
-  assert.equal((await api("POST", "/api/repos", { id: "kevin/recorded" })).json.setup, "set_up");
-
-  // The clone goes: the read answers from the record, not from git.
-  fs.rmSync(cloneDir("kevin/recorded"), { recursive: true, force: true });
-  assert.equal(await setupState("kevin/recorded"), "set_up");
-});
-
-test("a repo added before states were recorded: the first state read records what it found", { skip: !hasPi && "pi CLI not found" }, async () => {
-  gh.createBare("kevin", "legacy");
-  seedMarker("kevin", "legacy");
-  // A row from before this change: no recorded state.
-  seedRepoRow("kevin/legacy");
-  assert.equal(repoRow("kevin/legacy").setup_state, null);
-
-  // The repo is tracked again: its clone lands, and the first state read records what it found.
-  assert.equal((await api("POST", "/api/repos", { id: "kevin/legacy" })).json.setup, "set_up");
-  assert.equal(repoRow("kevin/legacy").setup_state, "set_up");
-
-  // The clone is gone: the record answers, so no git check runs.
-  fs.rmSync(cloneDir("kevin/legacy"), { recursive: true, force: true });
-  assert.equal(await setupState("kevin/legacy"), "set_up");
-});
-
-test("the setup session lands its commit on the repo default branch, states the repo set up, and its card is Done", { skip: !hasPi && "pi CLI not found" }, async () => {
-  gh.createBare("kevin", "lands");
-  assert.equal((await api("POST", "/api/repos", { id: "kevin/lands" })).json.setup, "in_progress");
-  const id = repoRow("kevin/lands").setup_session;
-  const branch = (await api("GET", `/api/sessions/${id}`)).json.summary.branch;
-
-  // The commit is on origin/main, not only on the session branch, and no PR was opened.
-  await waitFor(() => remoteHasMarker("kevin", "lands"));
-  assert.equal(gh.pulls.filter((p: any) => p.head?.ref === branch).length, 0, "no pull request was opened");
-
-  const settled = await waitFor(async () => {
-    const c = (await board("kevin/lands")).find((x) => x.id === id);
-    return c && c.column === "done" ? c : undefined;
-  });
-  assert.equal(settled.attention, null);
-  assert.equal(settled.title, "Set up agent skills");
-  assert.equal(await setupState("kevin/lands"), "set_up");
-  assert.equal(repoRow("kevin/lands").setup_state, "set_up");
-  assert.equal(repoRow("kevin/lands").setup_session, null);
-});
-
-test("a repo the workbench recorded as set up starts its sessions past setup", { skip: !hasPi && "pi CLI not found" }, async () => {
-  gh.createBare("kevin", "pastsetup", { setup: true });
-  assert.equal((await api("POST", "/api/repos", { id: "kevin/pastsetup" })).json.setup, "set_up");
-
-  // The default branch loses the marker file by hand. The recorded state decides: a repo the
-  // workbench set up never runs the setup again.
-  const work = fs.mkdtempSync(path.join(tmp, "unseed-"));
-  sh(tmp, "clone", "-q", remote("kevin", "pastsetup"), work);
-  sh(work, "rm", "docs/agents/issue-tracker.md");
-  sh(work, "-c", "user.name=hand", "-c", "user.email=hand@x", "commit", "-qam", "Remove the marker");
-  sh(work, "push", "-q", "origin", "main");
-  fs.rmSync(work, { recursive: true, force: true });
-  assert.equal(remoteHasMarker("kevin", "pastsetup"), false);
-
-  const created = await api("POST", "/api/sessions", { repoId: "kevin/pastsetup", title: "Next card", prompt: "Add a feature" });
-  assert.equal(created.status, 200);
-  assert.equal(created.json.phase, "grill", "no setup run for a repo that is set up");
-  assert.equal(created.json.setupRunning, false);
-});
-
-test("Run setup starts the setup session of a repo that is not set up, and a second Run setup is refused while it works", { skip: !hasPi && "pi CLI not found" }, async () => {
+test("Run setup starts the setup session of a repo recorded as not set up, and refuses with 409 while that session works", { skip }, async () => {
+  await init();
   gh.createBare("kevin", "runsetup");
-  // A repo that is tracked with no setup session yet: the failed setup of an earlier run, say.
-  seedRepoRow("kevin/runsetup");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/runsetup" })).status, 200);
+  const first = (await setupSessionOf("kevin/runsetup"))!;
+  assert.equal((await api("POST", `/api/sessions/${first.id}/abandon`, {})).status, 200);
+  assert.equal((await repoView("kevin/runsetup")).setup, "not_set_up");
 
-  const started = await api("POST", "/api/repos/kevin/runsetup/setup", {});
-  assert.equal(started.status, 200);
+  const started = await runSetup("kevin/runsetup");
+  assert.equal(started.status, 200, JSON.stringify(started.json));
   assert.equal(started.json.title, "Set up agent skills");
   assert.equal(started.json.phase, "setup");
-  assert.equal(repoRow("kevin/runsetup").setup_session, started.json.id);
+  assert.equal(started.json.heldPrompt, null);
 
-  // The page states what the setup session is doing right now.
-  assert.equal(await setupState("kevin/runsetup"), "in_progress");
+  // The page states what that session is doing, and its card is on the repo's board.
+  assert.equal((await repoView("kevin/runsetup")).setup, "in_progress");
+  assert.equal((await repoView("kevin/runsetup")).setupSession, started.json.id);
+  const card = await waitFor(async () => (await board("kevin/runsetup")).find((c) => c.id === started.json.id));
+  assert.equal(card.column, "todo");
 
-  // Its card is on the repo's board while its run works.
-  const card = await waitFor(async () => {
-    const c = (await board("kevin/runsetup")).find((x) => x.id === started.json.id);
-    return c && c.column === "todo" ? c : undefined;
-  });
-  assert.equal(card.title, "Set up agent skills");
-
-  const again = await api("POST", "/api/repos/kevin/runsetup/setup", {});
-  assert.equal(again.status, 409);
-  assert.match(again.json.error, /setup/i);
+  // A second Run setup while that session works: refused, and it starts no second session.
+  const again = await runSetup("kevin/runsetup");
+  assert.equal(again.status, 409, JSON.stringify(again.json));
+  assert.match(again.json.error, /kevin\/runsetup/);
+  assert.equal((await sessionsOf("kevin/runsetup")).length, 1);
 });
 
-test("Run setup is refused for a repo the workbench recorded as set up", { skip: !hasPi && "pi CLI not found" }, async () => {
-  gh.createBare("kevin", "alreadysetup", { setup: true });
-  assert.equal((await api("POST", "/api/repos", { id: "kevin/alreadysetup" })).json.setup, "set_up");
+test("Run setup refuses with 409 for a repo the workbench recorded as set up", { skip }, async () => {
+  await init();
+  gh.createBare("kevin", "runsetupdone", { [SETUP_MARKER]: ISSUE_TRACKER_DOC });
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/runsetupdone" })).json.setup, "set_up");
 
-  const refused = await api("POST", "/api/repos/kevin/alreadysetup/setup", {});
-  assert.equal(refused.status, 409);
-  assert.equal(await setupState("kevin/alreadysetup"), "set_up");
+  const refused = await runSetup("kevin/runsetupdone");
+  assert.equal(refused.status, 409, JSON.stringify(refused.json));
+  assert.match(refused.json.error, /already set up/);
+  assert.deepEqual(await sessionsOf("kevin/runsetupdone"), [], "no setup session for a repo that is set up");
 });
 
-test("Run setup twice at once starts one setup session", { skip: !hasPi && "pi CLI not found" }, async () => {
-  gh.createBare("kevin", "double");
-  seedRepoRow("kevin/double");
+test("two Run setup taps at once start one setup session, and refuse the other", { skip }, async () => {
+  await init();
+  gh.createBare("kevin", "runtwice");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/runtwice" })).status, 200);
+  assert.equal((await api("POST", `/api/sessions/${(await setupSessionOf("kevin/runtwice"))!.id}/abandon`, {})).status, 200);
 
-  const both = await Promise.all([api("POST", "/api/repos/kevin/double/setup", {}), api("POST", "/api/repos/kevin/double/setup", {})]);
+  const both = await Promise.all([runSetup("kevin/runtwice"), runSetup("kevin/runtwice")]);
   assert.deepEqual(
     both.map((r) => r.status).sort(),
     [200, 409],
-    "one Run setup starts the session, the other is refused",
+    JSON.stringify(both.map((r) => r.json)),
   );
-  const sessions = (await api("GET", "/api/sessions")).json as any[];
-  assert.equal(sessions.filter((s) => s.repoId === "kevin/double" && s.title === "Set up agent skills").length, 1);
+  const sessions = await sessionsOf("kevin/runtwice");
+  assert.equal(sessions.length, 1, JSON.stringify(sessions.map((s) => s.title)));
+  assert.equal((await repoView("kevin/runtwice")).setupSession, sessions[0].id);
 });
 
-test("a setup run that cannot land its commit on the default branch leaves the repo not set up and flags its card", { skip: !hasPi && "pi CLI not found" }, async () => {
-  gh.createBare("kevin", "conflicted");
-  assert.equal((await api("POST", "/api/repos", { id: "kevin/conflicted" })).json.setup, "in_progress");
-  const id = repoRow("kevin/conflicted").setup_session;
+test("Run setup keeps the repo's stopped setup card: it refuses with 409 and names that card", { skip }, async () => {
+  await init();
+  // The mock's setup run keeps working after its commit, so the stop lands between the two.
+  fs.writeFileSync(SETUP_SKILL, setupSkillBody("SETUP_SLOW: keep working after the commit."));
+  gh.createBare("kevin", "runstopped");
+  assert.equal((await api("POST", "/api/repos", { id: "kevin/runstopped" })).status, 200);
+  const s = (await setupSessionOf("kevin/runstopped"))!;
+  await answerSetupAsk(s.id);
+  const worktree = path.join(process.env.DATA_DIR!, "worktrees", s.id);
+  try {
+    await waitFor(() => {
+      try {
+        return sh(worktree, "log", "--format=%s", "-1").includes("Set up agent skills");
+      } catch {
+        return false;
+      }
+    }, 60_000);
+    assert.equal((await api("POST", `/api/sessions/${s.id}/abort`, {})).status, 200);
+    const stopped = await waitFor(async () => {
+      const sum = await summary(s.id);
+      return sum.attention && sum.status !== "running" ? sum : undefined;
+    }, 60_000);
 
-  // main moves, with its own version of the file the setup commit adds: the merge conflicts.
-  handWriteMarker("kevin", "conflicted");
+    // The repo is not set up, and its setup card is still there: Run setup keeps it rather than start a second one.
+    assert.equal((await repoView("kevin/runstopped")).setup, "not_set_up");
+    const refused = await runSetup("kevin/runstopped");
+    assert.equal(refused.status, 409, JSON.stringify(refused.json));
+    assert.match(refused.json.error, /setup card/, JSON.stringify(refused.json));
+    assert.equal((await sessionsOf("kevin/runstopped")).length, 1, "Run setup started no second setup session");
 
-  const flagged = await waitFor(async () => {
-    const c = (await board("kevin/conflicted")).find((x) => x.id === id);
-    return c && c.attention ? c : undefined;
-  });
-  assert.equal(flagged.column, "todo");
-  assert.match(flagged.attention, /could not land its commit on kevin\/conflicted's main branch/, "the landing failed on the moved default branch");
-
-  // The worktree is left clean: the merge the workbench could not settle is aborted.
-  assert.equal(mergeHeadExists(path.join(dataDir, "worktrees", id)), false, "the merge the workbench could not settle is aborted");
-  assert.equal(await setupState("kevin/conflicted"), "not_set_up");
-  assert.equal(repoRow("kevin/conflicted").setup_session, null);
-
-  // Run setup is available again.
-  const again = await api("POST", "/api/repos/kevin/conflicted/setup", {});
-  assert.equal(again.status, 200);
-  assert.equal(again.json.id !== id, true);
-});
-
-test("a setup run that commits no setup file leaves the repo not set up and flags its card", { skip: !hasPi && "pi CLI not found" }, async () => {
-  gh.createBare("kevin", "nothingcommitted");
-  // The marker path is blocked by a regular file, so the setup run can write nothing.
-  blockMarkerPath("kevin", "nothingcommitted");
-
-  assert.equal((await api("POST", "/api/repos", { id: "kevin/nothingcommitted" })).json.setup, "in_progress");
-  const id = repoRow("kevin/nothingcommitted").setup_session;
-
-  const flagged = await waitFor(async () => {
-    const c = (await board("kevin/nothingcommitted")).find((x) => x.id === id);
-    return c && c.attention ? c : undefined;
-  });
-  assert.match(flagged.attention, /committed no docs\/agents\/issue-tracker\.md/);
-  assert.equal(await setupState("kevin/nothingcommitted"), "not_set_up");
-  assert.equal(repoRow("kevin/nothingcommitted").setup_session, null);
+    // Abandoning that card frees the repo, and Run setup starts a fresh setup session.
+    assert.equal((await api("POST", `/api/sessions/${s.id}/abandon`, {})).status, 200);
+    const again = await runSetup("kevin/runstopped");
+    assert.equal(again.status, 200, JSON.stringify(again.json));
+    assert.notEqual(again.json.id, s.id);
+  } finally {
+    fs.writeFileSync(SETUP_SKILL, setupSkillBody());
+  }
 });

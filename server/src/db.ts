@@ -9,9 +9,9 @@ export type RepoRow = {
   default_branch: string;
   private: number;
   added_at: number;
-  /** The agent-skills setup state the workbench recorded: set_up | not_set_up | in_progress; null for a repo added before it recorded states. */
+  /** The agent-skills setup state the workbench recorded: "set_up", "not_set_up", or null when nothing was recorded (a repo added before the record existed). */
   setup_state: string | null;
-  /** The session that runs the repo's agent-skills setup; null when none was started. */
+  /** The session that runs this repo's agent-skills setup (see SessionManager.startSetupSession), null when it has none. */
   setup_session: string | null;
 };
 
