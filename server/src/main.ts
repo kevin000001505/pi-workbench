@@ -95,6 +95,16 @@ const sessions = new SessionManager(
   delivery,
 );
 
+/**
+ * Track a repo, and start its agent-skills setup session at once when it reads as not set up, so
+ * setup shows on the board and its questions reach the user. A repo already set up gets no session.
+ */
+async function addAndSetup(input: { owner: string; name: string; defaultBranch: string; private: boolean }) {
+  const added = await addRepo(db, input, await gitEnv());
+  await sessions.ensureSetup(added.id);
+  return repoView(getRepo(db, added.id)!);
+}
+
 async function repoView(r: ReturnType<typeof listRepos>[number]) {
   return {
     id: r.id,
@@ -163,7 +173,7 @@ const router = new Router()
     const [owner, name] = String(body.id ?? "").split("/");
     assertRepoName(owner ?? "", name ?? "");
     const gh = await github().getRepo(owner, name);
-    return repoView(await addRepo(db, { owner, name, defaultBranch: gh.default_branch, private: gh.private }, await gitEnv()));
+    return addAndSetup({ owner, name, defaultBranch: gh.default_branch, private: gh.private });
   })
   .on("POST", "/api/repos/create", async ({ body }) => {
     const name = String(body.name ?? "").trim();
@@ -174,9 +184,7 @@ const router = new Router()
       private: body.private !== false,
       org: body.org ? String(body.org) : undefined,
     });
-    return repoView(
-      await addRepo(db, { owner: gh.owner.login, name: gh.name, defaultBranch: gh.default_branch, private: gh.private }, await gitEnv()),
-    );
+    return addAndSetup({ owner: gh.owner.login, name: gh.name, defaultBranch: gh.default_branch, private: gh.private });
   })
   .on("DELETE", "/api/repos/:owner/:name", async ({ params }) => {
     const id = `${params.owner}/${params.name}`;

@@ -526,6 +526,12 @@ export class SessionManager extends EventEmitter {
     return found;
   }
 
+  /** Adding a repo starts its agent-skills setup session at once, when the repo reads as not set up. */
+  async ensureSetup(repoId: string): Promise<SessionSummary | null> {
+    if ((await this.setupState(repoId)) !== "not_set_up") return null;
+    return this.startSetup(repoId);
+  }
+
   /** Whether the repo's recorded setup session is still working. */
   private setupRunWorks(repo: RepoRow) {
     if (!repo.setup_session) return false;

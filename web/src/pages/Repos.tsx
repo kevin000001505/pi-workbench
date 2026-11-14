@@ -20,8 +20,9 @@ function AddRepoModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =
   const add = async (id: string) => {
     setAdding(id);
     try {
-      await api.post("/api/repos", { id });
-      toast(`Cloned ${id}`);
+      const added = await api.post<{ setup: RepoSetupState }>("/api/repos", { id });
+      // A repo that is not set up starts its setup session at once: its card is on the board.
+      toast(added.setup === "in_progress" ? `Cloned ${id}: its agent-skills setup runs, its card is on the board` : `Cloned ${id}`);
       onAdded();
       onClose();
     } catch (e) {
@@ -64,7 +65,7 @@ function CreateRepoModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
     setBusy(true);
     try {
       const r = await api.post<Repo>("/api/repos/create", { name, description, private: priv, org: org || undefined });
-      toast(`Created ${r.id}`);
+      toast(r.setup === "in_progress" ? `Created ${r.id}: its agent-skills setup runs, its card is on the board` : `Created ${r.id}`);
       onAdded();
       onClose();
     } catch (e) {
