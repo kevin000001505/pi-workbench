@@ -394,20 +394,37 @@ test("the stored Issue queue: the board states the numbers it still has to start
     ["3:running:s-1", "5:waiting:", "7:waiting:"],
     "every snapshot number is a row, lowest first, the card the queue waits on named by its session",
   );
-  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: true, numbers: [3, 5, 7] });
+  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: true, numbers: [3, 5, 7], paused: null });
+
+  // #3's run ended Blocked: its card is stuck, so the queue is paused on it and keeps every number.
+  issueQueueStep(db, "me/app", 3, "paused", "s-1");
+  assert.deepEqual(
+    issueQueueOf(db, "me/app").map((r) => `${r.number}:${r.state}:${r.sessionId ?? ""}`),
+    ["3:paused:s-1", "5:waiting:", "7:waiting:"],
+    "the pause is a stored row: a server restart reads it back",
+  );
+  assert.deepEqual(
+    issueQueueState(issueQueueOf(db, "me/app")),
+    { running: true, numbers: [3, 5, 7], paused: 3 },
+    "the board states the card the queue pauses on, and the cards that still wait their turn",
+  );
+
+  // The user resolved #3 and its card works again: the queue waits on it as it did before.
+  issueQueueStep(db, "me/app", 3, "running", "s-1");
+  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: true, numbers: [3, 5, 7], paused: null });
 
   // #3 reached Review: the queue waits on #5 now, and #3 is no longer a number it has to start.
   issueQueueStep(db, "me/app", 3, "done", "s-1");
-  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: true, numbers: [5, 7] });
+  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: true, numbers: [5, 7], paused: null });
 
   // #5 was claimed by hand before its turn: the queue goes on without it.
   issueQueueStep(db, "me/app", 5, "skipped", null);
-  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: true, numbers: [7] });
+  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: true, numbers: [7], paused: null });
 
   // The last card reached Review: the queue is over, and its rows go with it.
   issueQueueClear(db, "me/app");
   assert.deepEqual(issueQueueOf(db, "me/app"), []);
-  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: false, numbers: [] });
+  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: false, numbers: [], paused: null });
 
   // One repo's queue says nothing about another repo's board.
   issueQueueSave(db, "other/app", [9]);
