@@ -426,6 +426,19 @@ function DoneSubcards({ subs }: { subs: SubCard[] }) {
   );
 }
 
+/** The Issues header's Issue queue indicator: the count while the queue runs, and the card it waits on when that card is stuck (issue #104). */
+function QueueIndicator({ queue }: { queue: IssueQueueState }) {
+  const numbers = queue.numbers.map((n) => `#${n}`).join(", ");
+  const title = queue.paused
+    ? `The Issue queue waits on stuck issue #${queue.paused}: no next card starts. Take that card to Review, or Abandon it or drag it back to Issues, and the queue goes on with ${numbers}.`
+    : `The Issue queue starts the next card when the card it waits on reaches Review: ${numbers}`;
+  return (
+    <span className="queued" title={title}>
+      {queue.numbers.length} queued{queue.paused ? ` · waiting on #${queue.paused}` : ""}
+    </span>
+  );
+}
+
 /** The kanban view of one repo's features: one card per pipeline session, in kanzo's look. */
 export function Board({ repoId }: { repoId?: string }) {
   const { sessions, boardChanges, toast } = useStore();
@@ -534,7 +547,7 @@ export function Board({ repoId }: { repoId?: string }) {
   // the cards Issues holds now and starts them one at a time. The board refetches on every step.
   const startQueue = () => {
     if (!repo) return;
-    if (!confirm("Solve all issues starts every card in Issues one at a time, in issue-number order: the next card starts when the card the queue waits on reaches Review. Start the Issue queue?")) return;
+    if (!confirm("Solve all issues starts every card in Issues one at a time, in issue-number order: the next card starts when the card the queue waits on reaches Review, and a card it waits on that is blocked, stopped, or waiting on your answer pauses the queue. Start the Issue queue?")) return;
     setQueueBusy(true);
     api.post<{ queued: number[]; skipped: number[] }>(`/api/repos/${repo.id}/issues/queue`, {}).then(
       (r) => {
@@ -688,18 +701,7 @@ export function Board({ repoId }: { repoId?: string }) {
                 {col.label}
                 <span className="count">{(list.length + (col.id === "done" && !words.length ? doneHidden : 0)) || ""}</span>
                 {/* The Issue queue (issue #103): the button while no queue runs and Issues has cards, the count while one runs. */}
-                {col.id === "issues" && repo && queue && (queue.running ? (
-                  <span
-                    className="queued"
-                    title={
-                      `The Issue queue starts the next card when the card it waits on reaches Review: ${queue.numbers.map((n) => `#${n}`).join(", ")}` +
-                      // The pause (issue #104): the card the queue waits on is stuck, so no next card starts.
-                      (queue.paused ? ` - it waits on stuck issue #${queue.paused}: resolve that card, or take it out of Doing, and the queue goes on` : "")
-                    }
-                  >
-                    {queue.numbers.length} queued{queue.paused ? ` · waiting on #${queue.paused}` : ""}
-                  </span>
-                ) : (
+                {col.id === "issues" && repo && queue && (queue.running ? <QueueIndicator queue={queue} /> : (
                   (cards ?? []).some((c) => c.column === "issues") && (
                     <button className="kz-btn kz-col-btn" disabled={queueBusy} onClick={startQueue} title="Solve every card in Issues, one at a time, by issue number">
                       {queueBusy ? <Spinner /> : null}

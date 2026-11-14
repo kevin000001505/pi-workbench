@@ -46,7 +46,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { claimRefs, type Column, COLUMNS, issueNumberOf, type IssueQueueState, issueQueueState, type PrState, resolvedNote, sessionColumn } from "../../shared/board.ts";
+import { claimRefs, type Column, COLUMNS, holdsQueue, issueNumberOf, type IssueQueueState, issueQueueState, type PrState, resolvedNote, sessionColumn } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
   configureAutoApprove,
@@ -869,7 +869,9 @@ export class SessionManager extends EventEmitter {
       this.touch(id);
       s.lastSettleAborted = !!rec.aborted;
       void this.afterSettled(id, s).catch((err) => {
-        this.update(id, { attention: `Pipeline error: ${err.message}` });
+        // A phase transition that threw leaves the card stuck with the reason: the same stuck point
+        // flag names, so the Issue queue pauses on it too (issue #104).
+        this.flag(id, `Pipeline error: ${err.message}`);
         this.emitSummary(id, true);
       });
     }
@@ -1752,7 +1754,7 @@ export class SessionManager extends EventEmitter {
     if (this.queueRuns.has(repo.id)) throw Object.assign(new Error(`The Issue queue starts ${repo.id}'s cards now: one card works already.`), { status: 409 });
     const rows = issueQueueOf(this.db, repo.id);
     if (rows.length) {
-      const held = rows.find((s) => s.state === "running") ?? rows.find((s) => s.state === "paused");
+      const held = rows.find((s) => holdsQueue(s.state));
       throw Object.assign(
         new Error(
           `The Issue queue already runs for ${repo.id}: it ${held?.state === "paused" ? "waits on stuck issue" : "works on issue"} #${(held ?? rows[0]).number}, and ${rows.length} card${rows.length === 1 ? "" : "s"} are left in it.`,
@@ -1777,13 +1779,13 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * The Issue queue's step for this card, among `states`, or null when the card is in no queue.
+   * The Issue queue's step for this card in this state, or null when the card is in no queue.
    * A session the db does not have (one the user just deleted) changes nothing.
    */
-  private queueStepOf(id: string, states: IssueQueueStepState[]): { repoId: string; number: number } | null {
+  private queueStepOf(id: string, state: IssueQueueStepState): { repoId: string; number: number } | null {
     const row = this.db.prepare("SELECT repo_id FROM sessions WHERE id = ?").get(id) as { repo_id: string } | undefined;
     if (!row) return null;
-    const step = issueQueueOf(this.db, row.repo_id).find((s) => s.sessionId === id && states.includes(s.state));
+    const step = issueQueueOf(this.db, row.repo_id).find((s) => s.sessionId === id && s.state === state);
     return step ? { repoId: row.repo_id, number: step.number } : null;
   }
 
@@ -1793,7 +1795,7 @@ export class SessionManager extends EventEmitter {
    * next card. The pause is a stored row, not live-session state, so a server restart reads it back.
    */
   private pauseQueueStep(id: string) {
-    const step = this.queueStepOf(id, ["running"]);
+    const step = this.queueStepOf(id, "running");
     if (!step) return;
     issueQueueStep(this.db, step.repoId, step.number, "paused", id);
     // The queue's state is part of the board: open boards fetch GET /api/board again.
@@ -1807,7 +1809,7 @@ export class SessionManager extends EventEmitter {
 
   /** The card works again — the user answered, replied, or started a fresh run: the queue waits on it running. */
   private resumeQueueStep(id: string) {
-    const step = this.queueStepOf(id, ["paused"]);
+    const step = this.queueStepOf(id, "paused");
     if (!step) return;
     // The card is not working again while it still waits on an answer the user has not given.
     if ([...(this.live.get(id)?.pending ?? []).values()].some(waitsOnUser)) return;
@@ -1825,7 +1827,7 @@ export class SessionManager extends EventEmitter {
       const rows = issueQueueOf(this.db, repoId);
       // The queue holds one card at a time (issue #104): the card it waits on works now, or is stuck
       // and pauses the queue. Neither a next card starting nor the rows going is right while it is there.
-      if (rows.some((s) => s.state === "running" || s.state === "paused")) return { started: null, skipped };
+      if (rows.some((s) => holdsQueue(s.state))) return { started: null, skipped };
       const step = rows.find((s) => s.state === "waiting");
       if (!step) {
         issueQueueClear(this.db, repoId);
@@ -1903,7 +1905,7 @@ export class SessionManager extends EventEmitter {
     const steps = issueQueueOf(this.db, row.repo_id);
     if (!steps.length) return;
     // The step is the card the queue waits on: running while it works, paused while it is stuck.
-    const running = steps.find((s) => (s.state === "running" || s.state === "paused") && s.sessionId === id);
+    const running = steps.find((s) => holdsQueue(s.state) && s.sessionId === id);
     if (running) {
       issueQueueStep(this.db, row.repo_id, running.number, state, id);
       await this.startNextQueuedCard(row.repo_id);
