@@ -3,7 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import path from "node:path";
-import { boardCards, claimRefs, DONE_PAGE, doneIssueCards, limitDone, prState, type PrState, unclaimedCards, unclaimedNumber } from "../../shared/board.ts";
+import { boardCards, claimRefs, DONE_PAGE, doneIssueCards, limitDone, prState, type PrState, queueNumbers, unclaimedCards, unclaimedNumber } from "../../shared/board.ts";
 import { config, TYPESAFE_SKILL } from "./config.ts";
 import { doneIssuesOf, openDb, specWatchAdd } from "./db.ts";
 import type { GitEnv } from "./git.ts";
@@ -245,7 +245,20 @@ const router = new Router()
     ];
     const boardOut = limitDone(boardCards(mineNow, extras), done);
     for (const c of boardOut.cards) if (c.pr) c.pr.state = prStates.get(c.pr.number) ?? null;
-    return boardOut;
+    // The Issue queue's state (issue #103): the header says whether one runs, and which numbers it has to start.
+    return { ...boardOut, queue: sessions.queueState(repo.id) };
+  })
+
+  // The Issues column header's Solve all issues (issue #103, the Issue queue): snapshot the cards the
+  // Issues column holds now — every unclaimed card and every session card paused in Issues, sorted by
+  // issue number — save the queue, and start the first card with its own move to Doing. Issues that
+  // appear later are not queued. A second click while a queue runs for the repo is refused (409).
+  .on("POST", "/api/repos/:owner/:name/issues/queue", async ({ params }) => {
+    const repo = requireTrackedRepo(db, `${params.owner}/${params.name}`);
+    const mine = sessions.list().filter((s) => s.repoId === repo.id);
+    // The same read the board route makes for the unclaimed cards; a failure makes the click fail.
+    const issues = await github().listBoardIssues(repo.owner, repo.name);
+    return sessions.startQueue(repo.id, queueNumbers(unclaimedCards(issues, claimRefs(mine), repo.id), mine, repo.id));
   })
 
   // An unclaimed card (`issue:<number>`) has no session yet: its move creates one. A spec card

@@ -13,8 +13,8 @@ import {
   withMessages,
 } from "../../shared/transcript.ts";
 import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
-import { doneIssuesOf, recordIssueDone, specWatchOf, specWatchRemove, type Db, type RepoRow, type SessionRow, type TicketRow } from "./db.ts";
-import { git, type GitEnv } from "./git.ts";
+import { doneIssuesOf, issueQueueClear, issueQueueOf, issueQueueSave, issueQueueStep, recordIssueDone, specWatchOf, specWatchRemove, type Db, type IssueQueueStepState, type RepoRow, type SessionRow, type TicketRow } from "./db.ts";
+import { git, type GitEnv, redact } from "./git.ts";
 import type { Delivery, MergeResult } from "./delivery.ts";
 import type { GhIssueState } from "./github.ts";
 import { closedIssues, foreignIssues } from "./prs.ts";
@@ -46,7 +46,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { claimRefs, type Column, COLUMNS, issueNumberOf, type PrState, resolvedNote, sessionColumn } from "../../shared/board.ts";
+import { claimRefs, type Column, COLUMNS, issueNumberOf, type IssueQueueState, issueQueueState, type PrState, resolvedNote, sessionColumn } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
   configureAutoApprove,
@@ -281,6 +281,8 @@ export class SessionManager extends EventEmitter {
   private reconciling = new Map<string, Promise<ReconcileResult>>();
   /** Issues (`owner/name#n`) whose new session is being created now. */
   private claiming = new Set<string>();
+  /** Repos whose Issue queue is being started now; a second click while it runs is refused. */
+  private queueRuns = new Set<string>();
   /** Repos whose setup session is being created now; a second add of the same repo waits for the run. */
   private setupRuns = new Map<string, Promise<SessionSummary | null>>();
 
@@ -1419,6 +1421,8 @@ export class SessionManager extends EventEmitter {
     this.update(id, { phase: "pr", pr_number: pr.number, pr_url: pr.url, attention: null });
     const msg = `All tickets are done and reviewed${reviewNote ? ` (${reviewNote})` : ""}. PR #${pr.number} is open.`;
     this.emit("event", id, { type: "wb_notify", message: msg, level: "info" });
+    // The queue's card reached Review with its PR open: start the next queued card (issue #103).
+    await this.queueFinished(id, "done");
   }
 
   /** Fresh run for implement-spec's final step: one code-review over the whole branch. */
@@ -1715,6 +1719,128 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * The Issue queue (issue #103): the Issues column's **Solve all issues**. `numbers` is the snapshot
+   * main.ts read off the board (see queueNumbers) — every card Issues holds now, lowest issue number
+   * first — and it is the queue: an issue that appears later is not in it, and a server restart reads
+   * the rows again. The queue starts the first card and waits for it to reach Review (its PR is open,
+   * phase `pr`) before it starts the next one. A card the queue starts makes its own move to Doing:
+   * Solve for a plain issue, Solve all tickets for a spec issue, Solve all for a session paused in
+   * Issues. A queued card that left Issues by hand before its turn is skipped, and a card whose start
+   * is refused is skipped too, so the queue never stops on one card. A repo has one queue at a time:
+   * a second click while one runs is refused with 409.
+   */
+  async startQueue(repoId: string, numbers: number[]): Promise<{ queued: number[]; skipped: number[]; started: { number: number; sessionId: string } | null }> {
+    const repo = requireTrackedRepo(this.db, repoId);
+    // Claim the repo before the first await, so two clicks at once start one queue.
+    if (this.queueRuns.has(repo.id)) throw Object.assign(new Error(`The Issue queue starts ${repo.id}'s cards now: one card works already.`), { status: 409 });
+    const rows = issueQueueOf(this.db, repo.id);
+    if (rows.length) {
+      const running = rows.find((s) => s.state === "running");
+      throw Object.assign(
+        new Error(`The Issue queue already runs for ${repo.id}: it works on issue #${(running ?? rows[0]).number}, and ${rows.length} card${rows.length === 1 ? "" : "s"} are left in it.`),
+        { status: 409 },
+      );
+    }
+    this.queueRuns.add(repo.id);
+    try {
+      if (!numbers.length) return { queued: [], skipped: [], started: null };
+      issueQueueSave(this.db, repo.id, numbers);
+      const { started, skipped } = await this.startNextQueuedCard(repo.id);
+      return { queued: numbers, skipped, started };
+    } finally {
+      this.queueRuns.delete(repo.id);
+    }
+  }
+
+  /** The Issue queue's state for the board: the numbers it still has to start, and whether it runs. */
+  queueState(repoId: string): IssueQueueState {
+    return issueQueueState(issueQueueOf(this.db, repoId));
+  }
+
+  /**
+   * Start the next card the queue has not started, lowest number first, and skip the numbers that are
+   * no longer a card in Issues. With nothing left the queue is over: its rows go, and the board says so.
+   */
+  private async startNextQueuedCard(repoId: string): Promise<{ started: { number: number; sessionId: string } | null; skipped: number[] }> {
+    const skipped: number[] = [];
+    for (;;) {
+      const step = issueQueueOf(this.db, repoId).find((s) => s.state === "waiting");
+      if (!step) {
+        issueQueueClear(this.db, repoId);
+        this.emit("board", repoId);
+        return { started: null, skipped };
+      }
+      const started = await this.startQueuedCard(repoId, step.number);
+      if (started) {
+        issueQueueStep(this.db, repoId, step.number, "running", started.sessionId);
+        // Every step of the queue is a board change: open boards fetch GET /api/board again.
+        this.emit("board", repoId);
+        return { started, skipped };
+      }
+      issueQueueStep(this.db, repoId, step.number, "skipped");
+      skipped.push(step.number);
+    }
+  }
+
+  /**
+   * Start one queued card with its own move to Doing, or null when it is no longer a card in Issues:
+   * a card that works on the issue already (it was claimed or moved by hand), or an issue that closed
+   * on GitHub. A start the session itself refuses (409, a GitHub read that failed) is a skip too.
+   */
+  private async startQueuedCard(repoId: string, number: number): Promise<{ number: number; sessionId: string } | null> {
+    const repo = getRepo(this.db, repoId);
+    if (!repo) return null;
+    const claimed = this
+      .list()
+      .filter((s) => s.repoId === repoId && s.mode === "pipeline" && s.phase !== "done")
+      .find((s) => issueNumberOf(s.issueRef, repoId) === number || issueNumberOf(s.specRef, repoId) === number);
+    if (claimed) {
+      // The card is on the board in Issues: Solve all continues it. Anywhere else it left Issues by
+      // hand, and the queue starts no second card for the same issue.
+      if (sessionColumn(claimed.mode, claimed.phase) !== "issues") return null;
+      try {
+        await this.move(claimed.id, "doing");
+      } catch (err) {
+        return this.queueSkipped(repoId, number, (err as Error).message);
+      }
+      return { number, sessionId: claimed.id };
+    }
+    // An unclaimed card: its issue must still be open, or the queue starts no card for a closed issue.
+    const state = await this.delivery!.issueStates(repo, [number]).then((m) => m.get(number), () => null);
+    if (state?.state === "CLOSED") return this.queueSkipped(repoId, number, `issue #${number} is closed on GitHub`);
+    try {
+      // The same read the card's own Solve and Solve all tickets make: open ticket sub-issues pick the start.
+      const seed = await this.fetchTicketSeed!(`${repo.id}#${number}`);
+      const startFrom = seed.subIssues.length ? "tickets" : "issue";
+      const s = await this.create({ repoId, title: "", prompt: "", mode: "pipeline", issueRef: `${repo.id}#${number}`, startFrom });
+      return { number, sessionId: s.id };
+    } catch (err) {
+      return this.queueSkipped(repoId, number, (err as Error).message);
+    }
+  }
+
+  /** Say why the queue starts no card for this number, and skip it. */
+  private queueSkipped(repoId: string, number: number, reason: string): null {
+    console.warn(`Issue queue: ${repoId} #${number} skipped (${redact(reason)})`);
+    return null;
+  }
+
+  /**
+   * The Issue queue's step: the card it waited on reached Review (its PR is open) or Done, so the
+   * queue starts the next one. A card the queue did not start, or one its steps already name, changes
+   * nothing. `state` says how the card left: `done` for Review or Done, `skipped` for a card the user
+   * dropped (Abandon or archive), so the queue never waits on a card that is gone.
+   */
+  private async queueFinished(id: string, state: IssueQueueStepState) {
+    const repoId = (this.db.prepare("SELECT repo_id FROM sessions WHERE id = ?").get(id) as { repo_id: string } | undefined)?.repo_id;
+    if (!repoId) return;
+    const step = issueQueueOf(this.db, repoId).find((s) => s.state === "running" && s.sessionId === id);
+    if (!step) return;
+    issueQueueStep(this.db, repoId, step.number, state, id);
+    await this.startNextQueuedCard(repoId);
+  }
+
+  /**
    * Reconcile: the board load's GitHub checks for the repo, one at a time. An overlapping board
    * load waits for the run in progress. A card in phase `pr` whose PR merged on GitHub is
    * delivered as Approve delivers it; a card already in `approving` (a click in flight) or
@@ -1871,6 +1997,8 @@ export class SessionManager extends EventEmitter {
     if (row.pr_number) note += `, and PR #${row.pr_number} is still open on GitHub`;
     if (problems.length) note += `, but ${problems.join(", and ")}`;
     this.update(id, { attention: `${note}.` });
+    // The queued card is Done: the queue starts the next card (issue #103).
+    await this.queueFinished(id, "done");
   }
 
   /**
@@ -2095,6 +2223,8 @@ export class SessionManager extends EventEmitter {
     if (fs.existsSync(row.worktree)) await removeWorktree(repo, row.worktree).catch((err) => problems.push(`the worktree was not removed (${(err as Error).message})`));
     this.update(id, { phase: "done", attention: problems.length ? `PR #${row.pr_number} is merged, but ${problems.join(", and ")}.` : null });
     this.emit("event", id, { type: "wb_notify", message: `PR #${row.pr_number} is merged.`, level: "info" });
+    // A queued card that reached Done another way (a hand-merged PR) releases the queue too.
+    await this.queueFinished(id, "done");
   }
 
   /** One issue's title and URL for the board's Done card; a number the issue cannot be read for stays on. */
@@ -2127,6 +2257,8 @@ export class SessionManager extends EventEmitter {
     const repo = getRepo(this.db, row.repo_id);
     if (repo && fs.existsSync(row.worktree)) await removeWorktree(repo, row.worktree);
     this.update(id, { archived: 1, updated_at: Date.now() });
+    // A queued card the user archived releases the queue: its step is skipped, and the next card starts.
+    await this.queueFinished(id, "skipped");
     this.clearSetupSession(row);
     this.live.delete(id);
     this.emit("removed", id);
@@ -2139,6 +2271,8 @@ export class SessionManager extends EventEmitter {
    */
   async abandon(id: string) {
     const row = this.row(id);
+    // The queue must not wait on a card the user dropped: its step goes, and the next card starts.
+    await this.queueFinished(id, "skipped");
     const repo = getRepo(this.db, row.repo_id);
     await this.stop(id);
     if (repo && this.delivery) {
