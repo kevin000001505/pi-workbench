@@ -1779,6 +1779,22 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Cancel the Issue queue (issue #105): the Issues column header's **Cancel**. The queue's rows go, so
+   * the board states no queue, the header shows **Solve all issues** again, and no further card starts.
+   * Cancel touches no card: the card the queue started keeps its run, and its own step is gone with the
+   * rows, so when it reaches Review it releases no next card either. Refused with 409 when no queue runs.
+   */
+  cancelQueue(repoId: string): { cancelled: number[] } {
+    const repo = requireTrackedRepo(this.db, repoId);
+    const rows = issueQueueOf(this.db, repo.id);
+    if (!rows.length) throw Object.assign(new Error(`No Issue queue runs for ${repo.id}: nothing to cancel.`), { status: 409 });
+    issueQueueClear(this.db, repo.id);
+    // The queue's state is part of the board: open boards fetch GET /api/board again.
+    this.emit("board", repo.id);
+    return { cancelled: rows.filter((r) => r.state === "waiting" || holdsQueue(r.state)).map((r) => r.number) };
+  }
+
+  /**
    * The Issue queue's step for this card in this state, or null when the card is in no queue.
    * A session the db does not have (one the user just deleted) changes nothing.
    */

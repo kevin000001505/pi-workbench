@@ -426,16 +426,24 @@ function DoneSubcards({ subs }: { subs: SubCard[] }) {
   );
 }
 
-/** The Issues header's Issue queue indicator: the count while the queue runs, and the card it waits on when that card is stuck (issue #104). */
-function QueueIndicator({ queue }: { queue: IssueQueueState }) {
+/**
+ * The Issues header's Issue queue state (issue #103, #105): the queue's line — its place in the
+ * snapshot and the card it works on, pauses on, or is starting — and its Cancel. Cancel drops the
+ * cards the queue has not started; the card that works now keeps working.
+ */
+function QueueIndicator({ queue, onCancel, busy }: { queue: IssueQueueState; onCancel: () => void; busy: boolean }) {
   const numbers = queue.numbers.map((n) => `#${n}`).join(", ");
   const title = queue.paused
-    ? `The Issue queue waits on stuck issue #${queue.paused}: no next card starts. Take that card to Review, or Abandon it or drag it back to Issues, and the queue goes on with ${numbers}.`
-    : `The Issue queue starts the next card when the card it waits on reaches Review: ${numbers}`;
+    ? `The Issue queue waits on stuck issue #${queue.paused}: no next card starts. Take that card to Review, or Abandon it or drag it back to Issues, and the queue goes on with ${numbers}. Cancel drops ${numbers} and leaves the card that works now working.`
+    : `The Issue queue starts the next card when the card it waits on reaches Review: ${numbers}. Cancel drops ${numbers} and leaves the card that works now working.`;
   return (
-    <span className="queued" title={title}>
-      {queue.numbers.length} queued{queue.paused ? ` · waiting on #${queue.paused}` : ""}
-    </span>
+    <>
+      <span className="queued" title={title}>{queue.status ?? `${queue.numbers.length} queued`}</span>
+      <button className="kz-btn kz-col-btn" disabled={busy} onClick={onCancel} title="Cancel the Issue queue: no further card starts. The card that works now keeps working, and Solve all issues can queue the rest again.">
+        {busy ? <Spinner /> : null}
+        Cancel
+      </button>
+    </>
   );
 }
 
@@ -555,6 +563,23 @@ export function Board({ repoId }: { repoId?: string }) {
         // The server snapshotted r.queued cards; the ones it skipped are not in the queue it runs.
         const left = r.queued.length - r.skipped.length;
         toast(`Issue queue: ${left} card${left === 1 ? "" : "s"} queued${r.skipped.length ? `, ${r.skipped.length} skipped` : ""}.`);
+        setRefetch((n) => n + 1);
+      },
+      (e) => setError(e.message),
+    ).finally(() => setQueueBusy(false));
+  };
+
+  // The Issues column header's Cancel (issue #105): the server drops the cards the queue has not
+  // started, and the header shows Solve all issues again. It sends no command to any card: the card the
+  // queue started keeps its run, and nothing is destroyed — Solve all issues can queue the rest again.
+  const cancelQueue = () => {
+    if (!repo) return;
+    setQueueBusy(true);
+    api.post<{ cancelled: number[] }>(`/api/repos/${repo.id}/issues/queue/cancel`, {}).then(
+      (r) => {
+        setError(null);
+        const left = r.cancelled.length;
+        toast(`Issue queue cancelled: ${left} card${left === 1 ? "" : "s"} dropped. The card that works now keeps working.`);
         setRefetch((n) => n + 1);
       },
       (e) => setError(e.message),
@@ -700,8 +725,8 @@ export function Board({ repoId }: { repoId?: string }) {
                 <StatusIcon column={col.id} />
                 {col.label}
                 <span className="count">{(list.length + (col.id === "done" && !words.length ? doneHidden : 0)) || ""}</span>
-                {/* The Issue queue (issue #103): the button while no queue runs and Issues has cards, the count while one runs. */}
-                {col.id === "issues" && repo && queue && (queue.running ? <QueueIndicator queue={queue} /> : (
+                {/* The Issue queue (issue #103, #105): the button while no queue runs and Issues has cards, the status line and Cancel while one runs. */}
+                {col.id === "issues" && repo && queue && (queue.running ? <QueueIndicator queue={queue} onCancel={cancelQueue} busy={queueBusy} /> : (
                   (cards ?? []).some((c) => c.column === "issues") && (
                     <button className="kz-btn kz-col-btn" disabled={queueBusy} onClick={startQueue} title="Solve every card in Issues, one at a time, by issue number">
                       {queueBusy ? <Spinner /> : null}

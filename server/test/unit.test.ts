@@ -394,7 +394,12 @@ test("the stored Issue queue: the board states the numbers it still has to start
     ["3:running:s-1", "5:waiting:", "7:waiting:"],
     "every snapshot number is a row, lowest first, the card the queue waits on named by its session",
   );
-  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: true, numbers: [3, 5, 7], paused: null });
+  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), {
+    running: true,
+    numbers: [3, 5, 7],
+    paused: null,
+    status: "Queue 1 of 3 · on #3",
+  });
 
   // #3's run ended Blocked: its card is stuck, so the queue is paused on it and keeps every number.
   issueQueueStep(db, "me/app", 3, "paused", "s-1");
@@ -405,30 +410,77 @@ test("the stored Issue queue: the board states the numbers it still has to start
   );
   assert.deepEqual(
     issueQueueState(issueQueueOf(db, "me/app")),
-    { running: true, numbers: [3, 5, 7], paused: 3 },
+    { running: true, numbers: [3, 5, 7], paused: 3, status: "Queue 1 of 3 · paused on #3" },
     "the board states the card the queue pauses on, and the cards that still wait their turn",
   );
 
   // The user resolved #3 and its card works again: the queue waits on it as it did before.
   issueQueueStep(db, "me/app", 3, "running", "s-1");
-  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: true, numbers: [3, 5, 7], paused: null });
+  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), {
+    running: true,
+    numbers: [3, 5, 7],
+    paused: null,
+    status: "Queue 1 of 3 · on #3",
+  }, "the resumed card is the one the queue works on");
 
   // #3 reached Review: the queue waits on #5 now, and #3 is no longer a number it has to start.
   issueQueueStep(db, "me/app", 3, "done", "s-1");
-  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: true, numbers: [5, 7], paused: null });
+  assert.deepEqual(
+    issueQueueState(issueQueueOf(db, "me/app")),
+    { running: true, numbers: [5, 7], paused: null, status: "Queue 2 of 3 · starting #5" },
+    "the card that reached Review still counts the queue's place",
+  );
 
   // #5 was claimed by hand before its turn: the queue goes on without it.
   issueQueueStep(db, "me/app", 5, "skipped", null);
-  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: true, numbers: [7], paused: null });
+  assert.deepEqual(
+    issueQueueState(issueQueueOf(db, "me/app")),
+    { running: true, numbers: [7], paused: null, status: "Queue 3 of 3 · starting #7" },
+    "a skipped card still counts the queue's place",
+  );
 
   // The last card reached Review: the queue is over, and its rows go with it.
   issueQueueClear(db, "me/app");
   assert.deepEqual(issueQueueOf(db, "me/app"), []);
-  assert.deepEqual(issueQueueState(issueQueueOf(db, "me/app")), { running: false, numbers: [], paused: null });
+  assert.deepEqual(
+    issueQueueState(issueQueueOf(db, "me/app")),
+    { running: false, numbers: [], paused: null, status: null },
+    "no queue states no line, so the header shows Solve all issues again",
+  );
 
   // One repo's queue says nothing about another repo's board.
   issueQueueSave(db, "other/app", [9]);
   assert.deepEqual(issueQueueOf(db, "me/app"), []);
+});
+
+test("the Issue queue's status line: its place in the snapshot, and the card it works on or pauses on", async () => {
+  const { issueQueueState } = await import("../../shared/board.ts");
+  const { issueQueueSave, issueQueueOf, issueQueueStep, issueQueueClear } = await import("../src/db.ts");
+  const db = tmpDb();
+  // The click snapshotted five cards: #10 reached Review, #11 was claimed by hand before its turn, and #12 works now.
+  issueQueueSave(db, "me/app", [10, 11, 12, 13, 14]);
+  issueQueueStep(db, "me/app", 10, "done", "s-10");
+  issueQueueStep(db, "me/app", 11, "skipped", null);
+  issueQueueStep(db, "me/app", 12, "running", "s-12");
+  assert.equal(
+    issueQueueState(issueQueueOf(db, "me/app")).status,
+    "Queue 3 of 5 · on #12",
+    "the Issues header's line names the queue's place in the snapshot, and the card it waits on",
+  );
+
+  // #12's run ended Blocked: the same place, the same card, stated as the one the queue pauses on.
+  issueQueueStep(db, "me/app", 12, "paused", "s-12");
+  assert.equal(issueQueueState(issueQueueOf(db, "me/app")).status, "Queue 3 of 5 · paused on #12");
+
+  // The queue is over: its rows go, so it states no line and the header shows Solve all issues again.
+  issueQueueClear(db, "me/app");
+  assert.equal(issueQueueState(issueQueueOf(db, "me/app")).status, null, "no queue states no line");
+
+  // The click's rows exist and no card works yet: the line names the card the queue is starting.
+  issueQueueSave(db, "me/app", [3, 5, 7]);
+  assert.equal(issueQueueState(issueQueueOf(db, "me/app")).status, "Queue 1 of 3 · starting #3");
+  issueQueueStep(db, "me/app", 3, "done", "s-3");
+  assert.equal(issueQueueState(issueQueueOf(db, "me/app")).status, "Queue 2 of 3 · starting #5");
 });
 
 test("a second Issue queue snapshot replaces the rows of the queue before it", async () => {

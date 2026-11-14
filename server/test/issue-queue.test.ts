@@ -6,8 +6,10 @@
  * the mock GitHub, which serves bare repos under `GITHUB_CLONE_BASE` so a card can push and open a PR.
  * Skips when the pi CLI isn't available.
  *
- * Seam: `POST /api/repos/:owner/:name/issues/queue`, the `queue` field of `GET /api/board`, and the
- * session each queued card gets. What these miss: the button in the Issues column header (the web has
+ * Seam: `POST /api/repos/:owner/:name/issues/queue`, `POST /api/repos/:owner/:name/issues/queue/cancel`,
+ * the `queue` field of `GET /api/board` — its stored state, and the `status` line the Issues header
+ * shows (issue #105) — the session each queued card gets, and the `wb_board` events open Boards hear.
+ * What these miss: the button in the Issues column header (the web has
  * no test harness; `cd web && npm run build` type-checks it), a queued card whose start the session
  * refuses, and a paused queue resumed by a rescue or fix run.
  *
@@ -25,6 +27,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { WebSocket } from "ws";
 import { startMockLlm } from "./mock-llm.ts";
 import { startMockGitHub } from "./mock-github.ts";
 import { ISSUE_TRACKER_DOC } from "./remote-repo.ts";
@@ -103,14 +106,25 @@ const stopServer = async () => {
 
 const boardOf = async (repo: string) => (await api("GET", `/api/board?repo=${encodeURIComponent(repo)}`)).json as {
   cards: { id: string; column: string; number?: number }[];
-  queue: { running: boolean; numbers: number[]; paused: number | null };
+  queue: { running: boolean; numbers: number[]; paused: number | null; status: string | null };
 };
-const queueOf = async (repo: string) => (await boardOf(repo)).queue;
+/** The queue's stored state the tests compare; its status line has its own helpers below. */
+const queueOf = async (repo: string) => {
+  const q = (await boardOf(repo)).queue;
+  return { running: q.running, numbers: q.numbers, paused: q.paused };
+};
+/** The Issues header's Issue queue line, as GET /api/board states it (issue #105). */
+const queueLine = async (repo: string) => (await boardOf(repo)).queue.status;
+/** Wait for the queue line, so an assertion never reads the moment between two queue steps. */
+const queueLineIs = async (repo: string, want: string) => {
+  await waitFor(async () => (await queueLine(repo)) === want, { message: `the Issues header never stated "${want}" (last: ${await queueLine(repo)})` });
+};
 const cardsIn = async (repo: string, column: string) => (await boardOf(repo)).cards.filter((c) => c.column === column);
 const cardColumn = async (repo: string, id: string) => (await boardOf(repo)).cards.find((c) => c.id === id)?.column;
 const sessionsOf = async (repo: string) => ((await api("GET", "/api/sessions")).json as any[]).filter((s) => s.repoId === repo);
 const sessionForIssue = async (repo: string, n: number) => (await sessionsOf(repo)).find((s) => s.issueRef === `${repo}#${n}`);
 const solveAllIssues = (repo: string) => api("POST", `/api/repos/${repo}/issues/queue`, {});
+const cancelQueue = (repo: string) => api("POST", `/api/repos/${repo}/issues/queue/cancel`, {});
 const summaryOf = async (id: string) => (await api("GET", `/api/sessions/${id}`)).json.summary as any;
 const pendingOf = async (id: string, kind: "permission" | "decision") => ((await summaryOf(id)).pending ?? []).find((p: any) => p.kind === kind);
 
@@ -188,6 +202,31 @@ const startStuckQueue = async (repo: string, marker: string, says: RegExp, why: 
   return id;
 };
 
+/** Two open Boards: the wb_board events each one hears (issue #105: a queue step and a Cancel reach every open Board). */
+const openBoards = async () => {
+  const boards: { ws: WebSocket; seen: string[] }[] = [];
+  for (let i = 0; i < 2; i++) {
+    const ws = new WebSocket(`${base.replace("http", "ws")}/ws`);
+    const seen: string[] = [];
+    ws.on("message", (raw) => {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === "wb_board") seen.push(msg.repoId);
+    });
+    await new Promise((r) => ws.once("open", r));
+    boards.push({ ws, seen });
+  }
+  return {
+    /** Every open Board heard this many board events for the repo. */
+    heard: async (repoId: string, atLeast: number) => {
+      for (const b of boards)
+        await waitFor(() => Promise.resolve(b.seen.filter((r) => r === repoId).length >= atLeast), {
+          message: `an open Board heard ${b.seen.filter((r) => r === repoId).length} board events for ${repoId}, not ${atLeast}`,
+        });
+    },
+    close: () => boards.forEach((b) => b.ws.close()),
+  };
+};
+
 const repo1 = "kevin/queue1";
 const repo2 = "kevin/queue2";
 const repo3 = "kevin/queue3";
@@ -198,6 +237,7 @@ const repo7 = "kevin/queue7";
 const repo8 = "kevin/queue8";
 const repo9 = "kevin/queue9";
 const repo10 = "kevin/queue10";
+const repo11 = "kevin/queue11";
 let queue1First: string | undefined;
 
 before(async () => {
@@ -269,7 +309,8 @@ test(
     const b = await boardOf(repo1);
     assert.deepEqual(b.cards.filter((c) => c.column === "issues").map((c) => c.id), ["issue:2", "issue:3"], "only the started card left Issues");
     assert.equal(b.cards.find((c) => c.id === queue1First)?.column, "doing");
-    assert.deepEqual(b.queue, { running: true, numbers: [1, 2, 3], paused: null }, "the board states the running queue");
+    assert.deepEqual(await queueOf(repo1), { running: true, numbers: [1, 2, 3], paused: null }, "the board states the running queue");
+    assert.equal(b.queue.status, "Queue 1 of 3 · on #1", "the Issues header's line names the queue's place, and the card it works on");
 
     const again = await solveAllIssues(repo1);
     assert.equal(again.status, 409, "a repo has one Issue queue at a time: a second click while one runs is refused");
@@ -561,5 +602,67 @@ test(
     assert.equal(await cardColumn(repo10, second.id), "doing");
     assert.deepEqual(await queueOf(repo10), { running: true, numbers: [2], paused: null }, "the queue goes on with the next card");
     await api("POST", `/api/sessions/${second.id}/stop`, {});
+  },
+);
+
+test(
+  "Cancel clears the Issue queue: the card that works now keeps working, no next card starts, and Solve all issues is accepted again",
+  skip,
+  async () => {
+    seedPlainIssues(repo11, [
+      { number: 1, title: "Add dark mode", body: "Support a dark theme." },
+      { number: 2, title: "Fix the login page", body: "Fix the login page crash." },
+      { number: 3, title: "Write the setup guide", body: "Write a setup guide." },
+    ]);
+    await addRepo(repo11);
+    const boards = await openBoards();
+
+    const r = await solveAllIssues(repo11);
+    assert.equal(r.status, 200, r.json.error);
+    assert.deepEqual(r.json.queued, [1, 2, 3]);
+    const first = r.json.started.sessionId;
+    await queueLineIs(repo11, "Queue 1 of 3 · on #1");
+    await boards.heard(repo11, 1);
+
+    // Cancel is a write route: it goes through the JSON + Origin + Host check like every other write.
+    const noJson = await fetch(`${base}/api/repos/kevin/queue11/issues/queue/cancel`, { method: "POST", body: "{}" });
+    assert.equal(noJson.status, 403, "a write without application/json is refused");
+    const foreign = await fetch(`${base}/api/repos/kevin/queue11/issues/queue/cancel`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "http://elsewhere.example" },
+      body: "{}",
+    });
+    assert.equal(foreign.status, 403, "a cross-origin write is refused");
+
+    const cancelled = await cancelQueue(repo11);
+    assert.equal(cancelled.status, 200, cancelled.json.error);
+    assert.deepEqual(cancelled.json.cancelled, [1, 2, 3], "Cancel names the cards the queue drops");
+    assert.deepEqual(await queueOf(repo11), { running: false, numbers: [], paused: null }, "the queue is gone");
+    assert.equal(await queueLine(repo11), null, "with no queue the header shows Solve all issues again");
+    await boards.heard(repo11, 2);
+    assert.equal((await cancelQueue(repo11)).status, 409, "Cancel with no Issue queue running is refused");
+
+    // The card the queue started keeps running: Cancel touches no card.
+    assert.equal(await cardColumn(repo11, first), "doing", "the running card is still on the board");
+    const running = await summaryOf(first);
+    assert.ok(running.status === "running" || running.status === "starting", `the card's run went ${running.status}`);
+    assert.equal(running.attention, null, "Cancel flags nothing on the card");
+    assert.equal(await sessionForIssue(repo11, 2), undefined, "the cards after it are not started");
+    assert.equal(await sessionForIssue(repo11, 3), undefined);
+
+    // The card goes on to Review on its own: the cancelled queue starts no next card.
+    await driveCard(first, (s) => s.phase === "pr", `issue #1 of ${repo11} never reached Review after a Cancel`);
+    assert.equal(await cardColumn(repo11, first), "review");
+    assert.equal(await sessionForIssue(repo11, 2), undefined, "a cancelled queue starts no next card, even when its card reaches Review");
+    assert.deepEqual(await queueOf(repo11), { running: false, numbers: [], paused: null }, "the queue stays gone");
+
+    // Solve all issues is accepted again: the queue's rows went with the cancel.
+    const again = await solveAllIssues(repo11);
+    assert.equal(again.status, 200, again.json.error);
+    assert.deepEqual(again.json.queued, [2, 3], "the new snapshot is the cards still in Issues, and not the card in Review");
+    await queueLineIs(repo11, "Queue 1 of 2 · on #2");
+    await boards.heard(repo11, 3);
+    await api("POST", `/api/sessions/${again.json.started.sessionId}/stop`, {});
+    boards.close();
   },
 );

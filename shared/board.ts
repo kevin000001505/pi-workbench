@@ -316,8 +316,11 @@ export function queueNumbers(unclaimed: Card[], sessions: IssueClaimSource[], re
   return [...numbers].sort((a, b) => a - b);
 }
 
-/** The Issue queue's state, as the board reads it: the numbers it still has to start, plus the card it waits on. */
-export type IssueQueueState = { running: boolean; numbers: number[]; paused: number | null };
+/**
+ * The Issue queue's state, as the board reads it: the numbers it still has to start, the card it
+ * waits on, and the line the Issues column header shows instead of the Solve all issues button.
+ */
+export type IssueQueueState = { running: boolean; numbers: number[]; paused: number | null; status: string | null };
 
 /**
  * The one rule for a queue step that names the card the queue waits on: `running` while that card
@@ -327,12 +330,29 @@ export type IssueQueueState = { running: boolean; numbers: number[]; paused: num
 export const holdsQueue = (state: string) => state === "running" || state === "paused";
 
 /**
+ * The Issue queue's status line (issue #105): the queue's place in the snapshot — `done` and `skipped`
+ * cards count it, because they left the queue and did not cancel it — and the card the queue waits on:
+ * `on` while that card works, `paused on` while it is stuck, and `starting` while the queue starts it.
+ * A queue with no rows states no line, so the header shows **Solve all issues** again.
+ */
+export function queueStatusLine(steps: { number: number; state: string }[]): string | null {
+  let at = steps.findIndex((s) => holdsQueue(s.state));
+  let word = steps[at]?.state === "paused" ? "paused on" : "on";
+  if (at === -1) {
+    at = steps.findIndex((s) => s.state === "waiting");
+    word = "starting";
+  }
+  if (at === -1) return null;
+  return `Queue ${at + 1} of ${steps.length} · ${word} #${steps[at].number}`;
+}
+
+/**
  * The Issue queue's state from its stored steps (the issue_queue rows): a queue runs while it has a
  * card to start — one waiting, or the one it waits on — and its numbers are those cards, still in
  * issue-number order. A card the queue waits on that is stuck holds its place in the numbers and is
  * the `paused` number (issue #104): the queue starts no next card until the user resolves it or drops
  * it. A step that reached Review (done) or was skipped is not one of them, and a queue with no steps
- * left states nothing.
+ * left states nothing. Its `status` is the line the Issues column header shows (issue #105).
  */
 export function issueQueueState(steps: { number: number; state: string }[]): IssueQueueState {
   const live = steps.filter((s) => s.state === "waiting" || holdsQueue(s.state));
@@ -340,6 +360,7 @@ export function issueQueueState(steps: { number: number; state: string }[]): Iss
     running: live.length > 0,
     numbers: live.map((s) => s.number),
     paused: steps.find((s) => s.state === "paused")?.number ?? null,
+    status: queueStatusLine(steps),
   };
 }
 

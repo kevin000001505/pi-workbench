@@ -71,8 +71,8 @@
   margin: 0; padding: 14px 16px 10px; display: flex; align-items: center; gap: 8px;
 }
 .kz-column h2 .count { color: var(--kz-faint); font-weight: 400; }
-/* The Issue queue (issue #103): the Issues column header's button, and the count while a queue runs. */
-.kz-column h2 .queued { color: var(--kz-faint); font-weight: 400; font-size: 12px; }
+/* The Issue queue (issue #103, #105): the Issues column header's button and Cancel, and the queue's status line while one runs. */
+.kz-column h2 .queued { color: var(--kz-faint); font-weight: 400; font-size: 12px; white-space: nowrap; }
 .kz-column h2 .kz-col-btn { margin-left: auto; padding: 4px 12px; font-size: 12.5px; }
 .kz-column h2 .spinner { width: 12px; height: 12px; }
 .kz-board .status-icon { display: inline-flex; flex: none; }
