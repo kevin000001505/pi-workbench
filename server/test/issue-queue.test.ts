@@ -8,7 +8,8 @@
  *
  * Seam: `POST /api/repos/:owner/:name/issues/queue`, the `queue` field of `GET /api/board`, and the
  * session each queued card gets. What these miss: the button in the Issues column header (the web has
- * no test harness; `cd web && npm run build` type-checks it), and a queued card whose start fails.
+ * no test harness; `cd web && npm run build` type-checks it), a queued card whose start the session
+ * refuses, and a queued card that is blocked or stopped and so holds the queue.
  */
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -146,6 +147,7 @@ const repo1 = "kevin/queue1";
 const repo2 = "kevin/queue2";
 const repo3 = "kevin/queue3";
 const repo4 = "kevin/queue4";
+const repo5 = "kevin/queue5";
 let queue1First: string | undefined;
 
 before(async () => {
@@ -338,5 +340,40 @@ test(
     const second = await waitForValue(() => sessionForIssue(repo4, 2), { message: "the restarted queue never started issue #2" });
     assert.equal(await cardColumn(repo4, second.id), "doing");
     assert.deepEqual(await queueOf(repo4), { running: true, numbers: [2, 3] });
+  },
+);
+
+test(
+  "a queued card the user Abandons before its turn is skipped, and the queue starts no fresh card for its issue",
+  skip,
+  async () => {
+    await addRepo(repo5);
+    const r = await solveAllIssues(repo5);
+    assert.equal(r.status, 200, r.json.error);
+    assert.deepEqual(r.json.queued, [1, 2, 3]);
+    assert.equal(r.json.started?.number, 1);
+
+    // The user starts the third card by hand, pauses it back to Issues — where the snapshot has it —
+    // and Abandons it before the queue reaches it.
+    const hand = await api("POST", `/api/repos/${repo5}/issues/3/move`, { column: "doing" });
+    assert.equal(hand.status, 200, hand.json.error);
+    const third = hand.json.id;
+    assert.equal((await api("POST", `/api/sessions/${third}/move`, { column: "issues" })).status, 200, "the card waits in Issues, its place in the snapshot");
+    assert.equal((await api("POST", `/api/sessions/${third}/abandon`, {})).status, 200);
+    assert.equal(await cardColumn(repo5, third), undefined, "the Abandoned card is off the board");
+
+    await toReview(repo5, 1);
+    // The queue started the second card with its own Solve: it works on issue #2 now.
+    await waitForValue(() => sessionForIssue(repo5, 2), { message: "the queue never started issue #2" });
+
+    await toReview(repo5, 2);
+    // The queue's last step is the dropped card's number: it goes as skipped, and no fresh session
+    // starts for the issue the user dropped.
+    const finished = await waitForValue(async () => {
+      if ((await queueOf(repo5)).running) return false;
+      return (await sessionsOf(repo5)).filter((s) => s.issueRef === `${repo5}#3`).length === 0;
+    }, { message: "the queue did not finish by skipping the Abandoned card #3: it started a fresh card for it, or it is still waiting" });
+    assert.ok(finished);
+    assert.deepEqual(await queueOf(repo5), { running: false, numbers: [] }, "the queue is over: its last step was skipped, not started");
   },
 );

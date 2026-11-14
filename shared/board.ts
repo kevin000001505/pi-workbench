@@ -257,11 +257,14 @@ export function issueNumberOf(ref: string | null, repoId: string): number | null
   return issue.number;
 }
 
+/** What a session carries for its issue claims: mode and phase decide whether it claims at all. */
+export type IssueClaimSource = { mode: string; phase: string; issueRef: string | null; specRef: string | null };
+
 /**
  * The refs (issue ref and spec ref) that the sessions claim. Only a pipeline card that is not Done
  * claims its issues: a direct session or a merged card leaves them free for a new card.
  */
-export function claimRefs(sessions: { mode: string; phase: string; issueRef: string | null; specRef: string | null }[]): (string | null)[] {
+export function claimRefs(sessions: IssueClaimSource[]): (string | null)[] {
   return sessions.filter((s) => s.mode === "pipeline" && s.phase !== "done").flatMap((s) => [s.issueRef, s.specRef]);
 }
 
@@ -292,9 +295,6 @@ export function unclaimedCards(issues: BoardIssue[], claims: (string | null)[], 
     }));
 }
 
-/** A card the Issue queue reads a repo's sessions for: the shape claimRefs reads. */
-export type QueueCardSource = { mode: string; phase: string; issueRef: string | null; specRef: string | null };
-
 /**
  * The Issue queue's snapshot (issue #103): the issue numbers of the cards the Issues column holds
  * now, lowest first. An unclaimed card is its own number; a card the pipeline paused in Issues is
@@ -302,7 +302,7 @@ export type QueueCardSource = { mode: string; phase: string; issueRef: string | 
  * and another repo's issue are not in it. "Solve all issues" starts the cards one at a time in this
  * order, and an issue that appears after the snapshot is not in it.
  */
-export function queueNumbers(unclaimed: Card[], sessions: QueueCardSource[], repoId: string): number[] {
+export function queueNumbers(unclaimed: Card[], sessions: IssueClaimSource[], repoId: string): number[] {
   const numbers = new Set<number>();
   for (const c of unclaimed) {
     const n = unclaimedNumber(c.id);

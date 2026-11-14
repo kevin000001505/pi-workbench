@@ -1422,7 +1422,7 @@ export class SessionManager extends EventEmitter {
     const msg = `All tickets are done and reviewed${reviewNote ? ` (${reviewNote})` : ""}. PR #${pr.number} is open.`;
     this.emit("event", id, { type: "wb_notify", message: msg, level: "info" });
     // The queue's card reached Review with its PR open: start the next queued card (issue #103).
-    await this.queueFinished(id, "done");
+    await this.releaseQueueStep(id, "done");
   }
 
   /** Fresh run for implement-spec's final step: one code-review over the whole branch. */
@@ -1821,23 +1821,42 @@ export class SessionManager extends EventEmitter {
 
   /** Say why the queue starts no card for this number, and skip it. */
   private queueSkipped(repoId: string, number: number, reason: string): null {
-    console.warn(`Issue queue: ${repoId} #${number} skipped (${redact(reason)})`);
+    console.error(`Issue queue: ${repoId} #${number} skipped (${redact(reason)})`);
     return null;
   }
 
   /**
-   * The Issue queue's step: the card it waited on reached Review (its PR is open) or Done, so the
-   * queue starts the next one. A card the queue did not start, or one its steps already name, changes
-   * nothing. `state` says how the card left: `done` for Review or Done, `skipped` for a card the user
-   * dropped (Abandon or archive), so the queue never waits on a card that is gone.
+   * The Issue queue's step for this card. The card the queue waited on reached Review (its PR is
+   * open) or Done, or the user dropped it (Abandon or archive). A card the queue never started
+   * changes nothing, unless the queue still has a waiting card for the issue this card works on:
+   * the user dropped that card with this one, and the queue starts no fresh card for the issue.
+   * `state` says how the card left: `done` for Review or Done, `skipped` for a card the user
+   * dropped, so the queue never waits on a card that is gone.
    */
-  private async queueFinished(id: string, state: IssueQueueStepState) {
-    const repoId = (this.db.prepare("SELECT repo_id FROM sessions WHERE id = ?").get(id) as { repo_id: string } | undefined)?.repo_id;
-    if (!repoId) return;
-    const step = issueQueueOf(this.db, repoId).find((s) => s.state === "running" && s.sessionId === id);
-    if (!step) return;
-    issueQueueStep(this.db, repoId, step.number, state, id);
-    await this.startNextQueuedCard(repoId);
+  private async releaseQueueStep(id: string, state: IssueQueueStepState) {
+    const row = this.db
+      .prepare("SELECT repo_id, mode, phase, issue_ref, spec_ref FROM sessions WHERE id = ?")
+      .get(id) as { repo_id: string; mode: string; phase: string; issue_ref: string | null; spec_ref: string | null } | undefined;
+    if (!row) return;
+    const steps = issueQueueOf(this.db, row.repo_id);
+    if (!steps.length) return;
+    const running = steps.find((s) => s.state === "running" && s.sessionId === id);
+    if (running) {
+      issueQueueStep(this.db, row.repo_id, running.number, state, id);
+      await this.startNextQueuedCard(row.repo_id);
+      return;
+    }
+    // A card the queue snapshotted but never started is a number with no session behind it. Only a
+    // not-done pipeline card claims an issue (as claimRefs does), so the issue numbers on this
+    // card's refs name the queue steps the user dropped when they dropped this card.
+    if (state !== "skipped" || row.mode !== "pipeline" || row.phase === "done") return;
+    const numbers = new Set(
+      [issueNumberOf(row.issue_ref, row.repo_id), issueNumberOf(row.spec_ref, row.repo_id)].filter((n): n is number => n !== null),
+    );
+    const dropped = steps.filter((s) => s.state === "waiting" && numbers.has(s.number));
+    if (!dropped.length) return;
+    for (const s of dropped) issueQueueStep(this.db, row.repo_id, s.number, "skipped", id);
+    await this.startNextQueuedCard(row.repo_id);
   }
 
   /**
@@ -1998,7 +2017,7 @@ export class SessionManager extends EventEmitter {
     if (problems.length) note += `, but ${problems.join(", and ")}`;
     this.update(id, { attention: `${note}.` });
     // The queued card is Done: the queue starts the next card (issue #103).
-    await this.queueFinished(id, "done");
+    await this.releaseQueueStep(id, "done");
   }
 
   /**
@@ -2224,7 +2243,7 @@ export class SessionManager extends EventEmitter {
     this.update(id, { phase: "done", attention: problems.length ? `PR #${row.pr_number} is merged, but ${problems.join(", and ")}.` : null });
     this.emit("event", id, { type: "wb_notify", message: `PR #${row.pr_number} is merged.`, level: "info" });
     // A queued card that reached Done another way (a hand-merged PR) releases the queue too.
-    await this.queueFinished(id, "done");
+    await this.releaseQueueStep(id, "done");
   }
 
   /** One issue's title and URL for the board's Done card; a number the issue cannot be read for stays on. */
@@ -2258,7 +2277,7 @@ export class SessionManager extends EventEmitter {
     if (repo && fs.existsSync(row.worktree)) await removeWorktree(repo, row.worktree);
     this.update(id, { archived: 1, updated_at: Date.now() });
     // A queued card the user archived releases the queue: its step is skipped, and the next card starts.
-    await this.queueFinished(id, "skipped");
+    await this.releaseQueueStep(id, "skipped");
     this.clearSetupSession(row);
     this.live.delete(id);
     this.emit("removed", id);
@@ -2271,8 +2290,6 @@ export class SessionManager extends EventEmitter {
    */
   async abandon(id: string) {
     const row = this.row(id);
-    // The queue must not wait on a card the user dropped: its step goes, and the next card starts.
-    await this.queueFinished(id, "skipped");
     const repo = getRepo(this.db, row.repo_id);
     await this.stop(id);
     if (repo && this.delivery) {
@@ -2281,6 +2298,9 @@ export class SessionManager extends EventEmitter {
       await this.delivery.deleteBranch(row, repo);
     }
     if (repo && fs.existsSync(row.worktree)) await removeWorktree(repo, row.worktree);
+    // The queue must not wait on a card the user dropped, nor start a fresh card for its issue later.
+    // It goes only once the drop really happened: a GitHub step that fails keeps the card, and the queue.
+    await this.releaseQueueStep(id, "skipped");
     clearTimeout(this.summaryTimers.get(id));
     this.summaryTimers.delete(id);
     this.db.prepare("DELETE FROM tickets WHERE session_id = ?").run(id);

@@ -147,7 +147,8 @@ CREATE TABLE IF NOT EXISTS spec_watch (
 );
 -- The Issue queue (issue #103): the issue numbers "Solve all issues" snapshotted, in number order.
 -- state: waiting (its turn has not come), running (the card the queue waits on), done (it reached
--- Review), skipped (it was claimed or moved by hand, or its start was refused). The rows go with the queue.
+-- Review), skipped (it was claimed or moved by hand, its start was refused, or its card was Abandoned
+-- or archived before its turn). The rows go with the queue.
 CREATE TABLE IF NOT EXISTS issue_queue (
   repo_id TEXT NOT NULL, number INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'waiting', session_id TEXT,
   PRIMARY KEY (repo_id, number)
@@ -273,7 +274,8 @@ export function doneIssuesOf(db: Db, repoId: string): { number: number; title: s
   return rows.map((r) => ({ number: r.number, title: r.title, url: r.url, closedAt: r.closed_at, parent: r.parent, sessionId: r.session_id, notPlanned: !!r.not_planned }));
 }
 
-/** One Issue queue step (issue #103): the snapshotted issue number, its state, and the session the workbench started for it. */
+/** One Issue queue step (issue #103): the snapshotted issue number, its state, and the session the
+ * queue started for it — the card it waits on, or the card the user dropped before its turn. */
 export type IssueQueueStepState = "waiting" | "running" | "done" | "skipped";
 export type IssueQueueRow = { number: number; state: IssueQueueStepState; sessionId: string | null };
 
@@ -297,7 +299,7 @@ export function issueQueueOf(db: Db, repoId: string): IssueQueueRow[] {
   return rows.map((r) => ({ number: r.number, state: r.state as IssueQueueStepState, sessionId: r.session_id }));
 }
 
-/** One step's state, and the session the queue started for it (null for a step that has none). */
+/** One step's state, and the session its card is (null for a step whose card the queue never started). */
 export function issueQueueStep(db: Db, repoId: string, number: number, state: IssueQueueStepState, sessionId: string | null = null) {
   db.prepare("UPDATE issue_queue SET state = ?, session_id = ? WHERE repo_id = ? AND number = ?").run(state, sessionId, repoId, number);
 }

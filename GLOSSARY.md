@@ -107,7 +107,7 @@ The column for a feature that is still being grilled, specced, or cut into ticke
 _Avoid_: backlog, draft
 
 **Issues** (column):
-The column for every unclaimed card — a plain issue and a spec issue with its open ticket sub-issues alike — and for a card that waits for Solve all.
+The column for every unclaimed card — a plain issue and a spec issue with its open ticket sub-issues alike — and for a card that waits for Solve all. Its header carries the **Issue queue**'s **Solve all issues** button, and the count of the cards its queue has left to start.
 _Avoid_: ready (as a column name)
 
 **Unclaimed card**:
@@ -115,10 +115,10 @@ A card for an open issue that no session claims yet. A plain issue (no open sub-
 
 **Solve**:
 To work a plain issue through a session that skips grill, spec and tickets: the issue becomes the card's only ticket, and the PR's merge closes the issue.
-_Avoid_: solve all (that is for a spec card's tickets), fix (a fix is one possible outcome; solving covers the whole flow)
+_Avoid_: solve all (that is for a spec card's tickets), solve all issues (that is the **Issue queue**'s button), fix (a fix is one possible outcome; solving covers the whole flow)
 
 **Issue queue**:
-The Issues column header's **Solve all issues** action. One click snapshots every card the Issues column holds at that moment, sorted by issue number, and stores that snapshot; the workbench starts the lowest-numbered card with its own move to Doing (**Solve**, **Solve all tickets**, or **Solve all**), and starts the next card when the card it waits on reaches **Review** with its PR open. Issues that appear after the click are not queued, a queued card that left Issues by hand before its turn is skipped, and a repo has one queue at a time. The queue ends when its last card reaches Review.
+The Issues column header's **Solve all issues** action. One click snapshots every card the Issues column holds at that moment, sorted by issue number, and stores that snapshot; the workbench starts the lowest-numbered card with its own move to Doing (**Solve**, **Solve all tickets**, or **Solve all**), and starts the next card when the card it waits on reaches **Review** with its PR open. Issues that appear after the click are not queued, a queued card that left Issues before its turn is skipped — moved or claimed by hand, or **Abandon**ed — and a repo has one queue at a time. A queued card that is blocked or stopped holds the queue until it reaches **Review** or you drop it. The queue ends when its last card reaches **Review**.
 _Avoid_: solve all issues batch, bulk solve, auto pipeline, worker
 
 **Split**:

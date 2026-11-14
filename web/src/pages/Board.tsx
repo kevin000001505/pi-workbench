@@ -539,7 +539,9 @@ export function Board({ repoId }: { repoId?: string }) {
     api.post<{ queued: number[]; skipped: number[] }>(`/api/repos/${repo.id}/issues/queue`, {}).then(
       (r) => {
         setError(null);
-        toast(`Issue queue: ${r.queued.length} card${r.queued.length === 1 ? "" : "s"} queued${r.skipped.length ? `, ${r.skipped.length} skipped` : ""}.`);
+        // The server snapshotted r.queued cards; the ones it skipped are not in the queue it runs.
+        const left = r.queued.length - r.skipped.length;
+        toast(`Issue queue: ${left} card${left === 1 ? "" : "s"} queued${r.skipped.length ? `, ${r.skipped.length} skipped` : ""}.`);
         setRefetch((n) => n + 1);
       },
       (e) => setError(e.message),
