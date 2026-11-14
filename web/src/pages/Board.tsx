@@ -689,8 +689,15 @@ export function Board({ repoId }: { repoId?: string }) {
                 <span className="count">{(list.length + (col.id === "done" && !words.length ? doneHidden : 0)) || ""}</span>
                 {/* The Issue queue (issue #103): the button while no queue runs and Issues has cards, the count while one runs. */}
                 {col.id === "issues" && repo && queue && (queue.running ? (
-                  <span className="queued" title={`The Issue queue starts the next card when the card it waits on reaches Review: ${queue.numbers.map((n) => `#${n}`).join(", ")}`}>
-                    {queue.numbers.length} queued
+                  <span
+                    className="queued"
+                    title={
+                      `The Issue queue starts the next card when the card it waits on reaches Review: ${queue.numbers.map((n) => `#${n}`).join(", ")}` +
+                      // The pause (issue #104): the card the queue waits on is stuck, so no next card starts.
+                      (queue.paused ? ` - it waits on stuck issue #${queue.paused}: resolve that card, or take it out of Doing, and the queue goes on` : "")
+                    }
+                  >
+                    {queue.numbers.length} queued{queue.paused ? ` · waiting on #${queue.paused}` : ""}
                   </span>
                 ) : (
                   (cards ?? []).some((c) => c.column === "issues") && (
