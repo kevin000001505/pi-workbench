@@ -261,6 +261,10 @@ const router = new Router()
     return sessions.startQueue(repo.id, queueNumbers(unclaimedCards(issues, claimRefs(mine), repo.id), mine, repo.id));
   })
 
+  // The Issues column header's Cancel (issue #105): the queue's rows go, so no further card starts and
+  // Solve all issues is accepted again. The card the queue started keeps its run: Cancel touches no card.
+  .on("POST", "/api/repos/:owner/:name/issues/queue/cancel", async ({ params }) => sessions.cancelQueue(`${params.owner}/${params.name}`))
+
   // An unclaimed card (`issue:<number>`) has no session yet: its move creates one. A spec card
   // (open ticket sub-issues) to Doing is Solve all, to To do rework; a plain card to Doing is
   // Solve (the issue is the card's only ticket), to To do Split (to-tickets on the issue).

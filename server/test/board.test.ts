@@ -101,6 +101,15 @@ const featureCards = async (repo?: string) => (await board(repo)).filter((c) => 
 const doneCards = (cards: any[]) => cards.filter((c) => c.column === "done" && c.title !== SETUP_CARD);
 
 /**
+ * A board card without its live status, for the tests that check the card's shape
+ * while a run may work: the status is what a run decides, and those tests are about the columns.
+ */
+const cardShape = (c: any) => {
+  const { status: _status, ...rest } = c;
+  return rest;
+};
+
+/**
  * Commit the card's own work in its worktree, so its PR carries that work and nothing else. A new
  * session may still run the setup step on its own branch (the repo's setup card may not have landed
  * its commit yet, issue #100), so the card's work is what the test writes here.
@@ -143,7 +152,7 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
   assert.equal(setupRuns[0].phase, "setup");
 
   // A fresh board shows that card beside the repo's plain open issues in Issues.
-  assert.deepEqual(await board(), [
+  assert.deepEqual((await board()).map(cardShape), [
     { id: setupRuns[0].id, title: SETUP_CARD, column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: null, doneAt: null, specCard: false, subs: null },
     { id: "issue:1", title: "Add dark mode", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/1", doneAt: null, specCard: false, subs: null },
     { id: "issue:2", title: "Fix login Crash", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/2", doneAt: null, specCard: false, subs: null },
@@ -168,6 +177,7 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
     column: "issues",
     tickets: { done: 0, total: 3 },
     attention: null,
+    status: null,
     pr: null,
     specRef: ".scratch/greeting/spec.md",
     doneAt: null,
@@ -286,6 +296,9 @@ test("a card started from a spec's ticket issues skips Issues: Doing, then QA, t
   const card = (await board()).find((c) => c.id === s.id);
   assert.deepEqual(card.tickets, { done: 1, total: 1 });
   assert.equal(card.attention, null);
+  // Review waits on the user's Approve, not on a stuck run: the finished review left no pi process, and
+  // that resting state is not a card status. A Review card states nothing.
+  assert.equal(card.status, null, "a card that waits for Approve states no status");
   assert.match(card.specRef, /issues\/7$/);
   const pr = gh.pulls.at(-1);
   assert.match(pr.body, /Closes #8/);
@@ -1639,4 +1652,92 @@ test("a board load delivers a direct card whose PR was merged by hand on GitHub"
   // The delivered card is not approvable again.
   assert.equal((await api("POST", `/api/sessions/${id}/approve`, {})).status, 409);
   events.close();
+});
+
+test("a Board load states each card's status, and the shared rule states what each column holds", { skip: !hasPi && "pi CLI not found" }, async () => {
+  const { columnCounts } = await import("../../shared/board.ts");
+  const repo = "kevin/states";
+  await waitFor(async () => (await fetch(`${base}/api/health`).catch(() => null))?.ok);
+  assert.equal((await api("PUT", "/api/secrets", { scope: "global", name: "GITHUB_TOKEN", value: "ghp_test" })).status, 200);
+  assert.equal((await api("PUT", "/api/settings/model", { baseUrl: mock.url })).status, 200);
+  gh.createBare("kevin", "states");
+  const added = await api("POST", "/api/repos", { id: repo });
+  assert.equal(added.status, 200, JSON.stringify(added.json));
+  gh.seedSubIssues("kevin", "states", { number: 20, title: "Blocked card", body: "## Solution\nb.txt says B." }, [{ number: 21, title: "Write b.txt", body: "Create b.txt. BLOCKME" }]);
+  gh.seedSubIssues("kevin", "states", { number: 22, title: "Waiting card", body: "## Solution\nw.txt says W." }, [{ number: 23, title: "Write w.txt", body: "Create w.txt. ASKME" }]);
+  gh.seedSubIssues("kevin", "states", { number: 24, title: "Stopped card", body: "## Solution\ns.txt says S." }, [{ number: 25, title: "Write s.txt", body: "Take your time. SLOWME" }]);
+  gh.seedIssue("kevin", "states", { number: 26, title: "A plain issue", body: "Nothing started yet." });
+
+  // A card whose run works states running: the repo's own setup card works while it sits in To do.
+  const setupId = added.json.setupSession as string;
+  assert.ok(setupId, "the add of a repo that is not set up started its setup session");
+  const setupCard = await waitFor(async () => (await board(repo)).find((c) => c.id === setupId && c.status === "running"), 120_000);
+  assert.equal(setupCard.column, "todo", "the setup card works in To do");
+  assert.equal(setupCard.attention, null, "a card that works carries no note");
+  assert.deepEqual(columnCounts([setupCard]).todo, { total: 1, notes: [] }, "a card that works adds no note to its column");
+  // It lands its marker and goes Done: the started cards below then skip the setup run.
+  await waitFor(async () => (await board(repo)).find((c) => c.id === setupId)?.column === "done", 120_000);
+
+  const start = async (number: number) => {
+    const r = await api("POST", `/api/repos/kevin/states/issues/${number}/move`, { column: "doing" });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    return r.json.id as string;
+  };
+
+  // A blocked ticket: the card states blocked, with the reason as its note.
+  const blockedId = await start(20);
+  const blockedCard = await waitFor(async () => (await board(repo)).find((c) => c.id === blockedId && c.status === "blocked"), 120_000);
+  assert.equal(blockedCard.column, "doing");
+  assert.match(blockedCard.attention, /Ticket #1 is blocked/);
+
+  // A card that waits on your answer: waiting, with the decision open.
+  const waitingId = await start(22);
+  const waitingCard = await waitFor(async () => (await board(repo)).find((c) => c.id === waitingId && c.status === "waiting"), 120_000);
+  assert.equal(waitingCard.column, "doing");
+  assert.equal((await summary(waitingId)).pending.length, 1, "the ticket asked a decision");
+
+  // A card whose run the user stopped: stopped, with the note it carries.
+  const stoppedId = await start(24);
+  // Stop once the `sleep` runs: an abort that lands before pi spawns it is not cancelled.
+  const sleeping = () =>
+    fs.readdirSync("/proc").some((pid) => {
+      try {
+        return /^\d+$/.test(pid) && fs.readFileSync(`/proc/${pid}/cmdline`, "utf8") === "sleep\u000030\u0000";
+      } catch {
+        return false;
+      }
+    });
+  await waitFor(sleeping, 120_000);
+  assert.equal((await api("POST", `/api/sessions/${stoppedId}/abort`, {})).status, 200);
+  const stoppedCard = await waitFor(async () => {
+    const c = (await board(repo)).find((x) => x.id === stoppedId);
+    return c && c.status === "stopped" && c.attention ? c : false;
+  }, 120_000);
+  assert.equal(stoppedCard.column, "doing");
+  assert.match(stoppedCard.attention, /was stopped/);
+
+  // An unclaimed card states nothing: it has no session, so its column adds no note.
+  const issuesCards = (await board(repo)).filter((c) => c.column === "issues");
+  assert.ok(issuesCards.some((c) => c.id === "issue:26"), "the plain issue is still an unclaimed card");
+  assert.ok(issuesCards.every((c) => c.status === null), "an unclaimed card states nothing");
+
+  // What each column states beside its cards, by the same rule the Board uses.
+  const counts = columnCounts(await board(repo));
+  assert.deepEqual(counts.doing, { total: 3, notes: [{ status: "blocked", count: 1 }, { status: "waiting", count: 1 }, { status: "stopped", count: 1 }] }, "3 · 1 blocked · 1 waiting · 1 stopped");
+  assert.deepEqual(counts.issues, { total: issuesCards.length, notes: [] }, "the unclaimed cards add no note");
+  assert.deepEqual(counts.done, { total: 1, notes: [] }, "Done states its count only: the setup card is Done");
+  assert.deepEqual(counts.todo, { total: 0, notes: [] }, "an empty column states a count of none");
+
+  // Answer the decision: the card works again, so it adds no note to its column.
+  const pend = (await summary(waitingId)).pending[0];
+  assert.equal((await api("POST", `/api/sessions/${waitingId}/respond`, { requestId: pend.id, value: pend.options[0] })).status, 200);
+  const answered = await waitFor(async () => {
+    const c = (await board(repo)).find((x) => x.id === waitingId);
+    return c && c.status === "running" ? c : false;
+  }, 120_000);
+  assert.equal(answered.column, "doing");
+  const notesAfter = columnCounts(await board(repo)).doing.notes;
+  assert.ok(!notesAfter.some((n) => n.status === "waiting"), `the answered card adds no note: ${JSON.stringify(notesAfter)}`);
+
+  for (const id of [waitingId, blockedId]) await api("POST", `/api/sessions/${id}/stop`, {});
 });

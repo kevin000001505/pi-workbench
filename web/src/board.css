@@ -9,6 +9,7 @@
   --kz-hover: #ececec; --kz-active: #e5e5e5;
   --kz-text: #0d0d0d; --kz-muted: #5d5d5d; --kz-faint: #8f8f8f; --kz-border: #e5e5e5; --kz-card-border: #ebebeb;
   --kz-accent: #0d0d0d; --kz-accent-text: #ffffff; --kz-danger: #dc2626; --kz-danger-bg: rgba(220, 38, 38, .08);
+  --kz-warn: #b45309; --kz-live: #2563eb;
   --kz-link: #2563eb;
   color-scheme: light;
 }
@@ -18,6 +19,7 @@
     --kz-hover: #1a1a1a; --kz-active: #242424;
     --kz-text: #ececec; --kz-muted: #a1a1a1; --kz-faint: #6e6e6e; --kz-border: #1f1f1f; --kz-card-border: transparent;
     --kz-accent: #ffffff; --kz-accent-text: #000000; --kz-danger: #f87171; --kz-danger-bg: rgba(248, 113, 113, .1);
+    --kz-warn: #f0b429; --kz-live: #60a5fa;
     --kz-link: #7ab7ff;
     color-scheme: dark;
   }
@@ -71,8 +73,11 @@
   margin: 0; padding: 14px 16px 10px; display: flex; align-items: center; gap: 8px;
 }
 .kz-column h2 .count { color: var(--kz-faint); font-weight: 400; }
-/* The Issue queue (issue #103): the Issues column header's button, and the count while a queue runs. */
-.kz-column h2 .queued { color: var(--kz-faint); font-weight: 400; font-size: 12px; }
+/* The attention a column holds: `3 · 1 blocked · 1 waiting`. */
+.kz-column h2 .count .note { color: var(--kz-warn); font-variant-numeric: tabular-nums; }
+.kz-column h2 .count .note.blocked, .kz-column h2 .count .note.stopped { color: var(--kz-danger); }
+/* The Issue queue (issue #103, #105): the Issues column header's button and Cancel, and the queue's status line while one runs. */
+.kz-column h2 .queued { color: var(--kz-faint); font-weight: 400; font-size: 12px; white-space: nowrap; }
 .kz-column h2 .kz-col-btn { margin-left: auto; padding: 4px 12px; font-size: 12.5px; }
 .kz-column h2 .spinner { width: 12px; height: 12px; }
 .kz-board .status-icon { display: inline-flex; flex: none; }
@@ -89,6 +94,15 @@
   display: inline-flex; align-items: center; gap: 5px; flex: none; margin-top: 2px;
   color: var(--kz-faint); font-size: 12px; font-variant-numeric: tabular-nums;
 }
+/* The card's live status: a glyph alone for a run that works, the word beside it for one the user must look at. */
+.kz-card .kz-status {
+  display: inline-flex; align-items: center; gap: 4px; flex: none; margin-top: 2px;
+  font-size: 12px; color: var(--kz-faint); white-space: nowrap;
+}
+.kz-card .kz-status .icon svg { width: 15px; height: 15px; }
+.kz-card .kz-status.running { color: var(--kz-live); }
+.kz-card .kz-status.waiting { color: var(--kz-warn); }
+.kz-card .kz-status.blocked, .kz-card .kz-status.stopped { color: var(--kz-danger); }
 .kz-card .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .kz-card .desc {
   display: block; margin-top: 2px; color: var(--kz-muted); font-size: 13px;

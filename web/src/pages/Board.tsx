@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type BoardAction, type Card, type Column, type IssueQueueState, type SubCard, boardCardActions, COLUMNS, DONE_PAGE, isApproveMove, isPlainUnclaimedCard, issueNumberOf, unclaimedNumber } from "../../../shared/board.ts";
+import { type BoardAction, type Card, type CardStatus, type Column, type IssueQueueState, type SubCard, boardCardActions, COLUMNS, columnCounts, DONE_PAGE, isApproveMove, isPlainUnclaimedCard, issueNumberOf, unclaimedNumber } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import { abandonQuestion, approveQuestion, issueParts, CardDetail, TICKET_STATE } from "./CardDetail.tsx";
@@ -66,6 +66,71 @@ function StatusIcon({ column }: { column: Column }) {
       <svg viewBox="0 0 14 14" aria-hidden="true">
         <circle cx="7" cy="7" r="6" fill="none" stroke={color} strokeWidth="1.5" />
         {inside}
+      </svg>
+    </span>
+  );
+}
+
+/**
+ * A card's live status in words and glyphs: the Board states it on the card, and counts
+ * it in the column header. `running` gets its glyph alone, as the card already works; the three
+ * statuses the user must look at get the word beside the glyph.
+ */
+const CARD_STATUS: Record<CardStatus, { label: string; title: string; glyph: JSX.Element; word: boolean }> = {
+  blocked: {
+    label: "Blocked",
+    title: "A ticket of this card is blocked: open the card to retry it, mark it done, or reply to the agent",
+    glyph: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="m6.5 6.5 11 11" />
+      </>
+    ),
+    word: true,
+  },
+  waiting: {
+    label: "Waiting",
+    title: "A decision or a permission waits on the user's answer: open the card to answer it",
+    glyph: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 7v5l3.5 2" />
+      </>
+    ),
+    word: true,
+  },
+  stopped: {
+    label: "Stopped",
+    title: "A run of this card stopped without finishing: reply to it, retry it, or mark its ticket done",
+    glyph: (
+      <>
+        <path d="M10.3 3.9 2.1 17.9a2 2 0 0 0 1.7 3h16.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+        <path d="M12 9v4" />
+        <path d="M12 17h.01" />
+      </>
+    ),
+    word: true,
+  },
+  running: {
+    label: "Running",
+    title: "A run of this card works now",
+    glyph: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M10 8.5v7l6-3.5z" />
+      </>
+    ),
+    word: false,
+  },
+};
+
+/** The card's status glyph, in the same 24x24 line-icon style as the other board icons. */
+function StatusGlyph({ status }: { status: CardStatus }) {
+  const c = CARD_STATUS[status];
+  return (
+    <span className="icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        {c.glyph}
       </svg>
     </span>
   );
@@ -178,6 +243,13 @@ function BoardCard({
     >
       <div className="head">
         <div className="title">{card.title}</div>
+        {/* The card's live status: a glyph for a card whose run works, the word beside it for one the user must look at. */}
+        {card.status && (
+          <span className={`kz-status ${card.status}`} title={CARD_STATUS[card.status].title}>
+            <StatusGlyph status={card.status} />
+            {CARD_STATUS[card.status].word ? CARD_STATUS[card.status].label : null}
+          </span>
+        )}
         {card.tickets.total > 0 && (
           <span className="num" title={`${card.tickets.done} of ${card.tickets.total} tickets done`}>
             {card.tickets.done}/{card.tickets.total}
@@ -426,16 +498,24 @@ function DoneSubcards({ subs }: { subs: SubCard[] }) {
   );
 }
 
-/** The Issues header's Issue queue indicator: the count while the queue runs, and the card it waits on when that card is stuck (issue #104). */
-function QueueIndicator({ queue }: { queue: IssueQueueState }) {
+/**
+ * The Issues header's Issue queue state (issue #103, #105): the queue's line — its place in the
+ * snapshot and the card it works on, pauses on, or is starting — and its Cancel. Cancel drops the
+ * cards the queue has not started; the card that works now keeps working.
+ */
+function QueueIndicator({ queue, onCancel, busy }: { queue: IssueQueueState; onCancel: () => void; busy: boolean }) {
   const numbers = queue.numbers.map((n) => `#${n}`).join(", ");
   const title = queue.paused
-    ? `The Issue queue waits on stuck issue #${queue.paused}: no next card starts. Take that card to Review, or Abandon it or drag it back to Issues, and the queue goes on with ${numbers}.`
-    : `The Issue queue starts the next card when the card it waits on reaches Review: ${numbers}`;
+    ? `The Issue queue waits on stuck issue #${queue.paused}: no next card starts. Take that card to Review, or Abandon it or drag it back to Issues, and the queue goes on with ${numbers}. Cancel clears the queue: it drops the cards it had not started, and leaves #${queue.paused} as it is.`
+    : `The Issue queue starts the next card when the card it waits on reaches Review: ${numbers}. Cancel clears the queue: it drops the cards it had not started, and leaves the card that works now working.`;
   return (
-    <span className="queued" title={title}>
-      {queue.numbers.length} queued{queue.paused ? ` · waiting on #${queue.paused}` : ""}
-    </span>
+    <>
+      <span className="queued" title={title}>{queue.status}</span>
+      <button className="kz-btn kz-col-btn" disabled={busy} onClick={onCancel} title="Cancel the Issue queue: no further card starts. The card that works now keeps working, and Solve all issues can queue the rest again.">
+        {busy ? <Spinner /> : null}
+        Cancel
+      </button>
+    </>
   );
 }
 
@@ -475,7 +555,7 @@ export function Board({ repoId }: { repoId?: string }) {
   // Refetch the board when one of this repo's sessions changes what its card shows (direct cards too).
   const mine = Object.values(sessions).filter((s) => s.repoId === repo?.id);
   const key = mine
-    .map((s) => `${s.id}:${s.phase}:${s.attention ?? ""}:${s.tickets.map((t) => t.status).join(",")}:${s.prNumber ?? ""}:${s.title}`)
+    .map((s) => `${s.id}:${s.phase}:${s.attention ?? ""}:${s.status ?? ""}:${s.tickets.map((t) => t.status).join(",")}:${s.prNumber ?? ""}:${s.title}`)
     .sort()
     .join("|");
   // A drag or open dialog pauses refetching: a refetch would snap the dragged card back or reset
@@ -484,6 +564,24 @@ export function Board({ repoId }: { repoId?: string }) {
   const paused = dragged !== null || openId !== null || creating || searching;
   const pausedRef = useRef(false);
   pausedRef.current = paused;
+
+  // A wb_board bump that lands while the board is paused (a drag, an open dialog) would otherwise be
+  // dropped: the refetch effect below returns early and nothing remembers the event. Remember it, and
+  // refetch once the board is workable again, so every open Board shows a queue step or a Cancel
+  // (issue #105) without waiting for the 30-second auto refetch.
+  const seenBump = useRef(0);
+  const missedBoard = useRef(false);
+  useEffect(() => {
+    const bump = repo ? boardChanges[repo.id] ?? 0 : 0;
+    if (bump === seenBump.current) return;
+    seenBump.current = bump;
+    if (pausedRef.current) missedBoard.current = true;
+  }, [repo?.id, repo ? boardChanges[repo.id] : 0]);
+  useEffect(() => {
+    if (paused || !missedBoard.current) return;
+    missedBoard.current = false;
+    setRefetch((n) => n + 1);
+  }, [paused]);
 
   useEffect(() => {
     if (!repo || pausedRef.current) return;
@@ -561,6 +659,25 @@ export function Board({ repoId }: { repoId?: string }) {
     ).finally(() => setQueueBusy(false));
   };
 
+  // The Issues column header's Cancel (issue #105): the server drops the cards the queue has not
+  // started, and the header shows Solve all issues again. It sends no command to any card: the card the
+  // queue started keeps its run, and nothing is destroyed — Solve all issues can queue the rest again.
+  const cancelQueue = () => {
+    if (!repo) return;
+    setQueueBusy(true);
+    api.post<{ cancelled: number[]; working: number | null }>(`/api/repos/${repo.id}/issues/queue/cancel`, {}).then(
+      (r) => {
+        setError(null);
+        // The server names the cards it drops (the ones it had not started) and the one it leaves working.
+        const left = r.cancelled.map((n) => `#${n}`).join(", ");
+        const dropped = left ? `no card starts for ${left}` : "no card was left to drop";
+        toast(`Issue queue cancelled${r.working !== null ? `: issue #${r.working} keeps working, ${dropped}` : `: ${dropped}`}.`);
+        setRefetch((n) => n + 1);
+      },
+      (e) => setError(e.message),
+    ).finally(() => setQueueBusy(false));
+  };
+
   const drop = (column: Column) => {
     const card = dragged;
     setDragged(null);
@@ -605,6 +722,9 @@ export function Board({ repoId }: { repoId?: string }) {
     for (const c of cards ?? []) if (matches(c, words)) m.get(c.column)?.push(c);
     return m;
   }, [cards, filter]);
+
+  // What each column states beside its cards: the count, and one note per stuck status in it.
+  const counts = useMemo(() => columnCounts([...byColumn.values()].flat()), [byColumn]);
 
   const open = openId ? (cards ?? []).find((c) => c.id === openId) : undefined;
   const closeDetail = useCallback(() => setOpenId(null), []);
@@ -699,9 +819,18 @@ export function Board({ repoId }: { repoId?: string }) {
               <h2>
                 <StatusIcon column={col.id} />
                 {col.label}
-                <span className="count">{(list.length + (col.id === "done" && !words.length ? doneHidden : 0)) || ""}</span>
-                {/* The Issue queue (issue #103): the button while no queue runs and Issues has cards, the count while one runs. */}
-                {col.id === "issues" && repo && queue && (queue.running ? <QueueIndicator queue={queue} /> : (
+                <span className="count">
+                  {(list.length + (col.id === "done" && !words.length ? doneHidden : 0)) || ""}
+                  {/* The attention the column holds: `3 · 1 blocked`. A card that works or states nothing adds none. */}
+                  {(counts[col.id]?.notes ?? []).map((n) => (
+                    <span className={`note ${n.status}`} key={n.status}>
+                      {" · "}
+                      {n.count} {n.status}
+                    </span>
+                  ))}
+                </span>
+                {/* The Issue queue (issue #103, #105): the button while no queue runs and Issues has cards, the status line and Cancel while one runs. */}
+                {col.id === "issues" && repo && queue && (queue.running ? <QueueIndicator queue={queue} onCancel={cancelQueue} busy={queueBusy} /> : (
                   (cards ?? []).some((c) => c.column === "issues") && (
                     <button className="kz-btn kz-col-btn" disabled={queueBusy} onClick={startQueue} title="Solve every card in Issues, one at a time, by issue number">
                       {queueBusy ? <Spinner /> : null}
