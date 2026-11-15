@@ -325,8 +325,8 @@ test("unclaimed cards: plain and ticketed spec issues both sit in Issues; a sub-
   const sessions = [{ mode: "pipeline", phase: "ready", issueRef: "me/app#8", specRef: null }];
   const cards = unclaimedCards(issues, claimRefs(sessions), "me/app");
   assert.deepEqual(cards, [
-    { id: "issue:1", title: "A plain issue", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/me/app/issues/1", doneAt: null, specCard: false, subs: null },
-    { id: "issue:5", title: "A spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, pr: null, specRef: "https://github.com/me/app/issues/5", doneAt: null, specCard: true, subs: null },
+    { id: "issue:1", title: "A plain issue", column: "issues", tickets: { done: 0, total: 0 }, attention: null, status: null, pr: null, specRef: "https://github.com/me/app/issues/1", doneAt: null, specCard: false, subs: null },
+    { id: "issue:5", title: "A spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, status: null, pr: null, specRef: "https://github.com/me/app/issues/5", doneAt: null, specCard: true, subs: null },
   ]);
   // On the board, the plain card sits in Issues, before the spec's Issues card.
   assert.deepEqual(boardCards([], cards).map((c) => c.id), ["issue:1", "issue:5"]);
@@ -517,6 +517,88 @@ test("cardOf specCard: a plain issue card and a card with no tickets are not spe
   assert.equal(cardOf({ ...src([]), mode: "direct", phase: "direct" })?.specCard, false);
 });
 
+test("cardOf status: the Board states a blocked ticket, a card waiting on your answer, a stopped run, and a card whose run works", async () => {
+  const { cardOf, unclaimedCards } = await import("../../shared/board.ts");
+  const t = (status: string) => ({ status, trackerRef: "1" });
+  const src = (extra: Record<string, unknown> = {}) =>
+    ({ id: "s1", title: "T", mode: "pipeline", phase: "implement", attention: null, prNumber: null, prUrl: null, specRef: null, doneAt: null, tickets: [t("ready")], ...extra }) as any;
+
+  // A blocked ticket is what the column states, whatever the run does.
+  assert.equal(cardOf(src({ tickets: [t("blocked")], attention: "Ticket #1 is blocked: no red test.", status: "idle" }))?.status, "blocked");
+  assert.equal(
+    cardOf(src({ tickets: [t("blocked"), t("running")], attention: "Ticket #1 is blocked: no red test.", status: "waiting" }))?.status,
+    "blocked",
+    "a blocked ticket is stated even while another run waits on your answer",
+  );
+  // A card that waits on the user's answer: waiting, in Doing and paused in Issues.
+  assert.equal(cardOf(src({ status: "waiting" }))?.status, "waiting");
+  assert.equal(cardOf({ ...src({ status: "waiting" }), phase: "ready" })?.status, "waiting", "a card paused in Issues that waits on your answer");
+  // A run that ended stuck carries its note as a stopped status, in every column it sits in.
+  assert.equal(cardOf(src({ tickets: [t("running")], status: "stopped", attention: "Ticket #1 was stopped. Reply to continue it." }))?.status, "stopped");
+  assert.equal(
+    cardOf({ ...src({ tickets: [t("done")], status: "idle", attention: "The review stopped without finishing." }), phase: "review" })?.status,
+    "stopped",
+    "a stopped review in QA",
+  );
+  assert.equal(
+    cardOf({ ...src({ status: "error", attention: "GitHub refused the merge: the branch does not merge." }), phase: "pr" })?.status,
+    "stopped",
+    "a Review card whose Approve failed",
+  );
+  // A card whose run works: running.
+  assert.equal(cardOf(src({ tickets: [t("running")], status: "running" }))?.status, "running");
+  assert.equal(cardOf(src({ status: "starting" }))?.status, "running", "a run that is starting works");
+  // A card with nothing to state states nothing: an idle card with no note, and a Done card.
+  assert.equal(cardOf(src({ status: "idle" }))?.status, null, "a card with no attention states nothing extra");
+  assert.equal(cardOf(src({ status: "idle", tickets: [t("done")] }))?.status, null);
+  assert.equal(
+    cardOf({ ...src({ status: "stopped", tickets: [t("done")], doneAt: 1000 }), phase: "done" })?.status,
+    null,
+    "Done states no card status",
+  );
+  // An unclaimed card states nothing: it has no session.
+  assert.equal(
+    unclaimedCards([{ number: 12, title: "Add dark mode", url: "https://github.com/me/app/issues/12", openTickets: 0, hasParent: false }], [], "me/app")[0].status,
+    null,
+  );
+});
+
+test("columnCounts: a column states its cards and the attention in them, and a card with no attention states nothing extra", async () => {
+  const { columnCounts } = await import("../../shared/board.ts");
+  let n = 0;
+  const card = (column: string, status: string | null) =>
+    ({ id: `${column}-${++n}`, title: "T", column, tickets: { done: 0, total: 0 }, attention: null, status, pr: null, specRef: null, doneAt: null, specCard: false, subs: null }) as any;
+  const counts = columnCounts([
+    card("todo", null),
+    card("issues", "waiting"),
+    card("issues", null),
+    card("doing", "blocked"),
+    card("doing", "stopped"),
+    card("doing", "running"),
+    card("qa", "running"),
+    card("review", "stopped"),
+    card("review", "stopped"),
+    card("done", null),
+  ]);
+  assert.deepEqual(counts, {
+    todo: { total: 1, notes: [] },
+    issues: { total: 2, notes: ["1 waiting"] },
+    doing: { total: 3, notes: ["1 blocked", "1 stopped"] },
+    qa: { total: 1, notes: [] },
+    review: { total: 2, notes: ["2 stopped"] },
+    done: { total: 1, notes: [] },
+  }, "each column states its cards and what the user must look at in them");
+  // A board with no cards states every column with a count of none.
+  assert.deepEqual(columnCounts([]), {
+    todo: { total: 0, notes: [] },
+    issues: { total: 0, notes: [] },
+    doing: { total: 0, notes: [] },
+    qa: { total: 0, notes: [] },
+    review: { total: 0, notes: [] },
+    done: { total: 0, notes: [] },
+  });
+});
+
 test("a direct card follows its PR: Review in phase pr, Done in phase done, Doing in every other phase", async () => {
   const { cardOf, sessionColumn } = await import("../../shared/board.ts");
   const session = (mode: string, phase: string, extra: Record<string, unknown> = {}) =>
@@ -546,6 +628,7 @@ test("a direct card follows its PR: Review in phase pr, Done in phase done, Doin
     column: "doing",
     tickets: { done: 0, total: 0 },
     attention: null,
+    status: null,
     pr: null,
     specRef: null,
     doneAt: null,
@@ -661,6 +744,7 @@ test("done cards: a merged card and the issues it closed sit in Done, newest fir
     column: "done",
     tickets: { done: 0, total: 0 },
     attention: null,
+    status: null,
     pr: null,
     specRef: "https://github.com/me/app/issues/5",
     doneAt: 2000,
@@ -1022,6 +1106,7 @@ test("the glossary records the board's columns and card actions", () => {
   }
   assert.match(glossary, /\*\*Issues\*\* \(column\):/);
   assert.match(glossary, /\*\*Card\*\*:/);
+  assert.match(glossary, /\*\*Card status\*\*:/, "the card's live status is a term entry (issue #106)");
   assert.match(
     glossary,
     /\*\*Split\*\*:\nBreaking a plain issue into ticket sub-issues with `to-tickets`, so it becomes a spec issue that waits for Solve all\./,

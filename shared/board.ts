@@ -60,6 +60,8 @@ export type CardSource = {
   mode: string;
   phase: string;
   attention: string | null;
+  /** The session's live state (`running`, `starting`, `waiting`, `idle`, `stopped`, `error`): what cardStatus reads. */
+  status?: string;
   prNumber: number | null;
   prUrl: string | null;
   specRef: string | null;
@@ -79,6 +81,8 @@ export type Card = {
   column: Column;
   tickets: { done: number; total: number };
   attention: string | null;
+  /** What the Board states on the card and counts in its column (see cardStatus); null when the card states nothing. */
+  status: CardStatus | null;
   /** The card's PR; `state` is null until the workbench reads it from GitHub. */
   pr: { number: number; url: string | null; state: PrState | null } | null;
   specRef: string | null;
@@ -115,6 +119,29 @@ const isOwnIssue = (ticketRef: string | null, specRef: string | null): boolean =
   return t.number === s.number && (t.repo === null || (s.repo !== null && t.repo.toLowerCase() === s.repo.toLowerCase()));
 };
 
+/**
+ * A card's live status: the one word the Board states on the card and counts in its column
+ * (issue #106). `blocked` — a ticket of the card is blocked. `waiting` — the card waits on the
+ * user's answer. `stopped` — the card carries a note and no run of it works now. `running` — a run
+ * of the card works. Null is nothing to state: an idle card with no note, a Done card, an unclaimed card.
+ */
+export type CardStatus = "blocked" | "waiting" | "stopped" | "running";
+
+/**
+ * The status a session's card states, from what the session carries now: its tickets, its live state
+ * (CardSource.status) and its note (attention). A blocked ticket is stated even while another run of
+ * the same card works or waits on your answer, because it is the fact that needs you. A Done card
+ * states nothing: Done carries no card status.
+ */
+export function cardStatus(s: CardSource): CardStatus | null {
+  if (sessionColumn(s.mode, s.phase) === "done") return null;
+  if (s.tickets.some((t) => t.status === "blocked")) return "blocked";
+  if (s.status === "running" || s.status === "starting") return "running";
+  if (s.status === "waiting") return "waiting";
+  if (s.attention || s.status === "stopped" || s.status === "error") return "stopped";
+  return null;
+}
+
 /** The card for a session, or null for a pipeline phase that has no column. */
 export function cardOf(s: CardSource): Card | null {
   const column = sessionColumn(s.mode, s.phase);
@@ -125,6 +152,7 @@ export function cardOf(s: CardSource): Card | null {
     column,
     tickets: { done: s.tickets.filter((t) => t.status === "done").length, total: s.tickets.length },
     attention: s.attention,
+    status: cardStatus(s),
     pr: s.prNumber ? { number: s.prNumber, url: s.prUrl, state: null } : null,
     specRef: s.specRef,
     doneAt: s.doneAt ?? null,
@@ -198,6 +226,38 @@ export function boardCards(sessions: CardSource[], unclaimed: Card[] = []): Card
   const order = new Map(COLUMNS.map((c, i) => [c.id, i]));
   return [...sessions.map(cardOf).filter((c): c is Card => c !== null), ...unclaimed]
     .sort((a, b) => order.get(a.column)! - order.get(b.column)! || (a.column === "done" ? (b.doneAt ?? 0) - (a.doneAt ?? 0) : 0));
+}
+
+/** What one column states beside its cards (issue #106): how many cards it holds, and what the user must look at in them. */
+export type ColumnCount = { total: number; notes: string[] };
+
+/** The card statuses a column counts as attention, in the order the column names them. `running` is none: a card that works needs no look. */
+const COUNTED_STATUS: CardStatus[] = ["blocked", "waiting", "stopped"];
+
+/**
+ * What each column states beside its cards (issue #106): the number of cards, and one note per card
+ * status the user must look at — `1 blocked`, `2 waiting` — in COUNTED_STATUS order. A card whose run
+ * works, and a card that states nothing, add no note, so a column with nothing to look at states its
+ * count alone. Every column is stated, even one with no cards.
+ */
+export function columnCounts(cards: Card[]): Record<Column, ColumnCount> {
+  const out = {} as Record<Column, ColumnCount>;
+  for (const c of COLUMNS) out[c.id] = { total: 0, notes: [] };
+  const byStatus = new Map<Column, Map<CardStatus, number>>();
+  for (const card of cards) {
+    const col = out[card.column];
+    if (!col) continue;
+    col.total++;
+    if (!card.status || card.status === "running") continue;
+    const by = byStatus.get(card.column) ?? new Map<CardStatus, number>();
+    by.set(card.status, (by.get(card.status) ?? 0) + 1);
+    byStatus.set(card.column, by);
+  }
+  for (const c of COLUMNS) {
+    const by = byStatus.get(c.id);
+    out[c.id].notes = COUNTED_STATUS.flatMap((k) => (by?.get(k) ? [`${by.get(k)} ${k}`] : []));
+  }
+  return out;
 }
 
 /**
@@ -287,6 +347,7 @@ export function unclaimedCards(issues: BoardIssue[], claims: (string | null)[], 
       column: "issues" as const,
       tickets: { done: 0, total: i.openTickets },
       attention: null,
+      status: null,
       pr: null,
       specRef: i.url,
       doneAt: null,
@@ -411,6 +472,7 @@ export function doneIssueCards(issues: DoneIssue[], sessionIds: string[] = []): 
       column: "done" as const,
       tickets: { done: 0, total: 0 },
       attention: null,
+      status: null,
       pr: null,
       specRef: i.url,
       doneAt: i.closedAt,

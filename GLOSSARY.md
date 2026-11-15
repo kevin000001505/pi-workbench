@@ -102,6 +102,10 @@ _Avoid_: kanban (the style, not the thing), dashboard
 One feature on the board: a pipeline session, a direct session, or an unclaimed card (a plain issue or a spec issue with its open tickets), and the PR that delivers it. A click on a spec card toggles a row of ticket sub-cards under it, one row open at a time: a started card's row is its tickets, with their state, a done card's row is its recorded sub-issues. Every session card keeps its whole-card actions on the card: **Approve** while it is in **Review** and **Abandon** until it is **Done**, on a direct card as on a spec card, and **Stop**, **Retry** and **Answer** on a pipeline card only. An unclaimed card's buttons are the column moves (**Solve all** on a spec card, **Solve** and **Split** on a plain one).
 _Avoid_: task (kanzo's word), ticket (a ticket is one part of a card)
 
+**Card status**:
+The one live state a card states on itself, in its column header's count, and nowhere else: **blocked** (a ticket of the card is blocked), **waiting** (a decision or a permission waits on the user's answer), **stopped** (a run of the card stopped without finishing, or the user stopped it), **running** (a run of the card works now). The card carries a status icon for it, with the word beside the icon for the three the user must look at; a card that works gets the icon alone. A card with nothing to state states nothing: an idle card with no note, a Done card, an unclaimed card. The column header counts its cards and names what it holds — `3 · 1 blocked · 1 waiting` — and a card that works or states nothing adds no note.
+_Avoid_: badge (the icon marks the status; the status is the state), stuck (a stuck card is blocked, stopped, or waiting — say which)
+
 **To do**:
 The column for a feature that is still being grilled, specced, or cut into tickets, and for a card whose breakdown waits on the user's approval (a split card).
 _Avoid_: backlog, draft

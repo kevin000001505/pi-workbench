@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type BoardAction, type Card, type Column, type IssueQueueState, type SubCard, boardCardActions, COLUMNS, DONE_PAGE, isApproveMove, isPlainUnclaimedCard, issueNumberOf, unclaimedNumber } from "../../../shared/board.ts";
+import { type BoardAction, type Card, type CardStatus, type Column, type IssueQueueState, type SubCard, boardCardActions, COLUMNS, columnCounts, DONE_PAGE, isApproveMove, isPlainUnclaimedCard, issueNumberOf, unclaimedNumber } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import { abandonQuestion, approveQuestion, issueParts, CardDetail, TICKET_STATE } from "./CardDetail.tsx";
@@ -66,6 +66,71 @@ function StatusIcon({ column }: { column: Column }) {
       <svg viewBox="0 0 14 14" aria-hidden="true">
         <circle cx="7" cy="7" r="6" fill="none" stroke={color} strokeWidth="1.5" />
         {inside}
+      </svg>
+    </span>
+  );
+}
+
+/**
+ * A card's live status in words and glyphs (issue #106): the Board states it on the card, and counts
+ * it in the column header. `running` gets its glyph alone, as the card already works; the three
+ * statuses the user must look at get the word beside the glyph.
+ */
+const CARD_STATUS: Record<CardStatus, { label: string; title: string; glyph: JSX.Element; word: boolean }> = {
+  blocked: {
+    label: "Blocked",
+    title: "A ticket of this card is blocked: open the card to retry it, mark it done, or reply to the agent",
+    glyph: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="m6.5 6.5 11 11" />
+      </>
+    ),
+    word: true,
+  },
+  waiting: {
+    label: "Waiting",
+    title: "A decision or a permission waits on the user's answer: open the card to answer it",
+    glyph: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 7v5l3.5 2" />
+      </>
+    ),
+    word: true,
+  },
+  stopped: {
+    label: "Stopped",
+    title: "A run of this card stopped without finishing: reply to it, retry it, or mark its ticket done",
+    glyph: (
+      <>
+        <path d="M10.3 3.9 2.1 17.9a2 2 0 0 0 1.7 3h16.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+        <path d="M12 9v4" />
+        <path d="M12 17h.01" />
+      </>
+    ),
+    word: true,
+  },
+  running: {
+    label: "Running",
+    title: "A run of this card works now",
+    glyph: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M10 8.5v7l6-3.5z" />
+      </>
+    ),
+    word: false,
+  },
+};
+
+/** The card's status glyph, in the same 24x24 line-icon style as the other board icons. */
+function StatusGlyph({ status }: { status: CardStatus }) {
+  const c = CARD_STATUS[status];
+  return (
+    <span className="icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        {c.glyph}
       </svg>
     </span>
   );
@@ -178,6 +243,13 @@ function BoardCard({
     >
       <div className="head">
         <div className="title">{card.title}</div>
+        {/* The card's live status (issue #106): a glyph for a card whose run works, the word beside it for one the user must look at. */}
+        {card.status && (
+          <span className={`kz-status ${card.status}`} title={CARD_STATUS[card.status].title}>
+            <StatusGlyph status={card.status} />
+            {CARD_STATUS[card.status].word ? CARD_STATUS[card.status].label : null}
+          </span>
+        )}
         {card.tickets.total > 0 && (
           <span className="num" title={`${card.tickets.done} of ${card.tickets.total} tickets done`}>
             {card.tickets.done}/{card.tickets.total}
@@ -483,7 +555,7 @@ export function Board({ repoId }: { repoId?: string }) {
   // Refetch the board when one of this repo's sessions changes what its card shows (direct cards too).
   const mine = Object.values(sessions).filter((s) => s.repoId === repo?.id);
   const key = mine
-    .map((s) => `${s.id}:${s.phase}:${s.attention ?? ""}:${s.tickets.map((t) => t.status).join(",")}:${s.prNumber ?? ""}:${s.title}`)
+    .map((s) => `${s.id}:${s.phase}:${s.attention ?? ""}:${s.status ?? ""}:${s.tickets.map((t) => t.status).join(",")}:${s.prNumber ?? ""}:${s.title}`)
     .sort()
     .join("|");
   // A drag or open dialog pauses refetching: a refetch would snap the dragged card back or reset
@@ -631,6 +703,9 @@ export function Board({ repoId }: { repoId?: string }) {
     return m;
   }, [cards, filter]);
 
+  // What each column states beside its cards (issue #106): the count, and one note per stuck status in it.
+  const counts = useMemo(() => columnCounts([...byColumn.values()].flat()), [byColumn]);
+
   const open = openId ? (cards ?? []).find((c) => c.id === openId) : undefined;
   const closeDetail = useCallback(() => setOpenId(null), []);
 
@@ -724,7 +799,16 @@ export function Board({ repoId }: { repoId?: string }) {
               <h2>
                 <StatusIcon column={col.id} />
                 {col.label}
-                <span className="count">{(list.length + (col.id === "done" && !words.length ? doneHidden : 0)) || ""}</span>
+                <span className="count">
+                  {(list.length + (col.id === "done" && !words.length ? doneHidden : 0)) || ""}
+                  {/* The attention the column holds (issue #106): `3 · 1 blocked`. A card that works or states nothing adds none. */}
+                  {(counts[col.id]?.notes ?? []).map((n) => (
+                    <span className={`note ${n.split(" ")[1] ?? ""}`} key={n}>
+                      {" · "}
+                      {n}
+                    </span>
+                  ))}
+                </span>
                 {/* The Issue queue (issue #103, #105): the button while no queue runs and Issues has cards, the status line and Cancel while one runs. */}
                 {col.id === "issues" && repo && queue && (queue.running ? <QueueIndicator queue={queue} onCancel={cancelQueue} busy={queueBusy} /> : (
                   (cards ?? []).some((c) => c.column === "issues") && (
