@@ -60,8 +60,9 @@ export type CardSource = {
   mode: string;
   phase: string;
   attention: string | null;
-  /** The session's live state (`running`, `starting`, `waiting`, `idle`, `stopped`, `error`): what cardStatus reads. */
-  status?: string;
+  /** What cardStatus reads for the run: this session's live state. Absent when the reader has no live
+   * state at all (a stored record, an unclaimed card): the card then states nothing from its run. */
+  status?: SessionLiveStatus;
   prNumber: number | null;
   prUrl: string | null;
   specRef: string | null;
@@ -120,25 +121,37 @@ const isOwnIssue = (ticketRef: string | null, specRef: string | null): boolean =
 };
 
 /**
- * A card's live status: the one word the Board states on the card and counts in its column
- * (issue #106). `blocked` — a ticket of the card is blocked. `waiting` — the card waits on the
- * user's answer. `stopped` — the card carries a note and no run of it works now. `running` — a run
- * of the card works. Null is nothing to state: an idle card with no note, a Done card, an unclaimed card.
+ * A session's live state, as the server reports it and as cardStatus reads it. `stopped` is what the
+ * server says when no pi process of the session runs now — the resting state of every finished
+ * session, not only of a run the user cut short — which is why cardStatus never reads it as a stuck
+ * card on its own. One vocabulary for both sides: the server's SessionStatus is this type.
+ */
+export type SessionLiveStatus = "starting" | "running" | "waiting" | "idle" | "stopped" | "error";
+
+/**
+ * A card's live status: the one word the Board states on the card and counts in its column.
+ * `blocked` — a ticket of the card is blocked. `waiting` — the card waits on the user's answer.
+ * `stopped` — the card carries a note the user must look at, or its pi process died. `running` — a
+ * run of the card works. Null is nothing to state: an idle card with no note, a Done card, an
+ * unclaimed card.
  */
 export type CardStatus = "blocked" | "waiting" | "stopped" | "running";
 
 /**
  * The status a session's card states, from what the session carries now: its tickets, its live state
  * (CardSource.status) and its note (attention). A blocked ticket is stated even while another run of
- * the same card works or waits on your answer, because it is the fact that needs you. A Done card
- * states nothing: Done carries no card status.
+ * the same card works or waits on your answer, because it is the fact that needs you. A live state of
+ * `stopped` alone is not a stuck card: it is also what a finished run leaves behind — a card waiting
+ * for Approve, or a card after a server restart — so `stopped` needs the note the pipeline flags on a
+ * run that ended stuck, or a dead pi process (`error`). A Done card states nothing: Done carries no
+ * card status.
  */
 export function cardStatus(s: CardSource): CardStatus | null {
   if (sessionColumn(s.mode, s.phase) === "done") return null;
   if (s.tickets.some((t) => t.status === "blocked")) return "blocked";
   if (s.status === "running" || s.status === "starting") return "running";
   if (s.status === "waiting") return "waiting";
-  if (s.attention || s.status === "stopped" || s.status === "error") return "stopped";
+  if (s.attention || s.status === "error") return "stopped";
   return null;
 }
 
@@ -228,17 +241,18 @@ export function boardCards(sessions: CardSource[], unclaimed: Card[] = []): Card
     .sort((a, b) => order.get(a.column)! - order.get(b.column)! || (a.column === "done" ? (b.doneAt ?? 0) - (a.doneAt ?? 0) : 0));
 }
 
-/** What one column states beside its cards (issue #106): how many cards it holds, and what the user must look at in them. */
-export type ColumnCount = { total: number; notes: string[] };
+/** What one column states beside its cards: how many cards it holds, and what the user must look at in them. */
+export type ColumnCount = { total: number; notes: { status: CardStatus; count: number }[] };
 
 /** The card statuses a column counts as attention, in the order the column names them. `running` is none: a card that works needs no look. */
 const COUNTED_STATUS: CardStatus[] = ["blocked", "waiting", "stopped"];
 
 /**
- * What each column states beside its cards (issue #106): the number of cards, and one note per card
- * status the user must look at — `1 blocked`, `2 waiting` — in COUNTED_STATUS order. A card whose run
- * works, and a card that states nothing, add no note, so a column with nothing to look at states its
- * count alone. Every column is stated, even one with no cards.
+ * What each column states beside its cards: the number of cards, and one note per card status the
+ * user must look at — the status, and how many cards of the column carry it — in COUNTED_STATUS
+ * order. The note is not a sentence: the view words it. A card whose run works, and a card that states
+ * nothing, add no note, so a column with nothing to look at states its count alone. Every column is
+ * stated, even one with no cards.
  */
 export function columnCounts(cards: Card[]): Record<Column, ColumnCount> {
   const out = {} as Record<Column, ColumnCount>;
@@ -255,7 +269,10 @@ export function columnCounts(cards: Card[]): Record<Column, ColumnCount> {
   }
   for (const c of COLUMNS) {
     const by = byStatus.get(c.id);
-    out[c.id].notes = COUNTED_STATUS.flatMap((k) => (by?.get(k) ? [`${by.get(k)} ${k}`] : []));
+    out[c.id].notes = COUNTED_STATUS.flatMap((k) => {
+      const count = by?.get(k);
+      return count ? [{ status: k, count }] : [];
+    });
   }
   return out;
 }
@@ -391,20 +408,28 @@ export type IssueQueueState = { running: boolean; numbers: number[]; paused: num
 export const holdsQueue = (state: string) => state === "running" || state === "paused";
 
 /**
+ * The queue steps still in the queue: one waiting its turn, or the one the queue waits on (running,
+ * paused). A step that reached Review (`done`) or was skipped (`skipped`) left the queue, and Cancel
+ * drops exactly these rows: the card the queue started keeps its run, because Cancel touches no card.
+ * One rule for both sides: issueQueueState's numbers, and SessionManager.cancelQueue's answer.
+ */
+export const liveQueueSteps = <T extends { state: string }>(steps: T[]): T[] => steps.filter((s) => s.state === "waiting" || holdsQueue(s.state));
+
+/**
  * The Issue queue's status line (issue #105): the queue's place in the snapshot — `done` and `skipped`
  * cards count it, because they left the queue and did not cancel it — and the card the queue waits on:
  * `on` while that card works, `paused on` while it is stuck, and `starting` while the queue starts it.
- * A queue with no rows states no line, so the header shows **Solve all issues** again.
+ * A queue with no step left in it states no line, so the header shows **Solve all issues** again.
  */
 export function queueStatusLine(steps: { number: number; state: string }[]): string | null {
-  let at = steps.findIndex((s) => holdsQueue(s.state));
-  let word = steps[at]?.state === "paused" ? "paused on" : "on";
-  if (at === -1) {
-    at = steps.findIndex((s) => s.state === "waiting");
-    word = "starting";
+  const at = steps.findIndex((s) => holdsQueue(s.state));
+  if (at !== -1) {
+    const word = steps[at].state === "paused" ? "paused on" : "on";
+    return `Queue ${at + 1} of ${steps.length} · ${word} #${steps[at].number}`;
   }
-  if (at === -1) return null;
-  return `Queue ${at + 1} of ${steps.length} · ${word} #${steps[at].number}`;
+  const next = steps.findIndex((s) => s.state === "waiting");
+  if (next === -1) return null;
+  return `Queue ${next + 1} of ${steps.length} · starting #${steps[next].number}`;
 }
 
 /**
@@ -416,7 +441,7 @@ export function queueStatusLine(steps: { number: number; state: string }[]): str
  * left states nothing. Its `status` is the line the Issues column header shows (issue #105).
  */
 export function issueQueueState(steps: { number: number; state: string }[]): IssueQueueState {
-  const live = steps.filter((s) => s.state === "waiting" || holdsQueue(s.state));
+  const live = liveQueueSteps(steps);
   return {
     running: live.length > 0,
     numbers: live.map((s) => s.number),

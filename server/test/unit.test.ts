@@ -548,6 +548,12 @@ test("cardOf status: the Board states a blocked ticket, a card waiting on your a
   // A card whose run works: running.
   assert.equal(cardOf(src({ tickets: [t("running")], status: "running" }))?.status, "running");
   assert.equal(cardOf(src({ status: "starting" }))?.status, "running", "a run that is starting works");
+  // A run that finished leaves no pi process behind, and the server calls that `stopped` too: it is the
+  // resting state of every finished session, not a stuck card. Only a note, or a dead pi process, states Stopped.
+  assert.equal(cardOf({ ...src({ tickets: [t("done")], status: "stopped" }), phase: "pr" })?.status, null, "a Review card that waits for Approve states nothing");
+  assert.equal(cardOf({ ...src({ tickets: [t("done")], status: "stopped" }), phase: "ready" })?.status, null, "a card paused in Issues after its run states nothing");
+  assert.equal(cardOf({ ...src({ status: "stopped" }), phase: "grill" })?.status, null, "no live run after a server restart states nothing");
+  assert.equal(cardOf({ ...src({ status: "error" }), phase: "pr" })?.status, "stopped", "a pi process that died states Stopped, note or no note");
   // A card with nothing to state states nothing: an idle card with no note, and a Done card.
   assert.equal(cardOf(src({ status: "idle" }))?.status, null, "a card with no attention states nothing extra");
   assert.equal(cardOf(src({ status: "idle", tickets: [t("done")] }))?.status, null);
@@ -582,12 +588,12 @@ test("columnCounts: a column states its cards and the attention in them, and a c
   ]);
   assert.deepEqual(counts, {
     todo: { total: 1, notes: [] },
-    issues: { total: 2, notes: ["1 waiting"] },
-    doing: { total: 3, notes: ["1 blocked", "1 stopped"] },
+    issues: { total: 2, notes: [{ status: "waiting", count: 1 }] },
+    doing: { total: 3, notes: [{ status: "blocked", count: 1 }, { status: "stopped", count: 1 }] },
     qa: { total: 1, notes: [] },
-    review: { total: 2, notes: ["2 stopped"] },
+    review: { total: 2, notes: [{ status: "stopped", count: 2 }] },
     done: { total: 1, notes: [] },
-  }, "each column states its cards and what the user must look at in them");
+  }, "each column states its cards and what the user must look at in them: the status and its count, not a sentence");
   // A board with no cards states every column with a count of none.
   assert.deepEqual(columnCounts([]), {
     todo: { total: 0, notes: [] },
@@ -1106,7 +1112,8 @@ test("the glossary records the board's columns and card actions", () => {
   }
   assert.match(glossary, /\*\*Issues\*\* \(column\):/);
   assert.match(glossary, /\*\*Card\*\*:/);
-  assert.match(glossary, /\*\*Card status\*\*:/, "the card's live status is a term entry (issue #106)");
+  assert.match(glossary, /\*\*Card status\*\*:/, "the card's live status is a term entry");
+  assert.match(glossary, /A run that only finished states nothing/, "the term entry names the resting state as no status: cardStatus follows it");
   assert.match(
     glossary,
     /\*\*Split\*\*:\nBreaking a plain issue into ticket sub-issues with `to-tickets`, so it becomes a spec issue that waits for Solve all\./,

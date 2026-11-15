@@ -73,7 +73,7 @@
   margin: 0; padding: 14px 16px 10px; display: flex; align-items: center; gap: 8px;
 }
 .kz-column h2 .count { color: var(--kz-faint); font-weight: 400; }
-/* The attention a column holds (issue #106): `3 · 1 blocked · 1 waiting`. */
+/* The attention a column holds: `3 · 1 blocked · 1 waiting`. */
 .kz-column h2 .count .note { color: var(--kz-warn); font-variant-numeric: tabular-nums; }
 .kz-column h2 .count .note.blocked, .kz-column h2 .count .note.stopped { color: var(--kz-danger); }
 /* The Issue queue (issue #103, #105): the Issues column header's button and Cancel, and the queue's status line while one runs. */
@@ -94,7 +94,7 @@
   display: inline-flex; align-items: center; gap: 5px; flex: none; margin-top: 2px;
   color: var(--kz-faint); font-size: 12px; font-variant-numeric: tabular-nums;
 }
-/* The card's live status (issue #106): a glyph alone for a run that works, the word beside it for one the user must look at. */
+/* The card's live status: a glyph alone for a run that works, the word beside it for one the user must look at. */
 .kz-card .kz-status {
   display: inline-flex; align-items: center; gap: 4px; flex: none; margin-top: 2px;
   font-size: 12px; color: var(--kz-faint); white-space: nowrap;

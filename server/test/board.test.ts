@@ -101,7 +101,7 @@ const featureCards = async (repo?: string) => (await board(repo)).filter((c) => 
 const doneCards = (cards: any[]) => cards.filter((c) => c.column === "done" && c.title !== SETUP_CARD);
 
 /**
- * A board card without its live status (issue #106), for the tests that check the card's shape
+ * A board card without its live status, for the tests that check the card's shape
  * while a run may work: the status is what a run decides, and those tests are about the columns.
  */
 const cardShape = (c: any) => {
@@ -296,6 +296,9 @@ test("a card started from a spec's ticket issues skips Issues: Doing, then QA, t
   const card = (await board()).find((c) => c.id === s.id);
   assert.deepEqual(card.tickets, { done: 1, total: 1 });
   assert.equal(card.attention, null);
+  // Review waits on the user's Approve, not on a stuck run: the finished review left no pi process, and
+  // that resting state is not a card status. A Review card states nothing.
+  assert.equal(card.status, null, "a card that waits for Approve states no status");
   assert.match(card.specRef, /issues\/7$/);
   const pr = gh.pulls.at(-1);
   assert.match(pr.body, /Closes #8/);
@@ -1720,7 +1723,7 @@ test("a Board load states each card's status, and the shared rule states what ea
 
   // What each column states beside its cards, by the same rule the Board uses.
   const counts = columnCounts(await board(repo));
-  assert.deepEqual(counts.doing, { total: 3, notes: ["1 blocked", "1 waiting", "1 stopped"] }, "3 · 1 blocked · 1 waiting · 1 stopped");
+  assert.deepEqual(counts.doing, { total: 3, notes: [{ status: "blocked", count: 1 }, { status: "waiting", count: 1 }, { status: "stopped", count: 1 }] }, "3 · 1 blocked · 1 waiting · 1 stopped");
   assert.deepEqual(counts.issues, { total: issuesCards.length, notes: [] }, "the unclaimed cards add no note");
   assert.deepEqual(counts.done, { total: 1, notes: [] }, "Done states its count only: the setup card is Done");
   assert.deepEqual(counts.todo, { total: 0, notes: [] }, "an empty column states a count of none");
@@ -1734,7 +1737,7 @@ test("a Board load states each card's status, and the shared rule states what ea
   }, 120_000);
   assert.equal(answered.column, "doing");
   const notesAfter = columnCounts(await board(repo)).doing.notes;
-  assert.ok(!notesAfter.includes("1 waiting"), `the answered card adds no note: ${JSON.stringify(notesAfter)}`);
+  assert.ok(!notesAfter.some((n) => n.status === "waiting"), `the answered card adds no note: ${JSON.stringify(notesAfter)}`);
 
   for (const id of [waitingId, blockedId]) await api("POST", `/api/sessions/${id}/stop`, {});
 });

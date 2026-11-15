@@ -46,7 +46,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { claimRefs, type Column, COLUMNS, holdsQueue, issueNumberOf, type IssueQueueState, issueQueueState, type PrState, resolvedNote, sessionColumn } from "../../shared/board.ts";
+import { claimRefs, type Column, COLUMNS, holdsQueue, issueNumberOf, type IssueQueueState, issueQueueState, liveQueueSteps, type PrState, resolvedNote, sessionColumn, type SessionLiveStatus } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
   configureAutoApprove,
@@ -88,7 +88,12 @@ export type ReconcileResult = {
   doneNumbers: number[];
 };
 
-export type SessionStatus = "stopped" | "starting" | "running" | "waiting" | "idle" | "error";
+/**
+ * The session's live state. One vocabulary with the board's: SessionLiveStatus in shared/board.ts is
+ * what cardStatus reads, so `stopped` here means the same thing on both sides — no pi process of this
+ * session runs now, which is also the resting state of a run that finished.
+ */
+export type SessionStatus = SessionLiveStatus;
 
 export type UiRequest = {
   id: string;
@@ -283,6 +288,8 @@ export class SessionManager extends EventEmitter {
   private claiming = new Set<string>();
   /** Repos whose Issue queue is being started now; a second click while it runs is refused. */
   private queueRuns = new Set<string>();
+  /** Repos whose Issue queue is starting one card now (its GitHub read and its session): Cancel waits for it. */
+  private queueStarts = new Set<string>();
   /** Repos whose setup session is being created now; a second add of the same repo waits for the run. */
   private setupRuns = new Map<string, Promise<SessionSummary | null>>();
 
@@ -1782,16 +1789,23 @@ export class SessionManager extends EventEmitter {
    * Cancel the Issue queue (issue #105): the Issues column header's **Cancel**. The queue's rows go, so
    * the board states no queue, the header shows **Solve all issues** again, and no further card starts.
    * Cancel touches no card: the card the queue started keeps its run, and its own step is gone with the
-   * rows, so when it reaches Review it releases no next card either. Refused with 409 when no queue runs.
+   * rows, so when it reaches Review it releases no next card either.
+   * Refused with 409 when no queue runs — the same rule the board states (`running`) — and while the
+   * queue starts a card, because that card is already on its way: Cancel again once it is on the board.
    */
-  cancelQueue(repoId: string): { cancelled: number[] } {
+  cancelQueue(repoId: string): { cancelled: number[]; working: number | null } {
     const repo = requireTrackedRepo(this.db, repoId);
+    if (this.queueStarts.has(repo.id))
+      throw Object.assign(new Error(`The Issue queue starts a card of ${repo.id} now: Cancel again once that card is on the board.`), { status: 409 });
     const rows = issueQueueOf(this.db, repo.id);
-    if (!rows.length) throw Object.assign(new Error(`No Issue queue runs for ${repo.id}: nothing to cancel.`), { status: 409 });
+    if (!issueQueueState(rows).running) throw Object.assign(new Error(`No Issue queue runs for ${repo.id}: nothing to cancel.`), { status: 409 });
+    // The card the queue works on or pauses on: Cancel leaves it working, and names it. The cards it
+    // has not started are the ones Cancel drops.
+    const working = rows.find((r) => holdsQueue(r.state)) ?? null;
     issueQueueClear(this.db, repo.id);
     // The queue's state is part of the board: open boards fetch GET /api/board again.
     this.emit("board", repo.id);
-    return { cancelled: rows.filter((r) => r.state === "waiting" || holdsQueue(r.state)).map((r) => r.number) };
+    return { cancelled: liveQueueSteps(rows).filter((r) => r.state === "waiting").map((r) => r.number), working: working?.number ?? null };
   }
 
   /**
@@ -1868,6 +1882,17 @@ export class SessionManager extends EventEmitter {
    * on GitHub. A start the session itself refuses (409, a GitHub read that failed) is a skip too.
    */
   private async startQueuedCard(repoId: string, number: number): Promise<{ number: number; sessionId: string } | null> {
+    // Cancel waits while this starts (issue #105): from this read on, the card is already on its way,
+    // and a Cancel that landed here would start one card more than the user asked for.
+    this.queueStarts.add(repoId);
+    try {
+      return await this.queuedCard(repoId, number);
+    } finally {
+      this.queueStarts.delete(repoId);
+    }
+  }
+
+  private async queuedCard(repoId: string, number: number): Promise<{ number: number; sessionId: string } | null> {
     const repo = getRepo(this.db, repoId);
     if (!repo) return null;
     const claimed = this

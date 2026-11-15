@@ -636,7 +636,11 @@ test(
 
     const cancelled = await cancelQueue(repo11);
     assert.equal(cancelled.status, 200, cancelled.json.error);
-    assert.deepEqual(cancelled.json.cancelled, [1, 2, 3], "Cancel names the cards the queue drops");
+    assert.deepEqual(
+      cancelled.json,
+      { cancelled: [2, 3], working: 1 },
+      "Cancel names the cards it drops — the ones it had not started — and the card it leaves working",
+    );
     assert.deepEqual(await queueOf(repo11), { running: false, numbers: [], paused: null }, "the queue is gone");
     assert.equal(await queueLine(repo11), null, "with no queue the header shows Solve all issues again");
     await boards.heard(repo11, 2);
