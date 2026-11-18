@@ -30,6 +30,7 @@ import {
   writePiConfig,
 } from "./settings.ts";
 import { listSkills } from "./skills.ts";
+import { addSkillSource, listSkillSources } from "./skill-library.ts";
 
 const db = openDb(config.dbFile);
 const secrets = new SecretStore(db, config.masterKey);
@@ -417,6 +418,12 @@ const router = new Router()
     const extra = id ? sessions.extraSkillDirs(id) : query.get("typesafe") === "1" ? [path.join(config.optionalSkillsDir, TYPESAFE_SKILL)] : [];
     return listSkills(config.skillsDir, cwd, extra).map(({ path: _p, ...s }) => s);
   })
+
+  // --- skill library -----------------------------------------------------------------------
+  // The library's Skill sources and what each one installed (issue #114). An add clones through the
+  // global secret scope, as a repo clone does, so a private skill repo works with the saved token.
+  .on("GET", "/api/skill-sources", () => listSkillSources(db))
+  .on("POST", "/api/skill-sources", async ({ body }) => addSkillSource(db, body, await gitEnv()))
 
   // --- settings & secrets ---------------------------------------------------------------
   .on("GET", "/api/settings", () => ({ model: getModelSettings(db), approval: getApprovalSettings(db), autoApprove: autoApproveView(db, secrets), pipeline: getPipelineSettings(db) }))

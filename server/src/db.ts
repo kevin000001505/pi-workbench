@@ -96,6 +96,30 @@ export type TicketRow = {
   rescue_state: string | null;
 };
 
+/** A Skill source the user added (issue #114). `commit_sha` is the one the clone pinned, and
+ * `size_bytes` the tree the install keeps. */
+export type SkillSourceRow = {
+  id: string;
+  url: string;
+  ref: string | null;
+  subpath: string | null;
+  commit_sha: string;
+  size_bytes: number;
+  created_at: number;
+  updated_at: number;
+};
+
+/** One installed skill of a Skill source. `dir` is its directory under the install directory,
+ * and `files` its file names as a JSON array. */
+export type InstalledSkillRow = {
+  id: string;
+  source_id: string;
+  name: string;
+  description: string;
+  dir: string;
+  files: string;
+};
+
 export type SecretRow = {
   scope: string; // "global" or a repo id
   name: string;
@@ -144,6 +168,16 @@ CREATE TABLE IF NOT EXISTS issues_done (
 -- A spec issue a session claims, or that lands in issues_done, leaves the watch list.
 CREATE TABLE IF NOT EXISTS spec_watch (
   repo_id TEXT NOT NULL, number INTEGER NOT NULL, PRIMARY KEY (repo_id, number)
+);
+-- The skill library (issue #114): the Skill sources the user added, and the skills each one
+-- installed. The install directory (config.installedSkillsDir) holds the tree these rows describe.
+CREATE TABLE IF NOT EXISTS skill_sources (
+  id TEXT PRIMARY KEY, url TEXT NOT NULL, ref TEXT, subpath TEXT, commit_sha TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS installed_skills (
+  id TEXT PRIMARY KEY, source_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL,
+  dir TEXT NOT NULL, files TEXT NOT NULL DEFAULT '[]'
 );
 -- The Issue queue (issue #103): the issue numbers "Solve all issues" snapshotted, in number order.
 -- state: waiting (its turn has not come), running (the card the queue waits on), paused (that card is
@@ -308,6 +342,36 @@ export function issueQueueStep(db: Db, repoId: string, number: number, state: Is
 /** The queue is over: its rows go with it, so the board states no queue for the repo. */
 export function issueQueueClear(db: Db, repoId: string) {
   db.prepare("DELETE FROM issue_queue WHERE repo_id = ?").run(repoId);
+}
+
+/**
+ * Record one installed Skill source and the skills it brought, in one transaction: an add that wrote
+ * half of them is no add at all, so nothing half-installed stays in the library.
+ */
+export function recordSkillSource(db: Db, source: SkillSourceRow, skills: InstalledSkillRow[]) {
+  const insSource = db.prepare(
+    "INSERT INTO skill_sources (id, url, ref, subpath, commit_sha, size_bytes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+  const insSkill = db.prepare("INSERT INTO installed_skills (id, source_id, name, description, dir, files) VALUES (?, ?, ?, ?, ?, ?)");
+  db.exec("BEGIN");
+  try {
+    insSource.run(source.id, source.url, source.ref, source.subpath, source.commit_sha, source.size_bytes, source.created_at, source.updated_at);
+    for (const s of skills) insSkill.run(s.id, s.source_id, s.name, s.description, s.dir, s.files);
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+/** Every Skill source in the library, newest first. */
+export function skillSourceRows(db: Db): SkillSourceRow[] {
+  return db.prepare("SELECT * FROM skill_sources ORDER BY created_at DESC, id").all() as SkillSourceRow[];
+}
+
+/** Every installed skill of every source, by name within its source. */
+export function installedSkillRows(db: Db): InstalledSkillRow[] {
+  return db.prepare("SELECT * FROM installed_skills ORDER BY source_id, name, id").all() as InstalledSkillRow[];
 }
 
 /** The spec issues the board watches for this repo (the unclaimed spec cards it showed; see the spec_watch table). */

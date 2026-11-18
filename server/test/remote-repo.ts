@@ -32,6 +32,23 @@ export function seedBareRepo(root: string, owner: string, name: string, seedFile
   return bare;
 }
 
+/** That repo's commits on its default branch, newest first. */
+export function remoteCommits(root: string, owner: string, name: string): string[] {
+  return sh(path.join(root, owner, `${name}.git`), "rev-list", "HEAD").toString().trim().split("\n");
+}
+
+/**
+ * Name `ref` (a full ref path: `refs/tags/v1`, `refs/heads/release`) at `sha` on that repo — what a
+ * tag or another branch looks like from the other side of a clone. `sha` defaults to the current head.
+ * Answers with the commit it names.
+ */
+export function nameRemoteRef(root: string, owner: string, name: string, ref: string, sha?: string): string {
+  const bare = path.join(root, owner, `${name}.git`);
+  const at = sha ?? sh(bare, "rev-parse", "HEAD").toString().trim();
+  sh(bare, "update-ref", ref, at);
+  return at;
+}
+
 /** Put `rel` on that repo's default branch (`content`), or take it off (`null`). */
 export function editRemoteFile(root: string, owner: string, name: string, rel: string, content: string | null) {
   const work = fs.mkdtempSync(path.join(root, ".edit-"));

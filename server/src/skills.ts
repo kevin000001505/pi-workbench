@@ -4,8 +4,9 @@ import path from "node:path";
 export type Skill = {
   name: string;
   description: string;
-  /** "global" for the image's skills, "repo" for the repo's own .agents/skills or .pi/skills. */
-  source: "global" | "repo";
+  /** "global" for the image's skills, "repo" for the repo's own .agents/skills or .pi/skills,
+   * "installed" for a skill the skill library took from a git source (never a scanned dir). */
+  source: "global" | "repo" | "installed";
   /** Hidden from the model; only runs when the user types /skill:name. */
   manualOnly: boolean;
   path: string;

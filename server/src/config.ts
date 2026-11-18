@@ -20,6 +20,10 @@ export const config = {
   agentHome: process.env.HOME ? path.resolve(process.env.HOME) : os.homedir(),
   reposDir: path.join(dataDir, "repos"),
   worktreesDir: path.join(dataDir, "worktrees"),
+  /** The skill library's install directory (issue #114): the skills the user added from git.
+   * It is in the data volume so an install survives a restart, and it is not a skills directory:
+   * pi never scans it (ADR 0004). */
+  installedSkillsDir: path.join(dataDir, "installed-skills"),
   piBin: process.env.PI_BIN ?? "pi",
   /** Global skills baked into the image (mattpocock/skills at a pinned commit). */
   skillsDir: path.resolve(process.env.SKILLS_DIR ?? path.join(appRoot, ".skills")),
