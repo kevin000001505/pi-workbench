@@ -41,6 +41,72 @@ export const PIPELINE_SKILL_NAMES: readonly string[] = Object.values(PIPELINE_SK
 /** `ready`: the tickets are recorded and the session waits for Solve all. `pr`: reviewed, PR open. */
 export type Phase = "setup" | "grill" | "spec" | "tickets" | "ready" | "implement" | "review" | "retro" | "pr" | "done" | "direct";
 
+/**
+ * The pipeline places an installed skill can attach to (issue #117, ADR 0004). The library stores
+ * these names, so a setting outside them is refused rather than quietly ignored.
+ */
+export const ATTACH_POINTS = ["grill", "spec", "tickets", "implement", "review", "direct"] as const;
+export type AttachPoint = (typeof ATTACH_POINTS)[number];
+
+/** Whether an unchecked value names one attach point. */
+export const isAttachPoint = (v: unknown): v is AttachPoint => typeof v === "string" && (ATTACH_POINTS as readonly string[]).includes(v);
+
+/** What a run is, as the attach table reads it. `ticketRun` and `specialRun` name a run with its own
+ * pi session id; the session's own conversation run is named by its `mode` and `phase`. */
+export type RunFacts = {
+  mode: "pipeline" | "direct";
+  phase: Phase;
+  /** The run is one ticket's own run: its first run, its fix run, or its rescue run. */
+  ticketRun: "ticket" | "fix" | "rescue" | null;
+  /** The run is the session's review run, its retro run, or its merge run. */
+  specialRun: "review" | "retro" | "merge" | null;
+};
+
+/** A run with a pi session id of its own: one ticket's runs, and the session's review, retro and merge runs. */
+export type OwnRunKind = "ticket" | "fix" | "rescue" | "review" | "retro" | "merge";
+
+/** The place of a run that is not the session's own conversation. */
+const RUN_ATTACH: Record<OwnRunKind, AttachPoint | null> = {
+  ticket: "implement",
+  fix: "implement",
+  rescue: null,
+  review: "review",
+  retro: null,
+  merge: null,
+};
+
+/** The place the session's own conversation serves, by the pipeline step its phase is in. A card in
+ * Review or Done has no step running, so its conversation serves no place; the setup run has a narrow
+ * job of its own and serves none. */
+const CONVERSATION_ATTACH: Record<Phase, AttachPoint | null> = {
+  setup: null,
+  grill: "grill",
+  spec: "spec",
+  tickets: "tickets",
+  ready: "tickets",
+  implement: "implement",
+  review: "review",
+  retro: null,
+  pr: null,
+  done: null,
+  direct: "direct",
+};
+
+/**
+ * The one mapping from a run to the pipeline place it serves (issue #117): an installed skill reaches
+ * the runs of the places it is attached to, and no other run. A ticket's run, its fix run and a solo
+ * ticket run are the implement place; a split card's held prompt and the tickets step are the tickets
+ * place; every run of a direct session is the direct place; the setup, rescue, retro and merge runs
+ * are attached to nothing.
+ */
+export function attachPointOf(f: RunFacts): AttachPoint | null {
+  if (f.ticketRun) return RUN_ATTACH[f.ticketRun];
+  if (f.specialRun) return RUN_ATTACH[f.specialRun];
+  // A direct session runs no pipeline phases: its card's phase only says where its card sits.
+  if (f.mode === "direct") return f.phase === "setup" ? null : "direct";
+  return CONVERSATION_ATTACH[f.phase] ?? null;
+}
+
 export type Ticket = {
   num: number;
   title: string;

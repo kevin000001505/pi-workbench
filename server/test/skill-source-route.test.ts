@@ -398,3 +398,118 @@ test("a URL that reads as a git option is refused as a source, not run as one", 
   }
   assert.equal((await api("GET", "/api/skill-sources")).json.length, before, "an option-shaped URL installs nothing");
 });
+
+/** One installed skill of one source, as the library listing states it. */
+async function librarySkill(url: string, name: string) {
+  const listed = await api("GET", "/api/skill-sources");
+  const source = listed.json.find((s: any) => s.url === url);
+  return { source, skill: source?.skills.find((s: any) => s.name === name) };
+}
+
+test("the on/off switch and the attach checkboxes are stored, and every read answers with them", async () => {
+  await waitReady();
+  const url = gitSourceUrl("acme", "attach");
+  seedBareRepo(gitRoot, "acme", "attach", {
+    "design/SKILL.md": skillDoc("design-notes", "How this team writes design docs."),
+    "ship/SKILL.md": skillDoc("ship-checklist", "The checklist this team ships with."),
+  });
+  const added = await api("POST", "/api/skill-sources", { url });
+  assert.equal(added.status, 200);
+  const sourceId = added.json.id;
+  const skillId = added.json.skills.find((s: any) => s.name === "design-notes").id;
+
+  // A new installed skill is switched on and attached to nothing, so it reaches no run.
+  assert.deepEqual(added.json.skills.find((s: any) => s.name === "design-notes").attach, []);
+  assert.equal(added.json.skills.find((s: any) => s.name === "design-notes").enabled, true);
+
+  // The attach checkboxes: the answer and every later read carry the places, in the pipeline's order.
+  const saved = await api("PATCH", `/api/skill-sources/${sourceId}/skills/${skillId}`, { attach: ["direct", "review", "implement"] });
+  assert.equal(saved.status, 200);
+  assert.deepEqual(saved.json.attach, ["implement", "review", "direct"], "one order, whatever order the page sent");
+  assert.equal(saved.json.enabled, true, "attaching does not switch it off");
+
+  // The on/off switch keeps the attach points: off is not un-attaching.
+  const off = await api("PATCH", `/api/skill-sources/${sourceId}/skills/${skillId}`, { enabled: false });
+  assert.equal(off.status, 200);
+  assert.equal(off.json.enabled, false);
+  assert.deepEqual(off.json.attach, ["implement", "review", "direct"]);
+  const on = await api("PATCH", `/api/skill-sources/${sourceId}/skills/${skillId}`, { enabled: true });
+  assert.equal(on.json.enabled, true);
+
+  // The settings are on the row, so the page reads them back after a reload.
+  const { skill } = await librarySkill(url, "design-notes");
+  assert.deepEqual(skill.attach, ["implement", "review", "direct"]);
+  assert.equal(skill.enabled, true);
+  const untouched = (await librarySkill(url, "ship-checklist")).skill;
+  assert.deepEqual(untouched.attach, [], "the other skill of the source is unchanged");
+
+  // A restart is a fresh process on the same data volume: the settings answer again.
+  const port = await findFreePort();
+  const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "src/main.ts"], {
+    env: { ...process.env, PORT: String(port) },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  child.stderr.on("data", () => {});
+  const restartBase = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    try {
+      if ((await fetch(`${restartBase}/api/health`)).ok) break;
+    } catch {}
+    if (Date.now() > deadline) {
+      child.kill("SIGKILL");
+      throw new Error("the restarted server did not come up");
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  try {
+    const listed = await (await fetch(`${restartBase}/api/skill-sources`)).json();
+    const kept = listed.find((s: any) => s.url === url)?.skills?.find((s: any) => s.name === "design-notes");
+    assert.deepEqual(kept.attach, ["implement", "review", "direct"], "the attach points survive the restart");
+    assert.equal(kept.enabled, true, "and so does the switch");
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((r) => child.once("exit", r));
+  }
+});
+
+test("an attach setting outside the pipeline places is refused, and the reason names the places it can take", async () => {
+  await waitReady();
+  seedBareRepo(gitRoot, "acme", "attachbad", { "bad/SKILL.md": skillDoc("bad-attach", "A skill the page sets.") });
+  const added = await api("POST", "/api/skill-sources", { url: gitSourceUrl("acme", "attachbad") });
+  const url = gitSourceUrl("acme", "attachbad");
+  const source = added.json;
+  const skill = added.json.skills[0];
+  const at = `/api/skill-sources/${source.id}/skills/${skill.id}`;
+  assert.equal((await api("PATCH", at, { attach: ["grill"] })).json.attach.length, 1, "a place the table knows is accepted, so a refusal is about the value");
+  for (const body of [
+    { attach: ["done"] },
+    { attach: ["setup"] },
+    { attach: ["ticket"] },
+    { attach: ["implement", "grill-ish"] },
+    { attach: "implement" },
+    { attach: [7] },
+    { attach: null },
+    { enabled: "true" },
+    { enabled: 1 },
+    {},
+  ]) {
+    const res = await api("PATCH", at, body);
+    assert.equal(res.status, 400, JSON.stringify(body));
+    assert.match(res.json.error, /pipeline place|on\/off switch|Nothing to change/, JSON.stringify(body));
+  }
+  // A refusal stored nothing.
+  const after = (await librarySkill(url, "bad-attach")).skill;
+  assert.deepEqual(after.attach, ["grill"]);
+  assert.equal(after.enabled, true);
+
+  // An id the library does not hold, or a skill of another source, is refused as unknown.
+  assert.equal((await api("PATCH", `/api/skill-sources/${source.id}/skills/nope`, { enabled: false })).status, 404);
+  seedBareRepo(gitRoot, "acme", "attachother", { "other/SKILL.md": skillDoc("other-skill", "A skill of another source.") });
+  const otherSource = (await api("POST", "/api/skill-sources", { url: gitSourceUrl("acme", "attachother") })).json;
+  const otherSkill = otherSource.skills[0];
+  const res = await api("PATCH", `/api/skill-sources/${otherSource.id}/skills/${skill.id}`, { enabled: false });
+  assert.equal(res.status, 404, "a skill is set under its own source only");
+  assert.equal((await librarySkill(url, "bad-attach")).skill.enabled, true, "and nothing changed");
+  assert.equal((await api("PATCH", `/api/skill-sources/${source.id}/skills/${otherSkill.id}`, { enabled: false })).status, 404, "nor the other source's skill, under this source");
+});

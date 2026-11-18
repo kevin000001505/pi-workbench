@@ -30,7 +30,7 @@ import {
   writePiConfig,
 } from "./settings.ts";
 import { listSkills } from "./skills.ts";
-import { addSkillSource, listSkillSources } from "./skill-library.ts";
+import { addSkillSource, listSkillSources, setSkillSettings } from "./skill-library.ts";
 
 const db = openDb(config.dbFile);
 const secrets = new SecretStore(db, config.masterKey);
@@ -424,6 +424,9 @@ const router = new Router()
   // global secret scope, as a repo clone does, so a private skill repo works with the saved token.
   .on("GET", "/api/skill-sources", () => listSkillSources(db))
   .on("POST", "/api/skill-sources", async ({ body }) => addSkillSource(db, body ?? {}, await gitEnv()))
+  // The Skills page's on/off switch and attach checkboxes (issue #117): one installed skill of one
+  // source. The change reaches the next run of the places it names, never a run going now.
+  .on("PATCH", "/api/skill-sources/:sourceId/skills/:skillId", ({ params, body }) => setSkillSettings(db, params.sourceId, params.skillId, body ?? {}))
 
   // --- settings & secrets ---------------------------------------------------------------
   .on("GET", "/api/settings", () => ({ model: getModelSettings(db), approval: getApprovalSettings(db), autoApprove: autoApproveView(db, secrets), pipeline: getPipelineSettings(db) }))

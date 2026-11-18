@@ -10,6 +10,7 @@ import { startMockLlm } from "./mock-llm.ts";
 import { startMockReviewer } from "./mock-reviewer.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
 import { openDb } from "../src/db.ts";
+import { recordSkillSource } from "../src/db.ts";
 import { redact } from "../src/git.ts";
 import { checkRequestOrigin, Router } from "../src/http.ts";
 import { needsSetupRun, recordedSetupState, requireTrackedRepo } from "../src/repos.ts";
@@ -18,6 +19,7 @@ import { ISSUE_TRACKER_DOC } from "./remote-repo.ts";
 import { GLOBAL_SCOPE, assertUserScope, SecretStore, userSecrets } from "../src/secrets.ts";
 import { DEFAULT_RULES, getApprovalSettings, getPipelineSettings, LLM_KEY_ENV, saveApprovalSettings, saveModelSettings, savePipelineSettings } from "../src/settings.ts";
 import { listSkills, parseFrontmatter } from "../src/skills.ts";
+import { installedSkill, listAttachedSkills, setSkillSettings } from "../src/skill-library.ts";
 
 const tmpDb = () => openDb(path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wb-")), "t.db"));
 
@@ -1572,4 +1574,90 @@ test("the pipeline skill names are one list: every prompt calls exactly the name
     [...p.PIPELINE_SKILL_NAMES].sort(),
     "a prompt that calls a skill outside PIPELINE_SKILL_NAMES, or a listed name no prompt uses, breaks the install check",
   );
+});
+
+test("the library keeps each installed skill switched on and attached to nothing, and answers with both", () => {
+  const db = tmpDb();
+  recordSkillSource(
+    db,
+    { id: "src-1", url: "file:///r.git", ref: null, subpath: null, commit_sha: "c".repeat(40), size_bytes: 1, created_at: 0, updated_at: 0 },
+    [
+      { id: "sk-impl", source_id: "src-1", name: "implement-style", description: "d", dir: "/install/implement-style", files: "[]" },
+      { id: "sk-off", source_id: "src-1", name: "switched-off", description: "d", dir: "/install/switched-off", files: "[]" },
+    ],
+  );
+  assert.deepEqual(listAttachedSkills(db, "implement"), [], "a new installed skill reaches no run");
+
+  setSkillSettings(db, "src-1", "sk-impl", { attach: ["implement", "review"] });
+  setSkillSettings(db, "src-1", "sk-off", { attach: ["implement"], enabled: false });
+  assert.deepEqual(listAttachedSkills(db, "implement").map((s) => s.name), ["implement-style"], "only a switched-on skill reaches the run");
+  assert.deepEqual(listAttachedSkills(db, "review").map((s) => s.name), ["implement-style"], "and it reaches every place it is attached to");
+  assert.deepEqual(listAttachedSkills(db, "grill"), [], "a place it is not attached to gets nothing");
+});
+
+test("an installed skill setting is validated, and the attach points are stored in one order", () => {
+  const db = tmpDb();
+  recordSkillSource(
+    db,
+    { id: "src-1", url: "file:///r.git", ref: null, subpath: null, commit_sha: "c".repeat(40), size_bytes: 1, created_at: 0, updated_at: 0 },
+    [{ id: "sk-1", source_id: "src-1", name: "style", description: "d", dir: "/install/style", files: "[]" }],
+  );
+  const refuse = (body: any, pattern: RegExp, what: string) => assert.throws(() => setSkillSettings(db, "src-1", "sk-1", body), pattern, what);
+
+  // The attach points are stored in the order the pipeline names them, whatever order the body came in.
+  setSkillSettings(db, "src-1", "sk-1", { attach: ["direct", "review", "implement", "implement"] });
+  assert.deepEqual(installedSkill(db, "sk-1")!.attach, ["implement", "review", "direct"], "one order, no repeats");
+  // The switch alone keeps the attach points: switching off is not un-attaching.
+  setSkillSettings(db, "src-1", "sk-1", { enabled: false });
+  assert.deepEqual(installedSkill(db, "sk-1")!.attach, ["implement", "review", "direct"]);
+  assert.equal(installedSkill(db, "sk-1")!.enabled, false);
+  setSkillSettings(db, "src-1", "sk-1", { enabled: true, attach: [] });
+  assert.deepEqual(installedSkill(db, "sk-1")!.attach, [], "no attach point: the skill reaches no run");
+  assert.equal(installedSkill(db, "sk-1")!.enabled, true);
+
+  refuse({ attach: ["done"] }, /attach point/, "a place outside the six is refused, not ignored");
+  refuse({ attach: ["implement", "setup"] }, /attach point/, "neither is a run the skill may attach to");
+  refuse({ attach: "implement" }, /attach point/, "a bare string is not a list of places");
+  refuse({ attach: [7] }, /attach point/, "nor is a number");
+  refuse({ enabled: "true" }, /true or false/, "the switch is a boolean, like the TypeSafe choice");
+  refuse({}, /Nothing to change/, "a body that changes nothing is refused");
+  assert.throws(() => setSkillSettings(db, "src-1", "sk-nope", { enabled: false }), /No installed skill/, "an unknown skill is refused");
+  assert.throws(() => setSkillSettings(db, "src-other", "sk-1", { enabled: false }), /No installed skill/, "a skill is set under its own source only");
+  assert.deepEqual(listAttachedSkills(db, "implement"), [], "and a refused setting stored nothing");
+});
+
+test("the attach table: one function maps a run to the pipeline place it serves", async () => {
+  const p = await import("../src/pipeline.ts");
+  assert.deepEqual([...p.ATTACH_POINTS], ["grill", "spec", "tickets", "implement", "review", "direct"], "the pipeline places an installed skill can attach to");
+
+  const run = (over: Partial<p.RunFacts>): p.RunFacts => ({ mode: "pipeline", phase: "implement", ticketRun: null, specialRun: null, ...over });
+
+  // A ticket run, its fix run, and a solo ticket run are all the implement place.
+  assert.equal(p.attachPointOf(run({ ticketRun: "ticket" })), "implement");
+  assert.equal(p.attachPointOf(run({ ticketRun: "fix" })), "implement");
+  // A split card's held prompt and the tickets step are the tickets place; a card paused in Issues waits on the same place.
+  assert.equal(p.attachPointOf(run({ phase: "tickets" })), "tickets");
+  assert.equal(p.attachPointOf(run({ phase: "ready" })), "tickets");
+  // The plan steps, and the one review run.
+  assert.equal(p.attachPointOf(run({ phase: "grill" })), "grill");
+  assert.equal(p.attachPointOf(run({ phase: "spec" })), "spec");
+  assert.equal(p.attachPointOf(run({ specialRun: "review" })), "review");
+  assert.equal(p.attachPointOf(run({ phase: "implement" })), "implement", "a reply on a card whose ticket run ended reads as that run");
+  // The runs with a narrow job of their own get nothing.
+  assert.equal(p.attachPointOf(run({ phase: "setup" })), null, "the agent-skills setup run");
+  assert.equal(p.attachPointOf(run({ ticketRun: "rescue" })), null, "a rescue run runs under the Reviewer model, not as a pipeline run");
+  assert.equal(p.attachPointOf(run({ specialRun: "retro" })), null, "the retro run reads the run logs, it writes no code");
+  assert.equal(p.attachPointOf(run({ specialRun: "merge" })), null, "the merge run only settles the merge");
+  assert.equal(p.attachPointOf(run({ phase: "pr" })), null, "a card in Review has no step running");
+  assert.equal(p.attachPointOf(run({ phase: "done" })), null, "a Done card has no run at all");
+  // A direct session's runs are all the direct place, whatever phase its card sits in.
+  const direct = (phase: string) => run({ mode: "direct", phase: phase as p.RunFacts["phase"] });
+  assert.equal(p.attachPointOf(direct("direct")), "direct");
+  assert.equal(p.attachPointOf(direct("review")), "direct");
+  assert.equal(p.attachPointOf(direct("pr")), "direct");
+  assert.equal(p.attachPointOf(direct("setup")), null, "its agent-skills setup run keeps its narrow job");
+
+  // The names the library stores are the attach points, so a setting the table does not know is refused.
+  for (const place of p.ATTACH_POINTS) assert.ok(p.isAttachPoint(place), place);
+  for (const place of ["done", "setup", "rescue", "", "TDD", null, undefined, 7]) assert.ok(!p.isAttachPoint(place), String(place));
 });

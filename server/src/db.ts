@@ -118,6 +118,10 @@ export type InstalledSkillRow = {
   description: string;
   dir: string;
   files: string;
+  /** 0 or 1: the skill's on/off switch. An off skill reaches no run.
+   * `attach`: a JSON list of the pipeline places it is attached to. */
+  enabled: number;
+  attach: string;
 };
 
 export type SecretRow = {
@@ -177,7 +181,8 @@ CREATE TABLE IF NOT EXISTS skill_sources (
 );
 CREATE TABLE IF NOT EXISTS installed_skills (
   id TEXT PRIMARY KEY, source_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL,
-  dir TEXT NOT NULL, files TEXT NOT NULL DEFAULT '[]'
+  dir TEXT NOT NULL, files TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1, attach TEXT NOT NULL DEFAULT '[]'
 );
 -- The Issue queue (issue #103): the issue numbers "Solve all issues" snapshotted, in number order.
 -- state: waiting (its turn has not come), running (the card the queue waits on), paused (that card is
@@ -233,6 +238,10 @@ const ADDED_COLUMNS: [string, string, string][] = [
   ["issues_done", "parent", "INTEGER"],
   ["issues_done", "session_id", "TEXT"],
   ["issues_done", "not_planned", "INTEGER NOT NULL DEFAULT 0"],
+  // The installed skill's on/off switch and its attach points (issue #117): the places are stored as
+  // a JSON list of the names pipeline.ts names, in that order.
+  ["installed_skills", "enabled", "INTEGER NOT NULL DEFAULT 1"],
+  ["installed_skills", "attach", "TEXT NOT NULL DEFAULT '[]'"],
 ];
 
 function migrate(db: DatabaseSync) {
@@ -367,6 +376,16 @@ export function recordSkillSource(db: Db, source: SkillSourceRow, skills: Instal
 /** Every Skill source in the library, newest first. */
 export function skillSourceRows(db: Db): SkillSourceRow[] {
   return db.prepare("SELECT * FROM skill_sources ORDER BY created_at DESC, id").all() as SkillSourceRow[];
+}
+
+/** The installed skill's on/off switch and its attach points (issue #117). */
+export function setInstalledSkillSettings(db: DatabaseSync, id: string, enabled: number, attach: string) {
+  db.prepare("UPDATE installed_skills SET enabled = ?, attach = ? WHERE id = ?").run(enabled, attach, id);
+}
+
+/** One installed skill, by its id. */
+export function installedSkillRow(db: DatabaseSync, id: string): InstalledSkillRow | undefined {
+  return db.prepare("SELECT * FROM installed_skills WHERE id = ?").get(id) as InstalledSkillRow | undefined;
 }
 
 /** Every installed skill of every source, by name within its source. */

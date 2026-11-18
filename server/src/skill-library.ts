@@ -12,13 +12,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.ts";
 import {
+  installedSkillRow,
   installedSkillRows,
   recordSkillSource,
+  setInstalledSkillSettings,
   skillSourceRows,
   type Db,
+  type InstalledSkillRow,
 } from "./db.ts";
 import { git, redact, type GitEnv } from "./git.ts";
-import { PIPELINE_SKILL_NAMES } from "./pipeline.ts";
+import { ATTACH_POINTS, PIPELINE_SKILL_NAMES, type AttachPoint, isAttachPoint } from "./pipeline.ts";
 import { scanSkills } from "./skills.ts";
 
 /** An installed skill: what the workbench knows about one SKILL.md the source carried. */
@@ -31,6 +34,10 @@ export type InstalledSkill = {
   dir: string;
   /** The file names under it, relative to the skill's directory. */
   files: string[];
+  /** The on/off switch: an off skill reaches no run, whatever its attach points say. */
+  enabled: boolean;
+  /** The pipeline places it is attached to, in the order pipeline.ts names them. */
+  attach: AttachPoint[];
 };
 
 /** A Skill source and the skills it installed. */
@@ -59,14 +66,7 @@ export function listSkillSources(db: Db): SkillSource[] {
   const bySource = new Map<string, InstalledSkill[]>();
   for (const r of installedSkillRows(db)) {
     const list = bySource.get(r.source_id) ?? [];
-    list.push({
-      id: r.id,
-      sourceId: r.source_id,
-      name: r.name,
-      description: r.description,
-      dir: r.dir,
-      files: parseFiles(r.files),
-    });
+    list.push(toSkill(r));
     bySource.set(r.source_id, list);
   }
   return skillSourceRows(db).map((r) => ({
@@ -240,7 +240,7 @@ function readSkills(root: string, sourceId: string): InstalledSkill[] {
   return scanSkills(root, "installed")
     .map((s) => {
       const dir = path.dirname(s.path);
-      return { id: crypto.randomUUID(), sourceId, name: s.name, description: s.description, dir, files: fileNamesOf(dir) };
+      return { id: crypto.randomUUID(), sourceId, name: s.name, description: s.description, dir, files: fileNamesOf(dir), enabled: true, attach: [] };
     })
     .sort((a, b) => a.name.localeCompare(b.name) || a.dir.localeCompare(b.dir));
 }
@@ -279,6 +279,75 @@ function parseFiles(text: string): string[] {
   } catch {
     return [];
   }
+}
+
+/** The row as the library states it. */
+function toSkill(r: InstalledSkillRow): InstalledSkill {
+  return {
+    id: r.id,
+    sourceId: r.source_id,
+    name: r.name,
+    description: r.description,
+    dir: r.dir,
+    files: parseFiles(r.files),
+    enabled: r.enabled === 1,
+    attach: parseAttach(r.attach),
+  };
+}
+
+/** The attach points as stored: only the names pipeline.ts knows, once each, in that order. */
+function parseAttach(text: string): AttachPoint[] {
+  let v: unknown;
+  try {
+    v = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(v)) return [];
+  return ATTACH_POINTS.filter((p) => v.some((x) => x === p));
+}
+
+/** One installed skill of the library, null when the library does not hold it. */
+export function installedSkill(db: Db, skillId: string): InstalledSkill | null {
+  const r = installedSkillRow(db, skillId);
+  return r ? toSkill(r) : null;
+}
+
+/** The installed skills attached to one pipeline place and switched on: what a run of that place gets. */
+export function listAttachedSkills(db: Db, place: AttachPoint): InstalledSkill[] {
+  return installedSkillRows(db)
+    .filter((r) => r.enabled === 1 && parseAttach(r.attach).includes(place))
+    .map(toSkill)
+    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+}
+
+/**
+ * The Skills page's on/off switch and attach checkboxes (issue #117): store the switch, the attach
+ * points, or both, for one installed skill of one source. A place the attach table does not know is
+ * refused, so a typo never reads as a place. The change reaches the next run of that place only:
+ * no run of the session manager is touched here.
+ */
+export function setSkillSettings(db: Db, sourceId: string, skillId: string, body: { enabled?: unknown; attach?: unknown }): InstalledSkill {
+  const row = installedSkillRow(db, skillId);
+  if (!row || row.source_id !== sourceId) throw Object.assign(new Error(`No installed skill ${skillId} of this Skill source`), { status: 404 });
+  if (body.enabled === undefined && body.attach === undefined) throw refuse("Nothing to change: the switch (enabled) or the attach points");
+  if (body.enabled !== undefined && typeof body.enabled !== "boolean") throw refuse("The on/off switch is true or false");
+  let attach: AttachPoint[] | null = null;
+  if (body.attach !== undefined) {
+    if (!Array.isArray(body.attach)) throw refuse(`The attach points are a list of the pipeline places: ${ATTACH_POINTS.join(", ")}`);
+    const unknown = body.attach.filter((x) => !isAttachPoint(x));
+    if (unknown.length) {
+      throw refuse(`Not a pipeline place: ${unknown.map((x) => JSON.stringify(x)).join(", ")}. The attach points are ${ATTACH_POINTS.join(", ")}`);
+    }
+    attach = ATTACH_POINTS.filter((p) => (body.attach as unknown[]).some((x) => x === p));
+  }
+  setInstalledSkillSettings(
+    db,
+    skillId,
+    body.enabled === undefined ? row.enabled : body.enabled ? 1 : 0,
+    JSON.stringify(attach ?? parseAttach(row.attach)),
+  );
+  return installedSkill(db, skillId)!;
 }
 
 /** A refusal the route answers with 400 and the reason the user has to see. */
