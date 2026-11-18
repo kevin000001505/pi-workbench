@@ -1816,3 +1816,69 @@ test("the tickets step asks for a tag list per ticket when its place has an atta
   ])
     assert.ok(!prompt.includes("Ticket skill tags"), `${name} asks for no tags`);
 });
+
+// --- a tagged ticket's run loads its tags (issue #120) -----------------------------------------
+
+const tagSkills = {
+  "skill-design": { name: "design-rules", description: "The workbench UI design rules." },
+  "skill-a11y": { name: "a11y-checks", description: "Accessibility rules for web UI." },
+};
+const taggedTicket: any = {
+  ...promptTicket,
+  num: 1,
+  runId: "s-t1-run1",
+  fixRunId: "s-t1-fix1",
+  rescueRunId: "s-t1-rescue1",
+  skills: ["skill-design", "skill-a11y"],
+};
+const plainTicket: any = { ...promptTicket, num: 2, runId: "s-t2-run2", fixRunId: null, rescueRunId: null, skills: [] };
+
+test("a tagged ticket's run is its ticket's run: the ticket run, its fix run and a solo ticket run name its tags, and no other run does", async () => {
+  const p = await import("../src/pipeline.ts");
+  const tickets = [taggedTicket, plainTicket];
+
+  assert.deepEqual(p.ticketRunTagIds(tickets, "s-t1-run1"), ["skill-design", "skill-a11y"], "a ticket run names its ticket's tags");
+  assert.deepEqual(p.ticketRunTagIds(tickets, "s-t1-fix1"), ["skill-design", "skill-a11y"], "the ticket's fix run names the same tags");
+  assert.deepEqual(p.ticketRunTagIds([{ ...taggedTicket, fixRunId: null }], "s-t1-run1"), ["skill-design", "skill-a11y"], "a solo ticket run is its ticket's run, so it names them too");
+  assert.deepEqual(p.ticketRunTagIds(tickets, "s-t2-run2"), [], "a ticket with no tags names none");
+  for (const runId of ["s-t1-rescue1", "s-review", "s-retro-1", "s-merge-1", "s-plan"])
+    assert.deepEqual(p.ticketRunTagIds(tickets, runId), [], `no tag for ${runId}`);
+
+  // The tags as prompt skills, in the order the ticket carries them.
+  assert.deepEqual(p.requiredTagSkills(tickets, "s-t1-run1", (id) => tagSkills[id] ?? null), [tagSkills["skill-design"], tagSkills["skill-a11y"]]);
+  assert.deepEqual(
+    p.requiredTagSkills([{ ...taggedTicket, skills: ["skill-design", "skill-the-library-no-longer-holds"] }], "s-t1-run1", (id) => tagSkills[id] ?? null),
+    [tagSkills["skill-design"]],
+    "a tag whose skill the library no longer holds names nothing",
+  );
+  assert.deepEqual(p.requiredTagSkills(tickets, "s-t1-run1", () => null), [], "a run of an untagged ticket asks for nothing");
+});
+
+test("a tagged ticket run names its tags as required, and the place's attached skills it was not tagged with as advertised", async () => {
+  const p = await import("../src/pipeline.ts");
+  const required = p.requiredTagSkills([taggedTicket], "s-t1-run1", (id) => tagSkills[id] ?? null);
+  // design-rules is both attached to the place and tagged: it is named once, as required.
+  const skills = { required, advertised: [{ name: "design-rules", description: "The workbench UI design rules." }, { name: "frontend-rules", description: "The house frontend conventions." }] };
+  for (const [name, prompt] of [
+    ["a ticket run", p.implementPrompt({ ...taggedTicket, skills: ["skill-design", "skill-a11y"] }, "hello.txt says Hello", "#4", [], skills)],
+    [
+      "a fix run",
+      p.fixPrompt({ ...taggedTicket }, "hello.txt says Hello", "#4", [], { status: "diagnosed", command: "npm test", chain: ["a.ts:1"], note: "" }, skills),
+    ],
+  ]) {
+    assert.match(prompt, /^Required\. Load each one with the Skill tool before you write any code:$/m, `${name}: the load-before-any-code instruction`);
+    assert.ok(prompt.includes("- design-rules: The workbench UI design rules."), `${name}: the first tag`);
+    assert.ok(prompt.includes("- a11y-checks: Accessibility rules for web UI."), `${name}: the second tag`);
+    assert.match(prompt, /^Advertised\. Load the ones that fit this work with the Skill tool:$/m, `${name}: the attached-but-untagged skills are stated apart`);
+    assert.ok(prompt.includes("- frontend-rules: The house frontend conventions."), `${name}: the untagged skill is advertised`);
+    assert.ok(prompt.indexOf("- design-rules:") < prompt.indexOf("- frontend-rules:"), `${name}: required comes before advertised`);
+    assert.equal(prompt.split("- design-rules:").length - 1, 1, `${name}: a tagged skill is named once, never in both lists`);
+  }
+
+  // No tags and nothing attached: the run's prompt is the prompt it always was.
+  assert.equal(
+    p.implementPrompt({ ...taggedTicket, skills: [] }, "hello.txt says Hello", "#4", [], { required: [], advertised: [] }),
+    p.implementPrompt({ ...taggedTicket, skills: [] }, "hello.txt says Hello", "#4", []),
+    "an untagged ticket run with nothing attached keeps its prompt exactly",
+  );
+});

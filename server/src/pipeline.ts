@@ -169,6 +169,36 @@ export function skillTagIds(names: readonly string[], skills: { id: string; name
   return [...new Set(names.map((n) => byName.get(n)).filter((id): id is string => !!id))];
 }
 
+/**
+ * The Ticket skill tags of the ticket this run belongs to (issue #120): a ticket run, its fix run and a
+ * solo ticket run are their ticket's own run, so they carry its tags. Another run id — a rescue run, the
+ * review run, the retro run, the merge run, the plan conversation — is no ticket's own run, so it names
+ * no tag. The stored tags are installed skill identifiers.
+ */
+export function ticketRunTagIds(tickets: { runId: string | null; fixRunId: string | null; skills: readonly string[] }[], runId: string): string[] {
+  if (!runId) return [];
+  const ticket = tickets.find((t) => t.runId === runId || t.fixRunId === runId);
+  return ticket?.skills ?? [];
+}
+
+/**
+ * Those tags as prompt skills, in the order the ticket carries them, each name stated once. A tag whose
+ * skill the library no longer holds names nothing: a run is never told to load a skill that is gone.
+ */
+export function requiredTagSkills(
+  tickets: { runId: string | null; fixRunId: string | null; skills: readonly string[] }[],
+  runId: string,
+  skillFor: (tagId: string) => { name: string; description: string | null } | null,
+): PromptSkill[] {
+  const skills: PromptSkill[] = [];
+  for (const tagId of ticketRunTagIds(tickets, runId)) {
+    const skill = skillFor(tagId);
+    if (!skill || skills.some((s) => s.name === skill.name)) continue;
+    skills.push({ name: skill.name, description: skill.description ?? "" });
+  }
+  return skills;
+}
+
 /** An open sub-issue of a spec, as GitHub returns it: its own blockers' issue numbers. */
 export type SubIssueSeed = { number: number; title: string; body: string | null; url: string; blockedBy: number[] };
 

@@ -115,6 +115,18 @@ function attachedSkillNames(text: string): string[] {
   return [...text.slice(at).matchAll(/^- ([A-Za-z0-9._-]+):/gm)].map((m) => m[1]);
 }
 
+/** The names the prompt lists under "Required." — the ticket's own Ticket skill tags (issue #120). */
+function requiredSkillNames(text: string): string[] {
+  const at = text.lastIndexOf("## Skills attached to this pipeline place");
+  if (at < 0) return [];
+  const block = text.slice(at);
+  const from = block.indexOf("Required.");
+  if (from < 0) return [];
+  const to = block.indexOf("Advertised.", from);
+  const list = to < 0 ? block.slice(from) : block.slice(from, to);
+  return [...list.matchAll(/^- ([A-Za-z0-9._-]+):/gm)].map((m) => m[1]);
+}
+
 /**
  * The pipeline's phases, scripted by step (assistant replies since the last user message):
  * - grill-with-docs: ask to confirm → save_grill_summary → done
@@ -125,10 +137,12 @@ function attachedSkillNames(text: string): string[] {
  *   "Change it" answer ends the run with a question instead; a task that says BADTAG names a tag the
  *   tickets step is not attached to, which the workbench drops and names back; a task that says MANYTAG
  *   gives one ticket a fourth tag, which the workbench refuses, and the call goes again with a list a
- *   ticket may carry
- * - tdd (a ticket): commit a line for the ticket (and `git push`, a gated call, if the ticket says
- *   PUSHME) → finish_ticket (blocked if the ticket says BLOCKME) → done; a ticket that says ASKME
- *   (with SLOWME, or alone) asks the user a decision first and waits on that answer
+ *   ticket may carry; a task that says NOBLOCK leaves the third ticket unblocked, so every ticket of the
+ *   breakdown runs
+ * - tdd (a ticket): when its prompt names a required skill (the ticket's Ticket skill tags, issue #120),
+ *   load each one with the Skill tool first, then commit a line for the ticket (and `git push`, a gated
+ *   call, if the ticket says PUSHME) → finish_ticket (blocked if the ticket says BLOCKME) → done; a ticket
+ *   that says ASKME (with SLOWME, or alone) asks the user a decision first and waits on that answer
  * - code-review: commit a fix and `git push` it (a gated call) → finish_review → done
  * - resolving-merge-conflicts (the base's work.txt keeps every word an earlier test pushed, so the
  *   newest word is checked first): keep both sides of every conflicted hunk in work.txt and commit the
@@ -169,6 +183,9 @@ function pipelineScript(userText: string, step: number, lastResult: string, conv
     // MANYTAG in the task: the first call gives one ticket more tags than a ticket may carry, which the
     // workbench refuses, so the run calls record_tickets again with a list a ticket may carry.
     const manyTags = conversation.includes("MANYTAG");
+    // NOBLOCK in the task: the third ticket carries no BLOCKME, so a test can run every ticket of the
+    // breakdown and read what the card does after the last one.
+    const noBlock = conversation.includes("NOBLOCK");
     const tagsFor = (num: number, first = true): string[] => {
       if (!taggable || num === 3) return [];
       const tags = [names[num - 1]].filter(Boolean);
@@ -186,7 +203,7 @@ function pipelineScript(userText: string, step: number, lastResult: string, conv
       tickets: [
         { number: 1, title: "Write hello.txt", body: "Create hello.txt containing Hello. Push it. PUSHME", trackerRef: ".scratch/greeting/issues/01.md", ...(tagsFor(1, first).length ? { skills: tagsFor(1, first) } : {}) },
         { number: 2, title: "Add a test", body: "Test that hello.txt says Hello.", blockedBy: [1], trackerRef: ".scratch/greeting/issues/02.md", ...(tagsFor(2, first).length ? { skills: tagsFor(2, first) } : {}) },
-        { number: 3, title: "Add docs", body: "Document it. BLOCKME", blockedBy: [1], trackerRef: ".scratch/greeting/issues/03.md" },
+        { number: 3, title: "Add docs", body: noBlock ? "Document it." : "Document it. BLOCKME", blockedBy: [1], trackerRef: ".scratch/greeting/issues/03.md" },
       ],
     });
     if (step === 0)
@@ -237,19 +254,24 @@ function pipelineScript(userText: string, step: number, lastResult: string, conv
   if (userText.includes('<skill name="retro"')) return retroScript(userText, step);
   if (userText.includes('<skill name="tdd"')) {
     const num = /Ticket #(\d+)/.exec(userText)?.[1] ?? "?";
+    // A tagged ticket's prompt names its tags as required (issue #120): the run loads each of them with
+    // the Skill tool, before its first line of code. The ticket's other steps shift by that one step.
+    const required = requiredSkillNames(userText);
+    const load = required.length ? 1 : 0;
+    if (step === 0 && load) return { tools: required.map((name) => ({ name: "Skill", args: { skill: name } })) };
     // A fix run carries the rescue's diagnosis: the stuck-ticket words no longer apply.
     const fixing = userText.includes("## Diagnosis");
-    if (fixing && userText.includes("FIXBLOCKME")) return step === 0 ? { tool: { name: "finish_ticket", args: { status: "blocked", note: "The diagnosis did not help" } } } : { text: "Blocked." };
+    if (fixing && userText.includes("FIXBLOCKME")) return step === load ? { tool: { name: "finish_ticket", args: { status: "blocked", note: "The diagnosis did not help" } } } : { text: "Blocked." };
     if (fixing && userText.includes("FIXLOOPME")) return { tool: { name: "bash", args: { command: "echo fixing; exit 1" } } };
-    const stuck = fixing ? undefined : stuckTicket(userText, step);
+    const stuck = fixing ? undefined : stuckTicket(userText, step - load);
     if (stuck) return stuck;
     // ASKME alone (not with SLOWME, which stuckTicket answers first): the ticket asks the user a
     // decision before it works, so the run waits on that answer.
     const asks = !fixing && userText.includes("ASKME");
-    if (asks && step === 0) return { tool: { name: "ask_user", args: { question: "Which file does this ticket change?", options: ["work.txt", "notes.txt"] } } };
+    if (asks && step === load) return { tool: { name: "ask_user", args: { question: "Which file does this ticket change?", options: ["work.txt", "notes.txt"] } } };
     const push = userText.includes("PUSHME") ? " && git push -q origin HEAD" : "";
-    if (step === (asks ? 1 : 0)) return { tool: { name: "bash", args: { command: `echo "ticket ${num}" >> work.txt && git add -A && git commit -qm "Ticket ${num}"${push} && echo committed` } } };
-    if (step === (asks ? 2 : 1)) {
+    if (step === (asks ? 1 : 0) + load) return { tool: { name: "bash", args: { command: `echo "ticket ${num}" >> work.txt && git add -A && git commit -qm "Ticket ${num}"${push} && echo committed` } } };
+    if (step === (asks ? 2 : 1) + load) {
       const blocked = userText.includes("BLOCKME");
       return { tool: { name: "finish_ticket", args: { status: blocked ? "blocked" : "done", note: blocked ? "Needs a docs folder decision" : `Ticket ${num} appended to work.txt` } } };
     }

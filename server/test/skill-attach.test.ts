@@ -17,6 +17,9 @@
  * The last three tests are the tickets step's Ticket skill tags (issue #119): the tags the breakdown
  * proposes, the tags the card records, and the two refusals — a name outside the attached set is
  * dropped and named, a fourth tag on one ticket is a validation error.
+ *
+ * The last test is a tagged ticket's run (issue #120): the run is told to load its tags before it writes
+ * any code, and the installed skill its tag names reaches that run through the extension's Skill tool.
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -487,5 +490,126 @@ test("a ticket carries at most 3 tags: a fourth is a validation error the agent 
     [["probe-all"], ["probe-plan"], []],
     "the retry records the tags the tickets step is attached to",
   );
+  await mgr.stop(s.id);
+});
+
+
+// --- a tagged ticket's run loads its tags (issue #120) ------------------------------------------
+
+/** The names a prompt lists under "Required." — the Ticket skill tags of the ticket that run belongs to. */
+function requiredNames(prompt: string): string[] {
+  const block = prompt.slice(prompt.lastIndexOf("## Skills attached to this pipeline place"));
+  const from = block.indexOf("Required.");
+  if (from < 0) return [];
+  const to = block.indexOf("Advertised.", from);
+  const list = to < 0 ? block.slice(from) : block.slice(from, to);
+  return [...list.matchAll(/^- ([\w-]+):/gm)].map((m) => m[1]).filter((n) => SKILL_NAMES.includes(n));
+}
+
+/** The names a prompt lists under "Advertised." — the place's skills the ticket was not tagged with. */
+function advertisedNames(prompt: string): string[] {
+  const block = prompt.slice(prompt.lastIndexOf("## Skills attached to this pipeline place"));
+  const from = block.indexOf("Advertised.");
+  if (from < 0) return [];
+  return [...block.slice(from).matchAll(/^- ([\w-]+):/gm)].map((m) => m[1]).filter((n) => SKILL_NAMES.includes(n));
+}
+
+/** The implement prompt the model received for one ticket's run. */
+async function implementPromptSeen(from: number, num: number): Promise<string> {
+  return await waitFor(() => userTexts(from).find((t) => t.includes("you are the implementer for this one ticket") && t.includes(`Ticket #${num}:`)));
+}
+
+/** The first Skill tool result of the run the session works on now. */
+async function firstSkillLoad(id: string) {
+  return await waitFor(async () => (await mgr.snapshot(id)).transcript.messages.find((m: any) => m.role === "toolResult" && m.toolName === "Skill"));
+}
+
+/** Allow every gated `git push` call the session's run waits on, and wait for its ticket to be done. */
+async function runTicketToDone(id: string, num: number): Promise<void> {
+  await waitFor(() => {
+    const row = mgr.summary(id);
+    for (const p of row.pending ?? []) if (p.kind === "permission" && String(p.subject ?? "").includes("git push")) mgr.respond(id, p.id, { value: "Allow" });
+    return row.tickets.find((t: any) => t.num === num)?.status === "done" || undefined;
+  });
+}
+
+test("a tagged ticket's run is told to load its tags before it writes any code, and its run reaches the installed skill through the Skill tool", { skip }, async () => {
+  const { installedSkill } = await import("../src/skill-library.ts");
+  const { listSkills } = await import("../src/skills.ts");
+  const from = mock.requests.length;
+  const s = await mgr.create({ repoId: "me/demo", title: "Tagged runs", prompt: "add a greeting NOBLOCK" });
+  await waitFor(() => mgr.summary(s.id).phase === "grill");
+  await answerNext(s.id, /shared understanding/);
+  await waitFor(() => mgr.summary(s.id).phase === "spec");
+  await answerNext(s.id, /seam/);
+  await waitFor(() => mgr.summary(s.id).phase === "tickets");
+  await answerNext(s.id, /Approve/);
+  await waitFor(() => mgr.summary(s.id).phase === "ready" && mgr.summary(s.id).status === "idle");
+
+  // The breakdown tagged ticket 1 with probe-all and ticket 2 with probe-plan. probe-plan is attached to
+  // the grill and tickets places only: its tag is what brings it to a ticket run.
+  const tagIds = (num: number) => mgr.summary(s.id).tickets.find((t: any) => t.num === num).skills;
+  assert.deepEqual(tagIds(1), [library.skills["probe-all"]], "ticket 1 carries its tag");
+  assert.deepEqual(tagIds(2), [library.skills["probe-plan"]], "ticket 2 carries its tag");
+  const tagDir = (name: string) => installedSkill(db, library.skills[name])!.dir;
+
+  // A solo ticket run of the tagged ticket 1: its own tag is required, its place's other skills are a choice.
+  await mgr.solveTicket(s.id, 1);
+  const solo = await implementPromptSeen(from, 1);
+  assert.ok(solo.startsWith('<skill name="tdd" '), "the ticket run keeps its own skill call first");
+  assert.match(solo, /^Required\. Load each one with the Skill tool before you write any code:$/m, "its tag is required, before the first line of code");
+  assert.deepEqual(requiredNames(solo), ["probe-all"], "the required list is the ticket's own tags");
+  assert.deepEqual(advertisedNames(solo), ["probe-impl"], "the place's skills it was not tagged with are stated apart, as a choice");
+  assert.ok(mgr.installedSkillDirs(s.id).includes(tagDir("probe-all")), "the run is spawned with its tagged skill");
+  // The ticket's own push is a gated call: the user allows it, so the run finishes the ticket.
+  await runTicketToDone(s.id, 1);
+  await waitFor(() => mgr.summary(s.id).phase === "ready" && mgr.summary(s.id).status === "idle" && mgr.summary(s.id).soloTicket === null);
+  const results = (await mgr.snapshot(s.id)).transcript.messages.filter((m: any) => m.role === "toolResult");
+  assert.equal(results[0].toolName, "Skill", "the run's first tool result is the Skill tool loading its tag");
+  assert.equal(results[0].isError, false, "the Skill tool finds the tagged installed skill");
+  assert.match(JSON.stringify(results[0].content), /probe-all body/, "and the agent reads its body before it works");
+  assert.ok(
+    results.findIndex((m: any) => m.toolName === "bash" && JSON.stringify(m.content).includes("committed")) > 0,
+    "the run writes its code only after the load",
+  );
+
+  // The same card, Solve all: ticket 2 carries the other tag, and its run reaches it.
+  await mgr.move(s.id, "doing");
+  const second = await implementPromptSeen(from, 2);
+  assert.deepEqual(requiredNames(second), ["probe-plan"], "the second ticket's own tag is required");
+  assert.deepEqual(advertisedNames(second), ["probe-all", "probe-impl"], "the implement place's other skills stay advertised");
+  assert.ok(mgr.installedSkillDirs(s.id).includes(tagDir("probe-plan")), "a tagged skill reaches its run whatever place it is attached to");
+  const load = await firstSkillLoad(s.id);
+  assert.equal(load.isError, false, "the Skill tool finds the second ticket's tagged skill too");
+  assert.match(JSON.stringify(load.content), /probe-plan body/, "and the agent loads that ticket's own tag");
+  assert.equal((await mgr.snapshot(s.id)).transcript.messages.filter((m: any) => m.role === "toolResult")[0].toolName, "Skill", "as its run's first tool result");
+  const listed = listSkills(config.skillsDir, mgr.summary(s.id).worktree, mgr.extraSkillDirs(s.id), mgr.installedSkillDirs(s.id));
+  assert.equal(listed.find((x: any) => x.name === "probe-plan")?.source, "installed", "the session's own skill read states the tagged skill too");
+  await runTicketToDone(s.id, 2);
+
+  // An untagged ticket of the tagged card: no required list, and its place's skills advertised as before.
+  const third = await implementPromptSeen(from, 3);
+  assert.deepEqual(requiredNames(third), [], "an untagged ticket is told to load nothing as required");
+  assert.deepEqual(advertisedNames(third), ["probe-all", "probe-impl"], "its prompt keeps the section it already had");
+  await waitFor(() => mgr.summary(s.id).tickets.find((t: any) => t.num === 3).status === "done");
+
+  // The review run of the same tagged card serves the review place: no ticket's tag reaches it.
+  const review = await promptSeen(from, /final review of the whole branch/);
+  assert.deepEqual(requiredNames(review), [], "no tag is required of the review run");
+  assert.deepEqual(advertisedNames(review), ["probe-all", "probe-review"], "the review place names its own attached skills");
+  const reviewRun = db.prepare("SELECT review_run FROM sessions WHERE id = ?").get(s.id).review_run;
+  assert.ok(reviewRun, "the card's review run has its own run id");
+  assert.ok(!mgr.installedSkillDirs(s.id, reviewRun).includes(tagDir("probe-plan")), "and it is spawned with no ticket's tag");
+
+  // A fix run and a rescue run are the ticket's own runs too, and the handoff names them by the id it
+  // stores on the ticket. These ids are the shape that handoff stores, so the same read answers them.
+  const stamp = Date.now().toString(36);
+  const fixId = (num: number) => `${s.id}-t${num}-fix-${stamp}`;
+  const rescueId = (num: number) => `${s.id}-t${num}-rescue-${stamp}`;
+  for (const num of [1, 2, 3]) db.prepare("UPDATE tickets SET fix_run_id = ?, rescue_run_id = ? WHERE session_id = ? AND num = ?").run(fixId(num), rescueId(num), s.id, num);
+  assert.ok(mgr.installedSkillDirs(s.id, fixId(1)).includes(tagDir("probe-all")), "the first ticket's fix run is spawned with its tag");
+  assert.ok(mgr.installedSkillDirs(s.id, fixId(2)).includes(tagDir("probe-plan")), "the second ticket's fix run is spawned with its own tag");
+  assert.ok(!mgr.installedSkillDirs(s.id, fixId(3)).includes(tagDir("probe-plan")), "an untagged ticket's fix run is spawned with no tag");
+  for (const num of [1, 2, 3]) assert.deepEqual(mgr.installedSkillDirs(s.id, rescueId(num)), [], "a rescue run of a tagged ticket reaches no installed skill at all");
   await mgr.stop(s.id);
 });

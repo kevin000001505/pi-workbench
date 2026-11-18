@@ -39,10 +39,12 @@ import {
   attachPointOf,
   PIPELINE_TOOLS,
   reviewPrompt,
+  requiredTagSkills,
   skillTagIds,
   specPrompt,
   type Ticket,
   type TicketInput,
+  ticketRunTagIds,
   type TicketSeed,
   ticketsPrompt,
   validateDiagnosis,
@@ -51,7 +53,7 @@ import {
   type RunSkills,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { listAttachedSkills } from "./skill-library.ts";
+import { listAttachedSkills, installedSkill } from "./skill-library.ts";
 import { claimRefs, type Column, COLUMNS, holdsQueue, issueNumberOf, type IssueQueueState, issueQueueState, liveQueueSteps, type PrState, resolvedNote, sessionColumn, type SessionLiveStatus } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
@@ -863,12 +865,27 @@ export class SessionManager extends EventEmitter {
 
   /**
    * The installed skills this run reaches: the library's skills attached to its place and switched on
-   * (issue #117). The skill library's own directory stays out of what pi scans, so this is the only
-   * way an installed skill reaches an agent. The setup, rescue, retro and merge runs reach none.
+   * (issue #117), plus the skills the tags of its ticket name (issue #120) — a tagged skill reaches its
+   * run whatever place it is attached to. The skill library's own directory stays out of what pi scans,
+   * so this is the only way an installed skill reaches an agent. The setup, rescue, retro and merge runs
+   * reach none.
    */
   installedSkillDirs(id: string, runId = this.runOf(this.row(id))): string[] {
     const place = attachPointOf(this.runFacts(this.row(id), runId));
-    return place ? listAttachedSkills(this.db, place).map((s) => s.dir) : [];
+    if (!place) return [];
+    return [...new Set([...listAttachedSkills(this.db, place).map((s) => s.dir), ...this.tagSkillDirs(id, runId)])];
+  }
+
+  /**
+   * The library directories behind the Ticket skill tags of the ticket this run belongs to (issue #120):
+   * a ticket run, its fix run and a solo ticket run. Only those three run ids are a ticket's own run, so
+   * a rescue, review, retro or merge run gets no tagged skill here. A tag whose skill the library no
+   * longer holds hands no directory: a run is never handed a skill that is gone.
+   */
+  private tagSkillDirs(id: string, runId: string): string[] {
+    return ticketRunTagIds(this.tickets(id), runId)
+      .map((tagId) => installedSkill(this.db, tagId)?.dir)
+      .filter((dir): dir is string => !!dir);
   }
 
   /** Every skill dir one run is spawned with: the session's extra skills, then its place's installed ones. */
@@ -888,15 +905,19 @@ export class SessionManager extends EventEmitter {
 
   /**
    * The installed skills a run's prompt names (issue #118): the skills attached to the pipeline place it
-   * serves, advertised, so the agent loads the ones that fit. `required` is the run's own list, and only
-   * a ticket's skill tags fill it (#120). A direct session is the exception: the user writes its prompt,
-   * so its attached skills stay reachable skills and the prompt is never changed.
+   * serves, advertised, so the agent loads the ones that fit. A ticket's own Ticket skill tags are
+   * required (issue #120): the run is told to load each of them before it writes any code, and a skill
+   * both tagged and advertised is named once, as required. A direct session is the exception: the user
+   * writes its prompt, so its attached skills stay reachable skills and the prompt is never changed.
    */
   promptSkills(id: string, runId = this.runOf(this.row(id))): RunSkills {
     const row = this.row(id);
     const place = attachPointOf(this.runFacts(row, runId));
     if (!place || place === "direct") return {};
-    return { advertised: listAttachedSkills(this.db, place).map(({ name, description }) => ({ name, description })) };
+    const advertised = listAttachedSkills(this.db, place).map(({ name, description }) => ({ name, description }));
+    const required = requiredTagSkills(this.tickets(id), runId, (tagId) => installedSkill(this.db, tagId));
+    // skillsSection is the one place that renders the two lists, and it names a skill in both once.
+    return required.length ? { required, advertised } : { advertised };
   }
 
   /**
