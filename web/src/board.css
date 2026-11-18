@@ -197,6 +197,8 @@
 .kz-detail-tickets .title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .kz-detail-tickets .waits { flex: none; font-size: 12px; color: var(--kz-muted); }
 .kz-detail-tickets .ticket-solve { padding: 3px 12px; font-size: 12px; }
+/* A card detail ticket row's Ticket skill tags and its Skills control (issue #121). */
+.kz-detail-tickets .kz-detail-tags { margin-top: 4px; }
 .kz-detail-tickets .note { margin: 4px 0 0; color: var(--kz-muted); font-size: 13px; }
 @media (max-width: 700px) { .kz-detail { padding: 16px; } }
 
