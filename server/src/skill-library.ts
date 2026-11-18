@@ -321,6 +321,23 @@ export function listAttachedSkills(db: Db, place: AttachPoint): InstalledSkill[]
     .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
 
+/** Every installed skill of the library, switched on or off: what a stored Ticket skill tag may stand for. */
+export function listInstalledSkills(db: Db): InstalledSkill[] {
+  return installedSkillRows(db)
+    .map(toSkill)
+    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+}
+
+/**
+ * The installed skills a ticket may be tagged with (issue #121): every skill of the library that is
+ * switched on. A Ticket skill tag reaches its ticket's runs whatever pipeline place the skill is
+ * attached to, so the attach points do not limit the names; a switched-off skill reaches no run at all,
+ * so it names nothing to tag with.
+ */
+export function listTaggableSkills(db: Db): InstalledSkill[] {
+  return listInstalledSkills(db).filter((s) => s.enabled);
+}
+
 /**
  * The Skills page's on/off switch and attach checkboxes (issue #117): store the switch, the attach
  * points, or both, for one installed skill of one source. A place the attach table does not know is

@@ -327,8 +327,8 @@ test("unclaimed cards: plain and ticketed spec issues both sit in Issues; a sub-
   const sessions = [{ mode: "pipeline", phase: "ready", issueRef: "me/app#8", specRef: null }];
   const cards = unclaimedCards(issues, claimRefs(sessions), "me/app");
   assert.deepEqual(cards, [
-    { id: "issue:1", title: "A plain issue", column: "issues", tickets: { done: 0, total: 0 }, attention: null, status: null, pr: null, specRef: "https://github.com/me/app/issues/1", doneAt: null, specCard: false, subs: null },
-    { id: "issue:5", title: "A spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, status: null, pr: null, specRef: "https://github.com/me/app/issues/5", doneAt: null, specCard: true, subs: null },
+    { id: "issue:1", title: "A plain issue", column: "issues", tickets: { done: 0, total: 0 }, attention: null, status: null, pr: null, specRef: "https://github.com/me/app/issues/1", doneAt: null, specCard: false, ticketTags: [], subs: null },
+    { id: "issue:5", title: "A spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, status: null, pr: null, specRef: "https://github.com/me/app/issues/5", doneAt: null, specCard: true, ticketTags: [], subs: null },
   ]);
   // On the board, the plain card sits in Issues, before the spec's Issues card.
   assert.deepEqual(boardCards([], cards).map((c) => c.id), ["issue:1", "issue:5"]);
@@ -575,7 +575,7 @@ test("columnCounts: a column states its cards and the attention in them, and a c
   const { columnCounts } = await import("../../shared/board.ts");
   let n = 0;
   const card = (column: string, status: string | null) =>
-    ({ id: `${column}-${++n}`, title: "T", column, tickets: { done: 0, total: 0 }, attention: null, status, pr: null, specRef: null, doneAt: null, specCard: false, subs: null }) as any;
+    ({ id: `${column}-${++n}`, title: "T", column, tickets: { done: 0, total: 0 }, attention: null, status, pr: null, specRef: null, doneAt: null, specCard: false, ticketTags: [], subs: null }) as any;
   const counts = columnCounts([
     card("todo", null),
     card("issues", "waiting"),
@@ -641,7 +641,7 @@ test("a direct card follows its PR: Review in phase pr, Done in phase done, Doin
     specRef: null,
     doneAt: null,
     specCard: false,
-    subs: null,
+    ticketTags: [], subs: null,
   });
   assert.equal(cardOf(session("direct", "setup"))?.column, "doing", "a direct session in setup is in Doing, not To do");
   // A direct card with a PR but not in phase `pr` (a session of an older database) is still in Doing.
@@ -656,6 +656,58 @@ test("a direct card follows its PR: Review in phase pr, Done in phase done, Doin
   assert.equal(cardOf(session("direct", "done", { doneAt: 1000 }))?.doneAt, 1000);
   // A pipeline card keeps its phase's column through cardOf as well.
   assert.equal(cardOf(session("pipeline", "implement"))?.column, "doing");
+});
+
+test("a card carries its tickets' Ticket skill tag names: one entry per tagged ticket, in ticket order (issue #121)", async () => {
+  const { cardOf } = await import("../../shared/board.ts");
+  const card = cardOf({
+    id: "s1",
+    title: "T",
+    mode: "pipeline",
+    phase: "ready",
+    attention: null,
+    prNumber: null,
+    prUrl: null,
+    specRef: "https://github.com/me/app/issues/9",
+    tickets: [
+      { num: 1, status: "ready", trackerRef: "https://github.com/me/app/issues/10", skillTags: ["design-rules", "a11y-check"] },
+      { num: 2, status: "done", trackerRef: "https://github.com/me/app/issues/11", skillTags: [] },
+      { num: 3, status: "ready", trackerRef: null },
+    ],
+  } as any)!;
+  // Only the ticket that carries tags has an entry, so a ticket sub-card states a chip only for it.
+  assert.deepEqual(card.ticketTags, [{ num: 1, names: ["design-rules", "a11y-check"] }], "the names keep the ticket's own order");
+  // Nothing else about the card changes: the tags are beside the ticket list, not instead of it.
+  assert.deepEqual(card.tickets, { done: 1, total: 3 });
+  assert.equal(card.column, "issues");
+  assert.equal(card.specCard, true);
+
+  // A card whose tickets carry no tags, or name no tag at all, carries no entry.
+  const noTickets = { id: "s3", title: "T", mode: "pipeline", phase: "ready", attention: null, prNumber: null, prUrl: null, specRef: null, tickets: [] } as any;
+  assert.deepEqual(cardOf(noTickets)!.ticketTags, []);
+  assert.deepEqual(
+    cardOf({
+      id: "s2",
+      title: "T",
+      mode: "pipeline",
+      phase: "ready",
+      attention: null,
+      prNumber: null,
+      prUrl: null,
+      specRef: null,
+      tickets: [{ num: 1, status: "ready", trackerRef: null, skillTags: [] }],
+    } as any)!.ticketTags,
+    [],
+  );
+});
+
+test("skillTagNames states each stored tag once, and a tag whose skill is gone names nothing (issue #121)", async () => {
+  const { skillTagNames } = await import("../src/pipeline.ts");
+  const names = (id: string) => ({ "s-design": "design-rules", "s-a11y": "a11y-check" })[id] ?? null;
+  assert.deepEqual(skillTagNames(["s-design", "s-a11y"], names), ["design-rules", "a11y-check"]);
+  assert.deepEqual(skillTagNames(["s-design", "s-design"], names), ["design-rules"], "each name is stated once");
+  assert.deepEqual(skillTagNames(["s-design", "s-gone"], names), ["design-rules"], "a tag the library no longer holds names nothing");
+  assert.deepEqual(skillTagNames([], names), []);
 });
 
 test("a card's whole-card actions follow its session: Approve with the PR, Abandon until Done", async () => {
@@ -757,7 +809,7 @@ test("done cards: a merged card and the issues it closed sit in Done, newest fir
     specRef: "https://github.com/me/app/issues/5",
     doneAt: 2000,
     specCard: false,
-    subs: null,
+    ticketTags: [], subs: null,
   });
   // In Done, the newest card sits first: the issue card, then the session card, then the older issue card.
   assert.deepEqual(boardCards([doneSession("s1", 1000)], issues).map((c) => c.id), ["issue:5", "s1", "issue:7"]);

@@ -41,6 +41,7 @@ import {
   reviewPrompt,
   requiredTagSkills,
   skillTagIds,
+  skillTagNames,
   specPrompt,
   type Ticket,
   type TicketInput,
@@ -48,12 +49,13 @@ import {
   type TicketSeed,
   ticketsPrompt,
   validateDiagnosis,
+  validateSkillTags,
   validateTickets,
   withSkills,
   type RunSkills,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { listAttachedSkills, installedSkill } from "./skill-library.ts";
+import { listAttachedSkills, installedSkill, listInstalledSkills, listTaggableSkills } from "./skill-library.ts";
 import { claimRefs, type Column, COLUMNS, holdsQueue, issueNumberOf, type IssueQueueState, issueQueueState, liveQueueSteps, type PrState, resolvedNote, sessionColumn, type SessionLiveStatus } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
@@ -244,7 +246,8 @@ const EXPLAIN_PROMPT =
   "one name per thing, no undefined jargon, keep every hedge. " +
   "Code, tool output, and text the user asked for verbatim are exempt.";
 
-const toTicket = (r: TicketRow): Ticket => ({
+/** A ticket row as the session's ticket view, without the tag names `tickets` reads from the library. */
+const toTicket = (r: TicketRow): Omit<Ticket, "skillTags"> => ({
   num: r.num,
   title: r.title,
   body: r.body,
@@ -332,7 +335,12 @@ export class SessionManager extends EventEmitter {
   }
 
   tickets(id: string): Ticket[] {
-    return (this.db.prepare("SELECT * FROM tickets WHERE session_id = ? ORDER BY num").all(id) as TicketRow[]).map(toTicket);
+    return (this.db.prepare("SELECT * FROM tickets WHERE session_id = ? ORDER BY num").all(id) as TicketRow[]).map((r) => {
+      const t = toTicket(r);
+      // The stored tags are identifiers; every read carries the names beside them (issue #121), so the
+      // Board and the card detail state a ticket's tags with no read of the skill library.
+      return { ...t, skillTags: skillTagNames(t.skills, (tagId) => installedSkill(this.db, tagId)?.name ?? null) };
+    });
   }
 
   private updateTicket(id: string, num: number, fields: Partial<TicketRow>) {
@@ -1559,6 +1567,38 @@ export class SessionManager extends EventEmitter {
     await this.switchRun(id, runId, true);
     const row = this.row(id);
     await this.send(id, reviewPrompt(row.base_branch, row.spec, row.spec_ref, this.tickets(id), this.promptSkills(id)));
+  }
+
+  /**
+   * Change one ticket's Ticket skill tags by hand (issue #121): the user's list replaces the tags the
+   * breakdown recorded. The rules are the tickets step's (`validateSkillTags`): at most
+   * TICKET_SKILL_TAG_LIMIT names, each once, and a name the library holds no switched-on skill for is
+   * dropped and named back in `dropped`. The kept names are stored as the library's identifiers.
+   *
+   * The change reaches the ticket's next run, never the run going now: `spawn` reads the installed
+   * skill dirs when it starts a run, and `realignRun` holds while a run works.
+   */
+  async setTicketTags(id: string, num: number, body: { skills?: unknown }): Promise<{ ticket: Ticket; dropped: string[] }> {
+    const row = this.row(id);
+    if (row.mode !== "pipeline") throw Object.assign(new Error("Not a pipeline session"), { status: 409 });
+    if (row.phase === "done") throw Object.assign(new Error("The card is done"), { status: 409 });
+    const stored = this.tickets(id).find((t) => t.num === num);
+    if (!stored) throw Object.assign(new Error(`No ticket #${num} on this card`), { status: 409 });
+    // The names the user may choose are the library's switched-on skills, beside the names the ticket
+    // already carries: saving never drops a tag behind the user's back, even when its skill is off.
+    const library = listInstalledSkills(this.db);
+    const allowed = [...listTaggableSkills(this.db).map((s) => s.name), ...stored.skillTags];
+    let kept: { skills: string[]; dropped: string[] };
+    try {
+      kept = validateSkillTags(body?.skills, allowed);
+    } catch (e) {
+      throw Object.assign(new Error((e as Error).message), { status: 400 });
+    }
+    this.updateTicket(id, num, { skills: JSON.stringify(skillTagIds(kept.skills, library)) });
+    this.emitSummary(id);
+    // The Board states the tags on the card's ticket sub-card, so the repo's boards are told to read again.
+    this.emit("board", row.repo_id);
+    return { ticket: this.tickets(id).find((t) => t.num === num)!, dropped: kept.dropped };
   }
 
   /**

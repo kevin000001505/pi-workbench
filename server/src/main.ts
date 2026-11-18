@@ -374,6 +374,13 @@ const router = new Router()
     if (!Number.isInteger(num) || num < 1) throw new HttpError(400, "The ticket number must be a whole number");
     return sessions.solveTicket(params.id, num);
   })
+  // Change one ticket's Ticket skill tags by hand (issue #121): the answer is the stored ticket, with
+  // any name the library holds no switched-on skill for named back.
+  .on("PATCH", "/api/sessions/:id/tickets/:num/skills", ({ params, body }) => {
+    const num = Number(params.num);
+    if (!Number.isInteger(num) || num < 1) throw new HttpError(400, "The ticket number must be a whole number");
+    return sessions.setTicketTags(params.id, num, body);
+  })
   .on("POST", "/api/sessions/:id/move", async ({ params, body }) => {
     await sessions.move(params.id, body.column);
     return sessions.summary(params.id);

@@ -153,10 +153,10 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
 
   // A fresh board shows that card beside the repo's plain open issues in Issues.
   assert.deepEqual((await board()).map(cardShape), [
-    { id: setupRuns[0].id, title: SETUP_CARD, column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: null, doneAt: null, specCard: false, subs: null },
-    { id: "issue:1", title: "Add dark mode", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/1", doneAt: null, specCard: false, subs: null },
-    { id: "issue:2", title: "Fix login Crash", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/2", doneAt: null, specCard: false, subs: null },
-    { id: "issue:3", title: "Docs: setup guide", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/3", doneAt: null, specCard: false, subs: null },
+    { id: setupRuns[0].id, title: SETUP_CARD, column: "todo", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: null, doneAt: null, specCard: false, ticketTags: [], subs: null },
+    { id: "issue:1", title: "Add dark mode", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/1", doneAt: null, specCard: false, ticketTags: [], subs: null },
+    { id: "issue:2", title: "Fix login Crash", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/2", doneAt: null, specCard: false, ticketTags: [], subs: null },
+    { id: "issue:3", title: "Docs: setup guide", column: "issues", tickets: { done: 0, total: 0 }, attention: null, pr: null, specRef: "https://github.com/kevin/demo/issues/3", doneAt: null, specCard: false, ticketTags: [], subs: null },
   ]);
 
   // A feature runs grill → spec → tickets, then waits in Issues.
@@ -182,7 +182,7 @@ test("the board lists a repo's pipeline sessions as cards in column order; a fea
     specRef: ".scratch/greeting/spec.md",
     doneAt: null,
     specCard: true,
-    subs: null,
+    ticketTags: [], subs: null,
   });
 
   // It is paused: the run settles and no ticket run starts.

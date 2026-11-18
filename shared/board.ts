@@ -68,13 +68,21 @@ export type CardSource = {
   specRef: string | null;
   /** When the card reached Done; Done lists the newest first. */
   doneAt?: number | null;
-  /** Each ticket's status and tracker ref: the ref tells a plain card (its only ticket is its own
-   * spec issue) from a spec card. */
-  tickets: { status: string; trackerRef: string | null }[];
+  /** Each ticket's number, status and tracker ref, plus the names of its Ticket skill tags (issue #121):
+   * the ref tells a plain card (its only ticket is its own spec issue) from a spec card, and the tag
+   * names are what the card states on its ticket sub-cards. */
+  tickets: { num: number; status: string; trackerRef: string | null; skillTags?: readonly string[] }[];
 };
 
 /** A sub-card of a done spec issue in Done, linking to the sub-issue on GitHub. */
 export type SubCard = { number: number; title: string; url: string; notPlanned: boolean };
+
+/**
+ * One ticket of a card that carries Ticket skill tags (issue #121): the ticket's number, and the names
+ * of the installed skills its own runs must load. Only a ticket that carries tags has an entry, so a
+ * ticket sub-card states a tag chip only for a ticket that carries tags.
+ */
+export type TicketSkillTags = { num: number; names: string[] };
 
 export type Card = {
   id: string;
@@ -91,6 +99,9 @@ export type Card = {
   doneAt: number | null;
   /** A click on the card opens a row of ticket sub-cards. */
   specCard: boolean;
+  /** The names of the card's tickets' Ticket skill tags, one entry per tagged ticket, in ticket order
+   * (issue #121); empty for a card whose tickets carry none and for a card built from an issue. */
+  ticketTags: TicketSkillTags[];
   /** The sub-cards of a done spec issue card in Done; null for every other card (a started card's row comes from its session's tickets). */
   subs: SubCard[] | null;
 };
@@ -171,6 +182,10 @@ export function cardOf(s: CardSource): Card | null {
     doneAt: s.doneAt ?? null,
     /** More than one ticket, or one ticket that is not the card's own issue, opens a row. */
     specCard: s.tickets.length > 1 || (s.tickets.length === 1 && !isOwnIssue(s.tickets[0].trackerRef, s.specRef)),
+    /** Only a ticket that carries tags has an entry, in the ticket's own name order. */
+    ticketTags: s.tickets
+      .map((t) => ({ num: t.num, names: [...(t.skillTags ?? [])] }))
+      .filter((t) => t.names.length > 0),
     subs: null,
   };
 }
@@ -369,6 +384,8 @@ export function unclaimedCards(issues: BoardIssue[], claims: (string | null)[], 
       specRef: i.url,
       doneAt: null,
       specCard: i.openTickets > 0,
+      /** No session owns an unclaimed issue's tickets yet, so no ticket carries tags. */
+      ticketTags: [],
       subs: null,
     }));
 }
@@ -502,6 +519,7 @@ export function doneIssueCards(issues: DoneIssue[], sessionIds: string[] = []): 
       specRef: i.url,
       doneAt: i.closedAt,
       specCard: !!subs,
+      ticketTags: [],
       subs,
     };
   });

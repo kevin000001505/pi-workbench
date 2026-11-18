@@ -121,6 +121,8 @@ export type Ticket = {
   fixRunId: string | null;
   /** The library ids of the skills this ticket's runs load (its Ticket skill tags); empty when it carries none (issue #119). */
   skills: string[];
+  /** Those tags as the names the user reads (issue #121), in the ticket's own order; empty with no tags. */
+  skillTags: string[];
 };
 
 export type RescueState = "diagnosing" | "fixing" | "rescued" | "failed";
@@ -167,6 +169,20 @@ export function skillTagIds(names: readonly string[], skills: { id: string; name
   const byName = new Map<string, string>();
   for (const s of skills) if (!byName.has(s.name)) byName.set(s.name, s.id);
   return [...new Set(names.map((n) => byName.get(n)).filter((id): id is string => !!id))];
+}
+
+/**
+ * The names a ticket's stored tags stand for (issue #121), in the ticket's own order, each name stated
+ * once. A tag whose skill the library no longer holds names nothing: nothing states a skill that is gone.
+ */
+export function skillTagNames(tagIds: readonly string[], nameOf: (tagId: string) => string | null): string[] {
+  const names: string[] = [];
+  for (const tagId of tagIds) {
+    const name = nameOf(tagId);
+    if (!name || names.includes(name)) continue;
+    names.push(name);
+  }
+  return names;
 }
 
 /**
