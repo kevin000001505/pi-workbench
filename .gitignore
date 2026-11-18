@@ -5,3 +5,6 @@ web/dist/
 .env
 *.db
 *.db-*
+
+# A worktree may link node_modules (a symlink, which "node_modules/" alone does not match).
+node_modules

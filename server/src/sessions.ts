@@ -35,17 +35,27 @@ import {
   START_PLANS,
   type StartFrom,
   type Phase,
+  type RunFacts,
+  attachPointOf,
   PIPELINE_TOOLS,
   reviewPrompt,
+  requiredTagSkills,
+  skillTagIds,
+  skillTagNames,
   specPrompt,
   type Ticket,
   type TicketInput,
+  ticketRunTagIds,
   type TicketSeed,
   ticketsPrompt,
   validateDiagnosis,
+  validateSkillTags,
   validateTickets,
+  withSkills,
+  type RunSkills,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
+import { listAttachedSkills, installedSkill, listInstalledSkills, listTaggableSkills } from "./skill-library.ts";
 import { claimRefs, type Column, COLUMNS, holdsQueue, issueNumberOf, type IssueQueueState, issueQueueState, liveQueueSteps, type PrState, resolvedNote, sessionColumn, type SessionLiveStatus } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
@@ -206,6 +216,8 @@ type Live = {
   watch?: { rule: StopRule; timer: NodeJS.Timeout };
   /** The missing-TypeSafe-skill toast went out; the summary keeps showing the state after it. */
   warnedMissingSkill?: boolean;
+  /** The skill dirs the live process was spawned with (issue #117): the run's place decided them. */
+  skillDirs?: string[];
 };
 
 /**
@@ -224,7 +236,7 @@ function latestTask(t: Transcript): { task: string; skill?: string } {
 /** The title of the session that runs only the setup skill (see `SessionManager.startSetupSession`). */
 const SETUP_TITLE = "Set up agent skills";
 
-const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs automatically on a repo the workbench has not recorded as set up. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push: the workbench pushes this commit to the repo's default branch.`;
+export const SETUP_PROMPT = `/skill:${SETUP_SKILL} This runs automatically on a repo the workbench has not recorded as set up. Ask each of your questions with the ask_user tool, one at a time. When the files are written, commit them on the current branch with the message "Set up agent skills (${SETUP_SKILL})". Do not push: the workbench pushes this commit to the repo's default branch.`;
 
 /** Standing instruction appended to every pi system prompt: explanations follow the asd-ste100 skill. */
 const EXPLAIN_PROMPT =
@@ -234,7 +246,8 @@ const EXPLAIN_PROMPT =
   "one name per thing, no undefined jargon, keep every hedge. " +
   "Code, tool output, and text the user asked for verbatim are exempt.";
 
-const toTicket = (r: TicketRow): Ticket => ({
+/** A ticket row as the session's ticket view, without the tag names `tickets` reads from the library. */
+const toTicket = (r: TicketRow): Omit<Ticket, "skillTags"> => ({
   num: r.num,
   title: r.title,
   body: r.body,
@@ -246,6 +259,7 @@ const toTicket = (r: TicketRow): Ticket => ({
   rescueState: (r.rescue_state as Ticket["rescueState"]) ?? null,
   rescueRunId: r.rescue_run_id,
   fixRunId: r.fix_run_id,
+  skills: JSON.parse(r.skills || "[]") as string[],
 });
 
 /** The worktree as git sees it: HEAD and the porcelain status. A rescue run must leave it unchanged. */
@@ -321,7 +335,12 @@ export class SessionManager extends EventEmitter {
   }
 
   tickets(id: string): Ticket[] {
-    return (this.db.prepare("SELECT * FROM tickets WHERE session_id = ? ORDER BY num").all(id) as TicketRow[]).map(toTicket);
+    return (this.db.prepare("SELECT * FROM tickets WHERE session_id = ? ORDER BY num").all(id) as TicketRow[]).map((r) => {
+      const t = toTicket(r);
+      // The stored tags are identifiers; every read carries the names beside them (issue #121), so the
+      // Board and the card detail state a ticket's tags with no read of the skill library.
+      return { ...t, skillTags: skillTagNames(t.skills, (tagId) => installedSkill(this.db, tagId)?.name ?? null) };
+    });
   }
 
   private updateTicket(id: string, num: number, fields: Partial<TicketRow>) {
@@ -695,10 +714,10 @@ export class SessionManager extends EventEmitter {
         // grill/spec/tickets are skipped: the first ticket run starts now.
         await this.runNext(id);
       } else if (plan?.held) {
-        await this.send(id, held!);
+        await this.send(id, withSkills(held!, this.promptSkills(id), plan.phase));
       } else if (mode === "pipeline") {
         // A task that is already a skill call (the session form's ✦ Skills pick) goes out as it is.
-        await this.send(id, isSkillCall(input.prompt) ? input.prompt : grillPrompt(input.prompt));
+        await this.send(id, isSkillCall(input.prompt) ? withSkills(input.prompt, this.promptSkills(id), "grill") : grillPrompt(input.prompt, this.promptSkills(id)));
       } else if (task) {
         await this.send(id, input.prompt);
       }
@@ -715,12 +734,14 @@ export class SessionManager extends EventEmitter {
     return this.summary(id);
   }
 
-  /** Record the session's tickets, fresh and ready. */
+  /** Record the session's tickets, fresh and ready. A tag names an installed skill of the tickets place, and the row holds that skill's identifier. */
   private insertTickets(id: string, inputs: TicketInput[]) {
     const insert = this.db.prepare(
-      "INSERT INTO tickets (session_id, num, title, body, blocked_by, tracker_ref, status) VALUES (?, ?, ?, ?, ?, ?, 'ready')",
+      "INSERT INTO tickets (session_id, num, title, body, blocked_by, tracker_ref, status, skills) VALUES (?, ?, ?, ?, ?, ?, 'ready', ?)",
     );
-    for (const t of inputs) insert.run(id, t.number, t.title, t.body, JSON.stringify(t.blockedBy), t.trackerRef ?? null);
+    // A seed (Solve, a Solve on a sub-issue) names no tags, so it needs no read of the library.
+    const library = inputs.some((t) => t.skills?.length) ? listAttachedSkills(this.db, "tickets") : [];
+    for (const t of inputs) insert.run(id, t.number, t.title, t.body, JSON.stringify(t.blockedBy), t.trackerRef ?? null, JSON.stringify(skillTagIds(t.skills ?? [], library)));
   }
 
   /** Spawn pi for the session's active run if it isn't running; resumes its saved conversation. */
@@ -747,7 +768,11 @@ export class SessionManager extends EventEmitter {
     }
     const m = getModelSettings(this.db);
     fs.mkdirSync(config.piSessionsDir, { recursive: true });
-    const extraSkills = this.extraSkillDirs(id);
+    const runId = this.runOf(row);
+    // The skill dirs are read here, for this run only (issue #117): the session's own extra skills,
+    // plus the installed skills attached to the place this run serves.
+    const extraSkills = this.runSkillDirs(id, runId);
+    s.skillDirs = extraSkills;
     // pi starts without a --skill dir it cannot find, and says nothing: say it here (the summary shows it too).
     if (this.typesafeSkillMissing(row) && !s.warnedMissingSkill) {
       s.warnedMissingSkill = true;
@@ -757,7 +782,10 @@ export class SessionManager extends EventEmitter {
     const env = await this.processEnv(row.repo_id);
     // The extension's Skill tool looks there too, so only these sessions can load them.
     if (extraSkills.length) env.PI_WORKBENCH_EXTRA_SKILLS = extraSkills.join(path.delimiter);
-    const runId = this.runOf(row);
+    // The tickets step names the tags it may give a ticket, so its record_tickets call is checked
+    // against the same names its prompt listed (issue #119).
+    const taggable = this.tagSkills(id, runId).map((s) => s.name);
+    if (taggable.length) env.PI_WORKBENCH_TICKET_SKILLS = JSON.stringify(taggable);
     // Rescue and retro runs call the Reviewer model through the rescue proxy: the run gets a
     // per-run token in its environment only, and the Reviewer key stays in the server (ADR 0003).
     const rescuey = !!this.rescueProxy && isRescueyRun(runId);
@@ -832,6 +860,91 @@ export class SessionManager extends EventEmitter {
     return this.row(id).typesafe_skill === 1 ? [typesafeSkillDir()] : [];
   }
 
+  /**
+   * What a run is: the session's phase, and which run of it this is (one ticket's, its fix or rescue,
+   * or the session's review, retro or merge). `attachPointOf` turns it into the pipeline place (issue #117).
+   */
+  private runFacts(row: SessionRow, runId: string): RunFacts {
+    const ticket = this.tickets(row.id).find((t) => [t.runId, t.rescueRunId, t.fixRunId].includes(runId));
+    const ticketRun = ticket ? (ticket.rescueRunId === runId ? "rescue" : ticket.fixRunId === runId ? "fix" : "ticket") : null;
+    const specialRun = runId === row.review_run ? "review" : runId === row.retro_run ? "retro" : runId === row.merge_run ? "merge" : null;
+    return { mode: row.mode, phase: row.phase, ticketRun, specialRun };
+  }
+
+  /**
+   * The installed skills this run reaches: the library's skills attached to its place and switched on
+   * (issue #117), plus the skills the tags of its ticket name (issue #120) — a tagged skill reaches its
+   * run whatever place it is attached to. The skill library's own directory stays out of what pi scans,
+   * so this is the only way an installed skill reaches an agent. The setup, rescue, retro and merge runs
+   * reach none.
+   */
+  installedSkillDirs(id: string, runId = this.runOf(this.row(id))): string[] {
+    const place = attachPointOf(this.runFacts(this.row(id), runId));
+    if (!place) return [];
+    return [...new Set([...listAttachedSkills(this.db, place).map((s) => s.dir), ...this.tagSkillDirs(id, runId)])];
+  }
+
+  /**
+   * The library directories behind the Ticket skill tags of the ticket this run belongs to (issue #120):
+   * a ticket run, its fix run and a solo ticket run. Only those three run ids are a ticket's own run, so
+   * a rescue, review, retro or merge run gets no tagged skill here. A tag whose skill the library no
+   * longer holds hands no directory: a run is never handed a skill that is gone.
+   */
+  private tagSkillDirs(id: string, runId: string): string[] {
+    return ticketRunTagIds(this.tickets(id), runId)
+      .map((tagId) => installedSkill(this.db, tagId)?.dir)
+      .filter((dir): dir is string => !!dir);
+  }
+
+  /** Every skill dir one run is spawned with: the session's extra skills, then its place's installed ones. */
+  runSkillDirs(id: string, runId: string): string[] {
+    return [...this.extraSkillDirs(id), ...this.installedSkillDirs(id, runId)];
+  }
+
+  /**
+   * The installed skills a ticket's tags may name for this run (issue #119): only the tickets step records
+   * tags, and the names it may use are the skills attached to that place and switched on. Every other
+   * run records none, so it is handed no name.
+   */
+  private tagSkills(id: string, runId: string) {
+    const row = this.row(id);
+    return attachPointOf(this.runFacts(row, runId)) === "tickets" ? listAttachedSkills(this.db, "tickets") : [];
+  }
+
+  /**
+   * The installed skills a run's prompt names (issue #118): the skills attached to the pipeline place it
+   * serves, advertised, so the agent loads the ones that fit. A ticket's own Ticket skill tags are
+   * required (issue #120): the run is told to load each of them before it writes any code, and a skill
+   * both tagged and advertised is named once, as required. A direct session is the exception: the user
+   * writes its prompt, so its attached skills stay reachable skills and the prompt is never changed.
+   */
+  promptSkills(id: string, runId = this.runOf(this.row(id))): RunSkills {
+    const row = this.row(id);
+    const place = attachPointOf(this.runFacts(row, runId));
+    if (!place || place === "direct") return {};
+    const advertised = listAttachedSkills(this.db, place).map(({ name, description }) => ({ name, description }));
+    const required = requiredTagSkills(this.tickets(id), runId, (tagId) => installedSkill(this.db, tagId));
+    // skillsSection is the one place that renders the two lists, and it names a skill in both once.
+    return required.length ? { required, advertised } : { advertised };
+  }
+
+  /**
+   * The attach points are read at spawn, so a conversation that moves to another pipeline place gets
+   * a run of that place before its next prompt (issue #117): the same pi conversation, restarted, its
+   * history loaded back. A change the user made while a run worked never reaches that run: the live
+   * process keeps the dirs its spawn carried until the place it serves changes or the run ends.
+   */
+  private async realignRun(id: string) {
+    const s = this.state(id);
+    if (!s.proc || s.proc.exited || s.transcript.busy) return;
+    const row = this.row(id);
+    const runId = this.runOf(row);
+    if (runId !== (row.active_run ?? row.id)) return;
+    const wanted = this.runSkillDirs(id, runId);
+    if (wanted.join(path.delimiter) === (s.skillDirs ?? []).join(path.delimiter)) return;
+    await this.switchRun(id, runId, false);
+  }
+
   private async processEnv(repoId: string): Promise<NodeJS.ProcessEnv> {
     const env: NodeJS.ProcessEnv = { ...process.env };
     delete env.WORKBENCH_MASTER_KEY;
@@ -902,7 +1015,10 @@ export class SessionManager extends EventEmitter {
     } else if (name === "save_spec" && row.phase === "spec" && typeof args.spec === "string" && args.spec.trim()) {
       this.update(id, { spec: args.spec.trim(), spec_ref: typeof args.trackerRef === "string" ? args.trackerRef : null });
     } else if (name === "record_tickets" && row.phase === "tickets") {
-      const tickets = validateTickets(args.tickets);
+      // Each ticket's Ticket skill tags are checked against the skills attached to the tickets step — the
+      // same names its prompt listed. The extension drops a name outside that set and names it back; the
+      // server drops them too, so a stale process never stores one (issue #119).
+      const tickets = validateTickets(args.tickets, this.tagSkills(id, this.runOf(row)).map((sk) => sk.name));
       this.db.prepare("DELETE FROM tickets WHERE session_id = ?").run(id);
       this.insertTickets(id, tickets);
       this.update(id, { rework_tickets: 0 });
@@ -1128,6 +1244,8 @@ export class SessionManager extends EventEmitter {
 
   /** Send user text. While the agent runs it steers (or follows up) instead of starting a new run. */
   async send(id: string, message: string, mode: "steer" | "followUp" = "steer") {
+    // The prompt that starts a step of another pipeline place starts a run of that place (issue #117).
+    await this.realignRun(id);
     await this.start(id);
     const s = this.state(id);
     const cmd: RpcRecord = { type: "prompt", message };
@@ -1181,7 +1299,7 @@ export class SessionManager extends EventEmitter {
       // A held prompt is either a full skill call (a rework, a split, a plain issue card's grill)
       // or a bare task from the session form. Only the bare task needs the grill wrapper: wrapping
       // a call again would send pi the skill directive twice.
-      await this.send(id, isSkillCall(row.held_prompt) ? row.held_prompt : grillPrompt(row.held_prompt), "followUp");
+      await this.send(id, withSkills(isSkillCall(row.held_prompt) ? row.held_prompt : grillPrompt(row.held_prompt), this.promptSkills(id), row.held_phase ?? "grill"), "followUp");
       return;
     }
     // A direct session that already has its PR recorded keeps phase `pr`: its card is in Review.
@@ -1219,10 +1337,10 @@ export class SessionManager extends EventEmitter {
       }
     } else if (row.phase === "grill" && row.grill_summary) {
       this.update(id, { phase: "spec" });
-      await this.send(id, specPrompt(), "followUp");
+      await this.send(id, specPrompt(this.promptSkills(id)), "followUp");
     } else if (row.phase === "spec" && row.spec) {
       this.update(id, { phase: "tickets" });
-      await this.send(id, ticketsPrompt(row.spec_ref, getModelSettings(this.db).contextWindow), "followUp");
+      await this.send(id, ticketsPrompt(row.spec_ref, getModelSettings(this.db).contextWindow, this.promptSkills(id)), "followUp");
     } else if (row.phase === "tickets" && !row.rework_tickets && this.tickets(id).length > 0) {
       // The tickets are on the tracker: the card waits in Issues until Solve all starts the runs.
       this.update(id, { phase: "ready" });
@@ -1334,7 +1452,7 @@ export class SessionManager extends EventEmitter {
     await this.switchRun(id, runId, true);
     this.watch(id);
     const finished = this.tickets(id).filter((x) => x.status === "done");
-    await this.send(id, fixPrompt(ticket, row.spec, row.spec_ref, finished, report));
+    await this.send(id, fixPrompt(ticket, row.spec, row.spec_ref, finished, report, this.promptSkills(id)));
   }
 
   /** The rescue did not work out: the ticket is blocked, and there is no second rescue for it. */
@@ -1448,7 +1566,42 @@ export class SessionManager extends EventEmitter {
     this.update(id, { phase: "review", review_run: runId, attention: null });
     await this.switchRun(id, runId, true);
     const row = this.row(id);
-    await this.send(id, reviewPrompt(row.base_branch, row.spec, row.spec_ref, this.tickets(id)));
+    await this.send(id, reviewPrompt(row.base_branch, row.spec, row.spec_ref, this.tickets(id), this.promptSkills(id)));
+  }
+
+  /**
+   * Change one ticket's Ticket skill tags by hand (issue #121): the user's list replaces the tags the
+   * breakdown recorded. The rules are the tickets step's (`validateSkillTags`): at most
+   * TICKET_SKILL_TAG_LIMIT names, each once, and a name the library holds no switched-on skill for is
+   * dropped and named back in `dropped`. The kept names are stored as the library's identifiers.
+   *
+   * The change reaches the ticket's next run, never the run going now: `spawn` reads the installed
+   * skill dirs when it starts a run, and `realignRun` holds while a run works.
+   */
+  async setTicketTags(id: string, num: number, body: { skills?: unknown }): Promise<{ ticket: Ticket; dropped: string[] }> {
+    const row = this.row(id);
+    if (row.mode !== "pipeline") throw Object.assign(new Error("Not a pipeline session"), { status: 409 });
+    if (row.phase === "done") throw Object.assign(new Error("The card is done"), { status: 409 });
+    // The list is the whole new set of tags. A body that names none is a mistake, not a clear: an
+    // empty list is what clears the ticket's tags.
+    if (body?.skills === undefined) throw Object.assign(new Error("The body names the ticket's skills (an empty list clears them)"), { status: 400 });
+    const stored = this.tickets(id).find((t) => t.num === num);
+    if (!stored) throw Object.assign(new Error(`No ticket #${num} on this card`), { status: 409 });
+    // The names the user may choose are the library's switched-on skills, beside the names the ticket
+    // already carries: saving never drops a tag behind the user's back, even when its skill is off.
+    const library = listInstalledSkills(this.db);
+    const allowed = [...listTaggableSkills(this.db).map((s) => s.name), ...stored.skillTags];
+    let kept: { skills: string[]; dropped: string[] };
+    try {
+      kept = validateSkillTags(body?.skills, allowed);
+    } catch (e) {
+      throw Object.assign(new Error((e as Error).message), { status: 400 });
+    }
+    this.updateTicket(id, num, { skills: JSON.stringify(skillTagIds(kept.skills, library)) });
+    this.emitSummary(id);
+    // The Board states the tags on the card's ticket sub-card, so the repo's boards are told to read again.
+    this.emit("board", row.repo_id);
+    return { ticket: this.tickets(id).find((t) => t.num === num)!, dropped: kept.dropped };
   }
 
   /**
@@ -1532,7 +1685,7 @@ export class SessionManager extends EventEmitter {
     const row = this.row(id);
     const finished = this.tickets(id).filter((x) => x.status === "done");
     this.watch(id);
-    await this.send(id, implementPrompt({ ...t, runId }, row.spec, row.spec_ref, finished));
+    await this.send(id, implementPrompt({ ...t, runId }, row.spec, row.spec_ref, finished, this.promptSkills(id)));
   }
 
   /**
@@ -1730,7 +1883,7 @@ export class SessionManager extends EventEmitter {
     for (const t of this.tickets(id)) if (t.status === "running") this.updateTicket(id, t.num, { status: "ready" });
     // The card left Doing for a new plan: the queue goes on to its next card (issue #104).
     await this.releaseQueueStep(id, "skipped");
-    await this.send(id, reworkPrompt(this.row(id).spec_ref));
+    await this.send(id, reworkPrompt(this.row(id).spec_ref, this.promptSkills(id)));
   }
 
   /** Solve all: the paused session implements its tickets, one fresh run each. */

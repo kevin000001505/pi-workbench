@@ -1,10 +1,10 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type BoardAction, type Card, type CardStatus, type Column, type IssueQueueState, type SubCard, boardCardActions, COLUMNS, columnCounts, DONE_PAGE, isApproveMove, isPlainUnclaimedCard, issueNumberOf, unclaimedNumber } from "../../../shared/board.ts";
+import { type BoardAction, type Card, type CardStatus, type Column, type IssueQueueState, type SubCard, boardCardActions, canEditTicketTags, COLUMNS, columnCounts, DONE_PAGE, isApproveMove, isPlainUnclaimedCard, issueNumberOf, unclaimedNumber } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import { abandonQuestion, approveQuestion, issueParts, CardDetail, TICKET_STATE } from "./CardDetail.tsx";
 import { type CardAction, CardActions, SOLVE, SOLVE_ALL, SPLIT } from "./CardActions.tsx";
-import { matches, NewCard, Search, typingIn, wordsOf } from "./BoardDialogs.tsx";
+import { matches, NewCard, Search, TicketSkills, TicketTags, typingIn, wordsOf } from "./BoardDialogs.tsx";
 import { isResolvedNote, type Repo, type SessionSummary, type UnclaimedSpecTickets } from "../types.ts";
 import { Spinner } from "../ui.tsx";
 import "../board.css";
@@ -365,10 +365,26 @@ function SpecSubcards({ card, toast, onSolved }: { card: Card; toast: (text: str
  * on GitHub when it has no run yet, or none at all. Solve runs one ticket while the card waits
  * in Issues (disabled while a blocker is not done); Retry and Mark done act on a blocked ticket.
  * In a Done card, a ticket that is not done shows "Not planned".
+ *
+ * A ticket that carries Ticket skill tags shows one chip per tag name (issue #121), read from the
+ * card's `ticketTags`. While the card is not Done, **Skills** opens the dialog that sets them.
  */
-function TicketSubcards({ s, toast, onSolved }: { s: SessionSummary; toast: (text: string, level?: "info" | "warning" | "error") => void; onSolved: () => void }) {
+function TicketSubcards({
+  s,
+  ticketTags,
+  toast,
+  onSolved,
+  onEditTags,
+}: {
+  s: SessionSummary;
+  ticketTags: Card["ticketTags"];
+  toast: (text: string, level?: "info" | "warning" | "error") => void;
+  onSolved: () => void;
+  onEditTags: (ticket: { num: number; title: string; tags: string[] }) => void;
+}) {
   const [busy, setBusy] = useState(false);
   const done = new Set(s.tickets.filter((t) => t.status === "done").map((t) => t.num));
+  const namesOf = (num: number) => ticketTags.find((g) => g.num === num)?.names ?? [];
   const act = async (action: "retry" | "skip") => {
     setBusy(true);
     try {
@@ -407,6 +423,10 @@ function TicketSubcards({ s, toast, onSolved }: { s: SessionSummary; toast: (tex
         const label = doneCard ? (t.status === "done" ? "Done" : "Not planned") : TICKET_STATE[t.status];
         const solveShown = s.phase === "ready" && (t.status === "ready" || t.status === "running");
         const blocked = t.status === "blocked" && !doneCard;
+        // The ticket's Ticket skill tags, beside the ticket's own actions; a Done card states them and
+        // sets no new one, as it sets no ticket state.
+        const tags = namesOf(t.num);
+        const editable = canEditTicketTags(s);
         return (
           <a
             key={t.num}
@@ -423,8 +443,9 @@ function TicketSubcards({ s, toast, onSolved }: { s: SessionSummary; toast: (tex
               <div className="title">#{t.num} {t.title}</div>
             </div>
             {waitingOn.length > 0 && <span className="desc">waits on {waitingOn.map((b) => `#${b}`).join(", ")}</span>}
-            {(solveShown || blocked) && (
+            {(solveShown || blocked || tags.length > 0 || editable) && (
               <span className="kz-card-actions">
+                <TicketSkills tags={tags} session={s} busy={busy} onEdit={() => onEditTags({ num: t.num, title: t.title, tags })} />
                 {solveShown && (
                   <button
                     className="kz-btn"
@@ -533,6 +554,8 @@ export function Board({ repoId }: { repoId?: string }) {
   // The spec card whose row of ticket sub-cards is open; a click toggles it. Only one row opens
   // at a time, as the unclaimed spec card's row works today.
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  // The ticket whose Ticket skill tags the user sets (issue #121), from its card's ticket sub-card.
+  const [tagEdit, setTagEdit] = useState<{ sessionId: string; num: number; title: string; tags: string[] } | null>(null);
   const [doneHidden, setDoneHidden] = useState(0);
   // The Issue queue (issue #103): what GET /api/board states for this repo.
   const [queue, setQueue] = useState<IssueQueueState | null>(null);
@@ -861,7 +884,13 @@ export function Board({ repoId }: { repoId?: string }) {
                       ) : unclaimedNumber(c.id) !== null ? (
                         <SpecSubcards card={c} toast={toast} onSolved={onSubSolved} />
                       ) : sessions[c.id] ? (
-                        <TicketSubcards s={sessions[c.id]} toast={toast} onSolved={onSubSolved} />
+                        <TicketSubcards
+                          s={sessions[c.id]}
+                          ticketTags={c.ticketTags}
+                          toast={toast}
+                          onSolved={onSubSolved}
+                          onEditTags={(t) => setTagEdit({ sessionId: sessions[c.id].id, ...t })}
+                        />
                       ) : null
                     )}
                   </Fragment>
@@ -877,6 +906,20 @@ export function Board({ repoId }: { repoId?: string }) {
         })}
       </div>
       {open && <CardDetail card={open} onClose={closeDetail} />}
+      {tagEdit && (
+        <TicketTags
+          sessionId={tagEdit.sessionId}
+          ticket={{ num: tagEdit.num, title: tagEdit.title }}
+          carried={tagEdit.tags}
+          onClose={() => setTagEdit(null)}
+          onSaved={() => {
+            setTagEdit(null);
+            // The dialog stated every name the route dropped. The server's board event makes this
+            // Board read again, so the card states the tags it now carries.
+            setRefetch((n) => n + 1);
+          }}
+        />
+      )}
       {creating && repo && (
         <NewCard
           repoId={repo.id}

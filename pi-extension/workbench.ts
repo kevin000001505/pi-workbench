@@ -277,13 +277,21 @@ export default function workbench(pi: ExtensionAPI) {
           body: Type.String({ description: "What to build and the acceptance criteria" }),
           blockedBy: Type.Optional(Type.Array(Type.Integer(), { description: "Numbers of the tickets that must finish first" })),
           trackerRef: Type.Optional(Type.String({ description: "Ticket file path or issue number/URL" })),
+          skills: Type.Optional(Type.Array(Type.String(), { description: "Ticket skill tags: at most 3 names of the skills attached to the tickets step, the ones this ticket's run must load" })),
         }),
       ),
     }),
     async execute(_id, params) {
+      const taggable = ticketTagNames();
       const problem = checkTickets(params.tickets);
       if (problem) return { content: [{ type: "text", text: `Not recorded: ${problem}. Fix it and call record_tickets again.` }], details: {}, isError: true };
-      return { content: [{ type: "text", text: `Recorded ${params.tickets.length} tickets. Stop here; the workbench runs them.` }], details: {} };
+      // A tag no skill attached to the tickets step is named for is dropped, not stored, and named back
+      // with the names it may use, so the agent can call record_tickets again with a valid one (issue #119).
+      const dropped = params.tickets.flatMap((t) => ticketTags(t).filter((n) => !taggable.includes(n)).map((n) => `ticket ${t.number} "${n}"`));
+      const note = dropped.length
+        ? ` Dropped the ticket skill tags ${dropped.join(", ")}: no skill attached to the tickets step carries that name. You can tag a ticket with: ${taggable.length ? taggable.join(", ") : "no skill is attached to the tickets step"}.`
+        : "";
+      return { content: [{ type: "text", text: `Recorded ${params.tickets.length} tickets.${note} Stop here; the workbench runs them.` }], details: {} };
     },
   });
 
@@ -373,14 +381,38 @@ function walk(dir: string, name: string, depth: number): string | undefined {
   return undefined;
 }
 
+/** A ticket's tag names, trimmed and deduplicated — the same reading as the server's validateSkillTags. */
+function ticketTags(ticket: { skills?: string[] }): string[] {
+  return [...new Set((ticket.skills ?? []).map((s) => (typeof s === "string" ? s.trim() : "")).filter(Boolean))];
+}
+
+/** A ticket loads at most this many tagged skills — the same cap the server's validator enforces (issue #119). */
+const TICKET_SKILL_TAG_LIMIT = 3;
+
+/** PI_WORKBENCH_TICKET_SKILLS: the skill names the tickets step may tag a ticket with, set by the server. */
+function ticketTagNames(): string[] {
+  try {
+    const names = JSON.parse(process.env.PI_WORKBENCH_TICKET_SKILLS ?? "[]");
+    return Array.isArray(names) ? names.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
 /** Same rules as the server's validateTickets, so the model hears about mistakes and retries. */
-function checkTickets(tickets: { number: number; title: string; body: string; blockedBy?: number[] }[]): string | null {
+function checkTickets(tickets: { number: number; title: string; body: string; blockedBy?: number[]; skills?: string[] }[]): string | null {
   if (tickets.length === 0) return "no tickets";
   const nums = new Set(tickets.map((t) => t.number));
   if (nums.size !== tickets.length) return "ticket numbers must be unique";
   for (const t of tickets) {
     if (!t.title.trim() || !t.body.trim()) return `ticket ${t.number} needs a title and body`;
     for (const b of t.blockedBy ?? []) if (!nums.has(b) || b === t.number) return `ticket ${t.number} has an invalid blocker ${b}`;
+    // A tag list is the ticket's Ticket skill tags (issue #119): a tag must be a name, and a ticket
+    // carries at most the limit. A name outside the attached set is not an error here — the tool drops
+    // it and names it, so the agent can retry with a valid one.
+    const names = ticketTags(t);
+    if ((t.skills ?? []).some((s) => typeof s !== "string" || !s.trim())) return `ticket ${t.number}'s skills are skill names`;
+    if (names.length > TICKET_SKILL_TAG_LIMIT) return `ticket ${t.number} carries ${names.length} skill tags; a ticket carries at most ${TICKET_SKILL_TAG_LIMIT}`;
   }
   const blockers = new Map(tickets.map((t) => [t.number, t.blockedBy ?? []]));
   const state = new Map<number, number>();

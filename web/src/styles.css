@@ -638,6 +638,36 @@ select.input {
 .card-list-row .row.gap span.mono {
   min-width: 0;
 }
+/* ---------- the Skills page: a Skill source, and the skills it installed ---------- */
+.skill-rows {
+  display: flex;
+  flex-direction: column;
+}
+.skill-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+.skill-row:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+.skill-row p {
+  margin: 0;
+}
+.skill-meta {
+  row-gap: 4px;
+}
+/* An installed skill switched off: the row stays, its controls read as off. */
+.skill-row-off {
+  opacity: 0.6;
+}
+.skill-attach {
+  row-gap: 4px;
+  column-gap: 12px;
+}
 .empty {
   text-align: center;
   padding: 60px 20px;

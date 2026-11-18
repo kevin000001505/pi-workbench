@@ -15,9 +15,96 @@
  * - retro: when a ticket had a rescue, one fresh /skill:retro run on the Reviewer's model that only
  *   proposes changes; ends with finish_retro. It never blocks the PR.
  */
+import { SETUP_SKILL } from "./config.ts";
+import { ATTACH_POINTS, isAttachPoint, type AttachPoint } from "../../shared/attach.ts";
+
+/**
+ * The skills the pipeline prompts call, one per run kind: every phase, the setup run, and the special
+ * runs (rescue, review-fix, merge, retro). The skill library's install check refuses a Skill source
+ * that carries one of these names (issue #114), and the prompt builders write their `/skill:` call
+ * from this list, so the two read one source of truth.
+ */
+export const PIPELINE_SKILLS = {
+  setup: SETUP_SKILL,
+  grill: "grill-with-docs",
+  spec: "to-spec",
+  tickets: "to-tickets",
+  implement: "tdd",
+  review: "code-review",
+  rescue: "diagnosing-bugs",
+  retro: "retro",
+  merge: "resolving-merge-conflicts",
+} as const;
+
+/** The names an installed skill may not take: a shadowed `tdd` silently changes every ticket run. */
+export const PIPELINE_SKILL_NAMES: readonly string[] = Object.values(PIPELINE_SKILLS);
 
 /** `ready`: the tickets are recorded and the session waits for Solve all. `pr`: reviewed, PR open. */
 export type Phase = "setup" | "grill" | "spec" | "tickets" | "ready" | "implement" | "review" | "retro" | "pr" | "done" | "direct";
+
+/**
+ * The pipeline places an installed skill can attach to (issue #117, ADR 0004). The library stores
+ * these names, so a setting outside them is refused rather than quietly ignored. They live in
+ * shared/attach.ts, so the page that sets them and the server that reads them name them the same way.
+ */
+export { ATTACH_POINTS, isAttachPoint } from "../../shared/attach.ts";
+export type { AttachPoint } from "../../shared/attach.ts";
+
+/** What a run is, as the attach table reads it. `ticketRun` and `specialRun` name a run with its own
+ * pi session id; the session's own conversation run is named by its `mode` and `phase`. */
+export type RunFacts = {
+  mode: "pipeline" | "direct";
+  phase: Phase;
+  /** The run is one ticket's own run: its first run, its fix run, or its rescue run. */
+  ticketRun: "ticket" | "fix" | "rescue" | null;
+  /** The run is the session's review run, its retro run, or its merge run. */
+  specialRun: "review" | "retro" | "merge" | null;
+};
+
+/** A run with a pi session id of its own: one ticket's runs, and the session's review, retro and merge runs. */
+export type OwnRunKind = "ticket" | "fix" | "rescue" | "review" | "retro" | "merge";
+
+/** The place of a run that is not the session's own conversation. */
+const RUN_ATTACH: Record<OwnRunKind, AttachPoint | null> = {
+  ticket: "implement",
+  fix: "implement",
+  rescue: null,
+  review: "review",
+  retro: null,
+  merge: null,
+};
+
+/** The place the session's own conversation serves, by the pipeline step its phase is in. A card in
+ * Review or Done has no step running, so its conversation serves no place; the setup run has a narrow
+ * job of its own and serves none. */
+const CONVERSATION_ATTACH: Record<Phase, AttachPoint | null> = {
+  setup: null,
+  grill: "grill",
+  spec: "spec",
+  tickets: "tickets",
+  ready: "tickets",
+  implement: "implement",
+  review: "review",
+  retro: null,
+  pr: null,
+  done: null,
+  direct: "direct",
+};
+
+/**
+ * The one mapping from a run to the pipeline place it serves (issue #117): an installed skill reaches
+ * the runs of the places it is attached to, and no other run. A ticket's run, its fix run and a solo
+ * ticket run are the implement place; a split card's held prompt and the tickets step are the tickets
+ * place; every run of a direct session is the direct place; the setup, rescue, retro and merge runs
+ * are attached to nothing.
+ */
+export function attachPointOf(f: RunFacts): AttachPoint | null {
+  if (f.ticketRun) return RUN_ATTACH[f.ticketRun];
+  if (f.specialRun) return RUN_ATTACH[f.specialRun];
+  // A direct session runs no pipeline phases: its card's phase only says where its card sits.
+  if (f.mode === "direct") return f.phase === "setup" ? null : "direct";
+  return CONVERSATION_ATTACH[f.phase] ?? null;
+}
 
 export type Ticket = {
   num: number;
@@ -32,6 +119,10 @@ export type Ticket = {
   rescueState: RescueState | null;
   rescueRunId: string | null;
   fixRunId: string | null;
+  /** The library ids of the skills this ticket's runs load (its Ticket skill tags); empty when it carries none (issue #119). */
+  skills: string[];
+  /** Those tags as the names the user reads (issue #121), in the ticket's own order; empty with no tags. */
+  skillTags: string[];
 };
 
 export type RescueState = "diagnosing" | "fixing" | "rescued" | "failed";
@@ -39,7 +130,90 @@ export type RescueState = "diagnosing" | "fixing" | "rescued" | "failed";
 /** A spec gets at most this many rescues; each ticket gets one. */
 export const RESCUES_PER_SPEC = 3;
 
-export type TicketInput = { number: number; title: string; body: string; blockedBy?: number[]; trackerRef?: string };
+/**
+ * A ticket as the tickets step records it. `skills` is its Ticket skill tags: the *names* the agent
+ * kept, which the recording site stores as the library's identifiers (issue #119). A card that never
+ * ran the tickets step (Solve, a Solve on a sub-issue) records no tags, so it carries none.
+ */
+export type TicketInput = { number: number; title: string; body: string; blockedBy?: number[]; trackerRef?: string; skills?: string[] };
+
+/** One ticket loads at most this many tagged skills: a run buried in instruction sets stops working. */
+export const TICKET_SKILL_TAG_LIMIT = 3;
+
+/**
+ * A ticket's Ticket skill tags, as the agent passed them (issue #119). The names it may tag with are
+ * the installed skills attached to the tickets place. A name outside that set is dropped and reported
+ * in `dropped`, so the tool result can name it and the agent can retry; more than the limit is a
+ * validation error. The extension applies the same rules, as `checkDiagnosis` mirrors `validateDiagnosis`.
+ */
+export function validateSkillTags(tags: unknown, attached: readonly string[]): { skills: string[]; dropped: string[] } {
+  if (tags === undefined || tags === null) return { skills: [], dropped: [] };
+  if (!Array.isArray(tags)) throw new Error(`a ticket's skills must be a list of skill names (got ${JSON.stringify(tags)})`);
+  const names: string[] = [];
+  for (const t of tags) {
+    const name = typeof t === "string" ? t.trim() : "";
+    if (!name) throw new Error(`a ticket's skills are skill names (got ${JSON.stringify(t)})`);
+    if (!names.includes(name)) names.push(name);
+  }
+  if (names.length > TICKET_SKILL_TAG_LIMIT) throw new Error(`a ticket carries at most ${TICKET_SKILL_TAG_LIMIT} skill tags (it names ${names.length})`);
+  const skills = names.filter((n) => attached.includes(n));
+  return { skills, dropped: names.filter((n) => !skills.includes(n)) };
+}
+
+/**
+ * The library identifiers a ticket's tag names stand for, in the order the agent named them. Stored as
+ * identifiers, so a renamed skill keeps its tags and removing a source clears exactly its own tags.
+ * A name the library does not hold is dropped.
+ */
+export function skillTagIds(names: readonly string[], skills: { id: string; name: string }[]): string[] {
+  const byName = new Map<string, string>();
+  for (const s of skills) if (!byName.has(s.name)) byName.set(s.name, s.id);
+  return [...new Set(names.map((n) => byName.get(n)).filter((id): id is string => !!id))];
+}
+
+/**
+ * The names a ticket's stored tags stand for (issue #121), in the ticket's own order, each name stated
+ * once. A tag whose skill the library no longer holds names nothing: nothing states a skill that is gone.
+ */
+export function skillTagNames(tagIds: readonly string[], nameOf: (tagId: string) => string | null): string[] {
+  const names: string[] = [];
+  for (const tagId of tagIds) {
+    const name = nameOf(tagId);
+    if (!name || names.includes(name)) continue;
+    names.push(name);
+  }
+  return names;
+}
+
+/**
+ * The Ticket skill tags of the ticket this run belongs to (issue #120): a ticket run, its fix run and a
+ * solo ticket run are their ticket's own run, so they carry its tags. Another run id — a rescue run, the
+ * review run, the retro run, the merge run, the plan conversation — is no ticket's own run, so it names
+ * no tag. The stored tags are installed skill identifiers.
+ */
+export function ticketRunTagIds(tickets: { runId: string | null; fixRunId: string | null; skills: readonly string[] }[], runId: string): string[] {
+  if (!runId) return [];
+  const ticket = tickets.find((t) => t.runId === runId || t.fixRunId === runId);
+  return ticket?.skills ?? [];
+}
+
+/**
+ * Those tags as prompt skills, in the order the ticket carries them, each name stated once. A tag whose
+ * skill the library no longer holds names nothing: a run is never told to load a skill that is gone.
+ */
+export function requiredTagSkills(
+  tickets: { runId: string | null; fixRunId: string | null; skills: readonly string[] }[],
+  runId: string,
+  skillFor: (tagId: string) => { name: string; description: string | null } | null,
+): PromptSkill[] {
+  const skills: PromptSkill[] = [];
+  for (const tagId of ticketRunTagIds(tickets, runId)) {
+    const skill = skillFor(tagId);
+    if (!skill || skills.some((s) => s.name === skill.name)) continue;
+    skills.push({ name: skill.name, description: skill.description ?? "" });
+  }
+  return skills;
+}
 
 /** An open sub-issue of a spec, as GitHub returns it: its own blockers' issue numbers. */
 export type SubIssueSeed = { number: number; title: string; body: string | null; url: string; blockedBy: number[] };
@@ -76,8 +250,12 @@ export const PIPELINE_TOOLS = ["save_grill_summary", "save_spec", "record_ticket
 /** Specs longer than this go to ticket runs as a pointer only (implement-spec: "communicate through context pointers"). */
 const SPEC_INLINE_LIMIT = 40_000;
 
-/** Check what the agent passed to record_tickets: unique numbers, known blockers, no cycles. */
-export function validateTickets(input: unknown): TicketInput[] {
+/**
+ * Check what the agent passed to record_tickets: unique numbers, known blockers, no cycles. With the
+ * tickets place's attached names, each ticket's tags go through `validateSkillTags`: a name outside
+ * that set is dropped, and the kept names come back on the ticket (issue #119).
+ */
+export function validateTickets(input: unknown, attachedSkillNames?: readonly string[]): TicketInput[] {
   if (!Array.isArray(input) || input.length === 0) throw new Error("tickets must be a non-empty array");
   const tickets = input.map((t: any, i) => {
     const number = Number(t?.number);
@@ -85,7 +263,15 @@ export function validateTickets(input: unknown): TicketInput[] {
     if (typeof t.title !== "string" || !t.title.trim()) throw new Error(`ticket ${number}: title is required`);
     if (typeof t.body !== "string" || !t.body.trim()) throw new Error(`ticket ${number}: body is required`);
     const blockedBy = Array.isArray(t.blockedBy) ? t.blockedBy.map(Number) : [];
-    return { number, title: t.title.trim(), body: t.body.trim(), blockedBy, trackerRef: typeof t.trackerRef === "string" ? t.trackerRef : undefined };
+    const tags = attachedSkillNames ? validateSkillTags(t.skills, attachedSkillNames).skills : undefined;
+    return {
+      number,
+      title: t.title.trim(),
+      body: t.body.trim(),
+      blockedBy,
+      trackerRef: typeof t.trackerRef === "string" ? t.trackerRef : undefined,
+      ...(tags ? { skills: tags } : {}),
+    };
   });
   const nums = new Set(tickets.map((t) => t.number));
   if (nums.size !== tickets.length) throw new Error("ticket numbers must be unique");
@@ -125,32 +311,86 @@ export const allDone = (tickets: Ticket[]) => tickets.length > 0 && tickets.ever
  */
 export const isSkillCall = (prompt: string) => /^\/skill:[\w-]+ \S/.test(prompt);
 
-export function grillPrompt(task: string) {
-  return `/skill:grill-with-docs ${task}
+/** One installed skill a prompt names: the name the agent types into the `Skill` tool, and the line that says what it is for. */
+export type PromptSkill = { name: string; description: string };
+
+/**
+ * The installed skills one run's prompt names (issue #118).
+ * `required` is the run's own list — the ticket's tags — and `advertised` is what the place carries
+ * without naming it for this run.
+ */
+export type RunSkills = { required?: readonly PromptSkill[]; advertised?: readonly PromptSkill[] };
+
+/** A skill line: `- <name>: <description>`, on one line whatever the description holds. */
+const skillLine = (s: PromptSkill) => `- ${s.name}: ${s.description.replace(/\s+/g, " ").trim() || "(no description)"}`;
+
+/**
+ * The prompt section that names the installed skills of the run's pipeline place, or "" when nothing
+ * is attached to it, so a run with nothing attached keeps its prompt exactly as it is today. A
+ * required skill is named with the instruction to load it before any code; an advertised one with the
+ * instruction to load it when it fits the work.
+ * `place` names the place this prompt serves: only the tickets place records Ticket skill tags, so only
+ * there does the section ask for a tag list per ticket (issue #119).
+ */
+export function skillsSection(skills?: RunSkills, place?: AttachPoint): string {
+  const required = [...new Map((skills?.required ?? []).map((s) => [s.name, s])).values()];
+  const advertised = (skills?.advertised ?? []).filter((s) => !required.some((r) => r.name === s.name));
+  if (!required.length && !advertised.length) return "";
+  const parts = ["## Skills attached to this pipeline place"];
+  if (required.length) parts.push("Required. Load each one with the Skill tool before you write any code:", ...required.map(skillLine));
+  if (advertised.length) parts.push("Advertised. Load the ones that fit this work with the Skill tool:", ...advertised.map(skillLine));
+  // The tickets step does the matching (issue #119): it proposes each ticket's tags from the list above,
+  // and the user approves them with the breakdown they already answer. Another place asks for none.
+  if (place === "tickets") parts.push(tagInstruction());
+  return parts.join("\n");
+}
+
+/** The tickets step's tag instruction: the names above are what a ticket may be tagged with. */
+function tagInstruction(): string {
+  return (
+    `Ticket skill tags: give every ticket a \`skills\` list of at most ${TICKET_SKILL_TAG_LIMIT} of the names above, each name exactly as written. ` +
+    "State every ticket's tags in the breakdown question you ask with ask_user, so the user approves or corrects them before any ticket runs. " +
+    "Call record_tickets with each ticket's `skills` list."
+  );
+}
+
+/**
+ * Add the place's skills section to a prompt that is already built. The held prompts (Split, a plain
+ * issue card's grill, a rework) go through this at the moment they are sent or released, never when
+ * they are stored: a card that waits for a setup run releases with the skills attached then.
+ */
+export function withSkills(prompt: string, skills?: RunSkills, place?: AttachPoint): string {
+  const section = skillsSection(skills, place);
+  return section ? `${prompt}\n\n${section}` : prompt;
+}
+
+export function grillPrompt(task: string, skills?: RunSkills) {
+  return withSkills(`/skill:${PIPELINE_SKILLS.grill} ${task}
 
 [pi-workbench pipeline: grill-with-docs → to-spec → to-tickets → implement → review]
 Ask your questions with the ask_user tool. Keep going until the user explicitly confirms, through ask_user, that we have reached a shared understanding.
 Commit any docs you wrote along the way (glossary, ADRs) to the current branch. Do not push.
-Then call save_grill_summary with a short summary of the decisions made, and stop. Do not write the spec, tickets or code yet.`;
+Then call save_grill_summary with a short summary of the decisions made, and stop. Do not write the spec, tickets or code yet.`, skills);
 }
 
 /**
  * A plain issue card's Grill: grill-with-docs on the issue's own words. The issue is the session's
  * origin, not its spec: the grill and the to-spec step that follows write the spec, and the PR closes
- * the issue through the session's issue ref.
+ * the issue through the session's issue ref. It is a held prompt, so its place's skills come from
+ * `withSkills` when the prompt is sent (issue #118).
  */
 export function grillIssuePrompt(issue: TicketSeed["spec"]) {
   const body = (issue.body ?? "").trim() || "(the issue has no description)";
   return grillPrompt(`Issue #${issue.number} (${issue.htmlUrl}): ${issue.title.trim()}\n\n${body}`);
 }
 
-export function specPrompt() {
+export function specPrompt(skills?: RunSkills) {
   // pi only expands "/skill:name" when an argument follows on the same line.
-  return `/skill:to-spec Write the spec from what we just agreed.
+  return withSkills(`/skill:${PIPELINE_SKILLS.spec} Write the spec from what we just agreed.
 
 [pi-workbench pipeline]
 Check the testing seams with the user using ask_user. After you publish the spec to the tracker,
-call save_spec with the full spec text and trackerRef (the file path or issue number/URL). Then stop.`;
+call save_spec with the full spec text and trackerRef (the file path or issue number/URL). Then stop.`, skills);
 }
 
 /**
@@ -168,23 +408,24 @@ Split a ticket that is too big, or that you are not sure fits, into smaller tick
 In the breakdown you present, give each ticket a size estimate in tokens against this budget.`;
 }
 
-export function ticketsPrompt(specRef: string | null, contextWindow: number) {
-  return `/skill:to-tickets ${specRef ? `Break the spec (${specRef}) into tickets.` : "Break the spec we just wrote into tickets."}
+export function ticketsPrompt(specRef: string | null, contextWindow: number, skills?: RunSkills) {
+  return withSkills(`/skill:${PIPELINE_SKILLS.tickets} ${specRef ? `Break the spec (${specRef}) into tickets.` : "Break the spec we just wrote into tickets."}
 
 [pi-workbench pipeline]
 ${ticketSizeRule(contextWindow)}
 Present the breakdown and ask the user to approve it with ask_user before publishing. After you publish the approved tickets to the tracker,
 call record_tickets with every ticket: its number, title, full body (what to build and acceptance criteria), blockedBy (ticket numbers) and trackerRef (the file path or issue number/URL).
-Then stop. Do not start implementing.`;
+Then stop. Do not start implementing.`, skills, "tickets");
 }
 
 /**
  * A plain issue is too big for one ticket: break it into tickets with to-tickets, publishing each
  * as a sub-issue of the issue with its blocking edges, so it becomes a spec issue that waits in
- * Issues for Solve all. The issue itself is not changed or closed.
+ * Issues for Solve all. The issue itself is not changed or closed. It is a held prompt, so its place's
+ * skills come from `withSkills` when the prompt is sent (issue #118).
  */
 export function splitPrompt(issueUrl: string, contextWindow: number) {
-  return `/skill:to-tickets Split the issue (${issueUrl}) into tickets: it is too big for one ticket.
+  return `/skill:${PIPELINE_SKILLS.tickets} Split the issue (${issueUrl}) into tickets: it is too big for one ticket.
 
 [pi-workbench pipeline: split of a plain issue]
 ${ticketSizeRule(contextWindow)}
@@ -271,11 +512,11 @@ function specSection(spec: string | null, specRef: string | null) {
   return `${specRef ? `(${specRef})\n\n` : ""}${spec}`;
 }
 
-export function implementPrompt(ticket: Ticket, spec: string | null, specRef: string | null, finished: Ticket[]) {
+export function implementPrompt(ticket: Ticket, spec: string | null, specRef: string | null, finished: Ticket[], skills?: RunSkills) {
   const notes = finished.length
     ? finished.map((t) => `- #${t.num} ${t.title}: ${t.note ?? "(no note)"}`).join("\n")
     : "- none yet";
-  return `/skill:tdd Ticket #${ticket.num}: ${ticket.title}${ticket.trackerRef ? ` (${ticket.trackerRef})` : ""}
+  return withSkills(`/skill:${PIPELINE_SKILLS.implement} Ticket #${ticket.num}: ${ticket.title}${ticket.trackerRef ? ` (${ticket.trackerRef})` : ""}
 
 ${ticket.body}
 
@@ -288,11 +529,11 @@ ${notes}
 [pi-workbench pipeline: you are the implementer for this one ticket]
 Build it test-first. Work only on this ticket, in this worktree, and commit to the current branch. Do not push.
 When it is complete, call finish_ticket with status "done" and a short note: what changed, and anything the next tickets should know.
-If you cannot complete it, call finish_ticket with status "blocked" and explain why.`;
+If you cannot complete it, call finish_ticket with status "blocked" and explain why.`, skills);
 }
 
-export function reviewPrompt(base: string, spec: string | null, specRef: string | null, tickets: Ticket[]) {
-  return `/skill:code-review Review every change on this branch since origin/${base}.
+export function reviewPrompt(base: string, spec: string | null, specRef: string | null, tickets: Ticket[], skills?: RunSkills) {
+  return withSkills(`/skill:${PIPELINE_SKILLS.review} Review every change on this branch since origin/${base}.
 
 ## Spec
 ${specSection(spec, specRef)}
@@ -302,25 +543,25 @@ ${tickets.map((t) => `- #${t.num} ${t.title}${t.trackerRef ? ` (${t.trackerRef})
 
 [pi-workbench pipeline: final review of the whole branch]
 Fix every issue the review raises, run the tests, and commit the fixes to the current branch. Do not push.
-Then call finish_review with a short note of what you found and fixed.`;
+Then call finish_review with a short note of what you found and fixed.`, skills);
 }
 
 /** The grill again, after a card is moved back to To do: grill → spec → tickets rework what is already published. */
-export function reworkPrompt(specRef: string | null) {
+export function reworkPrompt(specRef: string | null, skills?: RunSkills) {
   const spec = specRef ? `the spec (${specRef})` : "the spec we wrote";
-  return `/skill:grill-with-docs Rework the spec${specRef ? ` (${specRef})` : ""} and its tickets: the user moved this feature back to plan it again.
+  return withSkills(`/skill:${PIPELINE_SKILLS.grill} Rework the spec${specRef ? ` (${specRef})` : ""} and its tickets: the user moved this feature back to plan it again.
 
 [pi-workbench pipeline: rework of grill-with-docs → to-spec → to-tickets]
 Ask the user with the ask_user tool what must change. Keep going until the user explicitly confirms, through ask_user, that we have reached a shared understanding.
 Commit any docs you changed (glossary, ADRs) to the current branch. Do not push.
 Then call save_grill_summary with a short summary of the new decisions, and stop.
 In the to-spec and to-tickets steps that follow, do not publish new issues for this feature: update the existing spec issue, ${spec}, in place, and update its ticket issues.
-Close every ticket issue that the new breakdown drops. record_tickets lists the full new breakdown.`;
+Close every ticket issue that the new breakdown drops. record_tickets lists the full new breakdown.`, skills);
 }
 
 /** The merge run: Approve found a conflict, and `git merge origin/<base>` stopped on these files. */
 export function mergePrompt(base: string, reason: string, files: string[]) {
-  return `/skill:resolving-merge-conflicts Finish the merge of origin/${base} into this branch: ${reason}.
+  return `/skill:${PIPELINE_SKILLS.merge} Finish the merge of origin/${base} into this branch: ${reason}.
 
 ## Conflicted files
 ${files.map((f) => `- ${f}`).join("\n")}
@@ -377,7 +618,7 @@ const DIFF_LIMIT = 20_000;
 
 export function rescuePrompt(h: RescueHandoff) {
   const diff = h.diff.length > DIFF_LIMIT ? `${h.diff.slice(0, DIFF_LIMIT)}\n… (cut; run the git diff yourself for the rest)` : h.diff;
-  return `/skill:diagnosing-bugs Ticket #${h.ticket.num}: ${h.ticket.title} is stuck: the local model hit the stop rule. Find the cause; do not fix it.
+  return `/skill:${PIPELINE_SKILLS.rescue} Ticket #${h.ticket.num}: ${h.ticket.title} is stuck: the local model hit the stop rule. Find the cause; do not fix it.
 
 ## Ticket${h.ticket.trackerRef ? ` (${h.ticket.trackerRef})` : ""}
 ${h.ticket.body}
@@ -409,8 +650,8 @@ Then call finish_diagnosis: status "diagnosed" with one red-capable command and 
 }
 
 /** A fix run: the ticket's implement prompt, plus the rescue run's diagnosis. */
-export function fixPrompt(ticket: Ticket, spec: string | null, specRef: string | null, finished: Ticket[], d: Diagnosis) {
-  return `${implementPrompt(ticket, spec, specRef, finished)}
+export function fixPrompt(ticket: Ticket, spec: string | null, specRef: string | null, finished: Ticket[], d: Diagnosis, skills?: RunSkills) {
+  return `${implementPrompt(ticket, spec, specRef, finished, skills)}
 
 ## Diagnosis
 An earlier run on this ticket got stuck. A rescue run found the cause. Write the regression test first, with tdd: it must go red with this command, then fix the cause.
@@ -447,7 +688,7 @@ ${t.body}
 - Session files: stuck run ${r.sessionFiles.stuck ?? "(not found)"}; rescue run ${r.sessionFiles.rescue ?? "(not found)"}; fix run ${r.sessionFiles.fix ?? "(none)"}`;
     })
     .join("\n\n");
-  return `/skill:retro Review the ${rescued.length} rescued ticket${rescued.length === 1 ? "" : "s"} of this spec: why the local model got stuck, and what would stop it next time.
+  return `/skill:${PIPELINE_SKILLS.retro} Review the ${rescued.length} rescued ticket${rescued.length === 1 ? "" : "s"} of this spec: why the local model got stuck, and what would stop it next time.
 
 ## Rescued tickets
 ${tickets}

@@ -12,6 +12,7 @@ import type { AddressInfo } from "node:net";
  * - "ask" → ask_user with two options
  * - "list" → bash `ls`
  * - "load skill" / "load typesafe" → the extension's Skill tool for `tdd` / `typesafe-ai`
+ * - "LOADSKILL <name>" → the extension's Skill tool for that name
  * - "setup-matt-pocock-skills" → writes docs/agents/issue-tracker.md, then commits; a setup skill
  *   body that says SETUP_ASK asks the user a question first
  * - anything else → "Hello from the mock model."
@@ -107,16 +108,41 @@ function textOf(content: unknown): string {
   return "";
 }
 
+/** The names the prompt's attached-skill section lists: the installed skills of the run's pipeline place. */
+function attachedSkillNames(text: string): string[] {
+  const at = text.lastIndexOf("## Skills attached to this pipeline place");
+  if (at < 0) return [];
+  return [...text.slice(at).matchAll(/^- ([A-Za-z0-9._-]+):/gm)].map((m) => m[1]);
+}
+
+/** The names the prompt lists under "Required." — the ticket's own Ticket skill tags (issue #120). */
+function requiredSkillNames(text: string): string[] {
+  const at = text.lastIndexOf("## Skills attached to this pipeline place");
+  if (at < 0) return [];
+  const block = text.slice(at);
+  const from = block.indexOf("Required.");
+  if (from < 0) return [];
+  const to = block.indexOf("Advertised.", from);
+  const list = to < 0 ? block.slice(from) : block.slice(from, to);
+  return [...list.matchAll(/^- ([A-Za-z0-9._-]+):/gm)].map((m) => m[1]);
+}
+
 /**
  * The pipeline's phases, scripted by step (assistant replies since the last user message):
  * - grill-with-docs: ask to confirm → save_grill_summary → done
  * - to-spec: ask about seams → write the spec file → save_spec → done (trackerRef: the task's
  *   `SPEC_REF=<ref>`, or the spec file)
- * - to-tickets: ask to approve → write .scratch files → record_tickets (3 tickets) → done; a
- *   "Change it" answer ends the run with a question instead
- * - tdd (a ticket): commit a line for the ticket (and `git push`, a gated call, if the ticket says
- *   PUSHME) → finish_ticket (blocked if the ticket says BLOCKME) → done; a ticket that says ASKME
- *   (with SLOWME, or alone) asks the user a decision first and waits on that answer
+ * - to-tickets: ask to approve (with each ticket's Ticket skill tags, when its place has an attached
+ *   skill) → write .scratch files → record_tickets (3 tickets, each with its tags) → done; a
+ *   "Change it" answer ends the run with a question instead; a task that says BADTAG names a tag the
+ *   tickets step is not attached to, which the workbench drops and names back; a task that says MANYTAG
+ *   gives one ticket a fourth tag, which the workbench refuses, and the call goes again with a list a
+ *   ticket may carry; a task that says NOBLOCK leaves the third ticket unblocked, so every ticket of the
+ *   breakdown runs
+ * - tdd (a ticket): when its prompt names a required skill (the ticket's Ticket skill tags, issue #120),
+ *   load each one with the Skill tool first, then commit a line for the ticket (and `git push`, a gated
+ *   call, if the ticket says PUSHME) → finish_ticket (blocked if the ticket says BLOCKME) → done; a ticket
+ *   that says ASKME (with SLOWME, or alone) asks the user a decision first and waits on that answer
  * - code-review: commit a fix and `git push` it (a gated call) → finish_review → done
  * - resolving-merge-conflicts (the base's work.txt keeps every word an earlier test pushed, so the
  *   newest word is checked first): keep both sides of every conflicted hunk in work.txt and commit the
@@ -147,26 +173,61 @@ function pipelineScript(userText: string, step: number, lastResult: string, conv
     return { text: "Spec published." };
   }
   if (userText.includes('<skill name="to-tickets"')) {
-    if (step === 0) return { tool: { name: "ask_user", args: { question: "Approve: 1. Write hello.txt; 2. Add a test (blocked by 1); 3. Add docs (blocked by 1)?", options: ["Approve", "Change it"] } } };
-    if (step === 1 && /Change it/.test(lastResult)) return { text: "What should change in the breakdown?" };
-    if (step === 1) return { tool: { name: "bash", args: { command: "mkdir -p .scratch/greeting/issues && for n in 01 02 03; do echo ticket > .scratch/greeting/issues/$n.md; done && echo published" } } };
-    if (step === 2) {
+    // The tickets step asks for Ticket skill tags when the tickets place has an attached skill (issue #119):
+    // the names it may tag with are the ones its prompt lists.
+    const taggable = userText.includes("Ticket skill tags");
+    const names = attachedSkillNames(userText);
+    // BADTAG in the task: the record_tickets call names a skill the tickets step is not attached to, so
+    // the workbench drops that tag, names it back, and records the ticket with the valid tags only.
+    const badTag = conversation.includes("BADTAG");
+    // MANYTAG in the task: the first call gives one ticket more tags than a ticket may carry, which the
+    // workbench refuses, so the run calls record_tickets again with a list a ticket may carry.
+    const manyTags = conversation.includes("MANYTAG");
+    // NOBLOCK in the task: the third ticket carries no BLOCKME, so a test can run every ticket of the
+    // breakdown and read what the card does after the last one.
+    const noBlock = conversation.includes("NOBLOCK");
+    const tagsFor = (num: number, first = true): string[] => {
+      if (!taggable || num === 3) return [];
+      const tags = [names[num - 1]].filter(Boolean);
+      if (num === 1 && badTag) tags.push("skill-the-library-does-not-hold");
+      if (num === 1 && manyTags && first) tags.push("one-more", "and-another", "skill-the-library-does-not-hold");
+      return tags;
+    };
+    // The breakdown states the tags the tickets step can actually honour, the ones the user approves.
+    const tagWords = (num: number) => {
+      if (!taggable) return "";
+      const tags = tagsFor(num, false).filter((n) => names.includes(n));
+      return tags.length ? ` (tags: ${tags.join(", ")})` : " (no tags)";
+    };
+    const recordArgs = (first: boolean) => ({
+      tickets: [
+        { number: 1, title: "Write hello.txt", body: "Create hello.txt containing Hello. Push it. PUSHME", trackerRef: ".scratch/greeting/issues/01.md", ...(tagsFor(1, first).length ? { skills: tagsFor(1, first) } : {}) },
+        { number: 2, title: "Add a test", body: "Test that hello.txt says Hello.", blockedBy: [1], trackerRef: ".scratch/greeting/issues/02.md", ...(tagsFor(2, first).length ? { skills: tagsFor(2, first) } : {}) },
+        { number: 3, title: "Add docs", body: noBlock ? "Document it." : "Document it. BLOCKME", blockedBy: [1], trackerRef: ".scratch/greeting/issues/03.md" },
+      ],
+    });
+    if (step === 0)
       return {
         tool: {
-          name: "record_tickets",
+          name: "ask_user",
           args: {
-            tickets: [
-              { number: 1, title: "Write hello.txt", body: "Create hello.txt containing Hello. Push it. PUSHME", trackerRef: ".scratch/greeting/issues/01.md" },
-              { number: 2, title: "Add a test", body: "Test that hello.txt says Hello.", blockedBy: [1], trackerRef: ".scratch/greeting/issues/02.md" },
-              { number: 3, title: "Add docs", body: "Document it. BLOCKME", blockedBy: [1], trackerRef: ".scratch/greeting/issues/03.md" },
-            ],
+            question: `Approve: 1. Write hello.txt${tagWords(1)}; 2. Add a test (blocked by 1)${tagWords(2)}; 3. Add docs (blocked by 1)${tagWords(3)}?`,
+            options: ["Approve", "Change it"],
           },
         },
       };
-    }
+    if (step === 1 && /Change it/.test(lastResult)) return { text: "What should change in the breakdown?" };
+    if (step === 1) return { tool: { name: "bash", args: { command: "mkdir -p .scratch/greeting/issues && for n in 01 02 03; do echo ticket > .scratch/greeting/issues/$n.md; done && echo published" } } };
+    if (step === 2) return { tool: { name: "record_tickets", args: recordArgs(true) } };
+    if (step === 3 && lastResult.includes("Not recorded")) return { tool: { name: "record_tickets", args: recordArgs(false) } };
     return { text: "Published 3 tickets." };
   }
   if (userText.includes('<skill name="code-review"')) {
+    // REVIEWASK in the spec: the review asks the user one thing before it works, so its run waits on
+    // that answer and can be read while it is live.
+    if (userText.includes("REVIEWASK") && step === 0) return { tool: { name: "ask_user", args: { question: "Review the whole branch, or only the ticket commits?", options: ["The whole branch", "Only the ticket commits"] } } };
+    if (userText.includes("REVIEWASK") && step === 1) return { tool: { name: "bash", args: { command: 'echo reviewed >> work.txt && git add -A && git commit -qm "Fix review findings" && git push -q origin HEAD && echo fixed' } } };
+    if (userText.includes("REVIEWASK") && step === 2) return { tool: { name: "finish_review", args: { note: "Asked first, then fixed one naming issue" } } };
     // LONGREVIEW in the spec: three checks between the commit and finish_review.
     if (userText.includes("LONGREVIEW") && step >= 1 && step <= 3) return { tool: { name: "bash", args: { command: `echo check ${step}` } } };
     if (userText.includes("LONGREVIEW") && step === 4) return { tool: { name: "finish_review", args: { note: "Checked three times" } } };
@@ -193,19 +254,24 @@ function pipelineScript(userText: string, step: number, lastResult: string, conv
   if (userText.includes('<skill name="retro"')) return retroScript(userText, step);
   if (userText.includes('<skill name="tdd"')) {
     const num = /Ticket #(\d+)/.exec(userText)?.[1] ?? "?";
+    // A tagged ticket's prompt names its tags as required (issue #120): the run loads each of them with
+    // the Skill tool, before its first line of code. The ticket's other steps shift by that one step.
+    const required = requiredSkillNames(userText);
+    const load = required.length ? 1 : 0;
+    if (step === 0 && load) return { tools: required.map((name) => ({ name: "Skill", args: { skill: name } })) };
     // A fix run carries the rescue's diagnosis: the stuck-ticket words no longer apply.
     const fixing = userText.includes("## Diagnosis");
-    if (fixing && userText.includes("FIXBLOCKME")) return step === 0 ? { tool: { name: "finish_ticket", args: { status: "blocked", note: "The diagnosis did not help" } } } : { text: "Blocked." };
+    if (fixing && userText.includes("FIXBLOCKME")) return step === load ? { tool: { name: "finish_ticket", args: { status: "blocked", note: "The diagnosis did not help" } } } : { text: "Blocked." };
     if (fixing && userText.includes("FIXLOOPME")) return { tool: { name: "bash", args: { command: "echo fixing; exit 1" } } };
-    const stuck = fixing ? undefined : stuckTicket(userText, step);
+    const stuck = fixing ? undefined : stuckTicket(userText, step - load);
     if (stuck) return stuck;
     // ASKME alone (not with SLOWME, which stuckTicket answers first): the ticket asks the user a
     // decision before it works, so the run waits on that answer.
     const asks = !fixing && userText.includes("ASKME");
-    if (asks && step === 0) return { tool: { name: "ask_user", args: { question: "Which file does this ticket change?", options: ["work.txt", "notes.txt"] } } };
+    if (asks && step === load) return { tool: { name: "ask_user", args: { question: "Which file does this ticket change?", options: ["work.txt", "notes.txt"] } } };
     const push = userText.includes("PUSHME") ? " && git push -q origin HEAD" : "";
-    if (step === (asks ? 1 : 0)) return { tool: { name: "bash", args: { command: `echo "ticket ${num}" >> work.txt && git add -A && git commit -qm "Ticket ${num}"${push} && echo committed` } } };
-    if (step === (asks ? 2 : 1)) {
+    if (step === (asks ? 1 : 0) + load) return { tool: { name: "bash", args: { command: `echo "ticket ${num}" >> work.txt && git add -A && git commit -qm "Ticket ${num}"${push} && echo committed` } } };
+    if (step === (asks ? 2 : 1) + load) {
       const blocked = userText.includes("BLOCKME");
       return { tool: { name: "finish_ticket", args: { status: blocked ? "blocked" : "done", note: blocked ? "Needs a docs folder decision" : `Ticket ${num} appended to work.txt` } } };
     }
@@ -336,6 +402,9 @@ function script(messages: { role: string; content: unknown }[]): Reply {
     return { tool: { name: "ask_user", args: { question: "Which database should I use?", options: ["SQLite (Recommended)", "Postgres"] } } };
   }
   if (/\bload typesafe\b/i.test(userText)) return { tool: { name: "Skill", args: { skill: "typesafe-ai" } } };
+  // "LOADSKILL <name>" loads that skill by name, whatever it is (issue #118): the name the prompt supplied.
+  const named = /\bLOADSKILL ([\w-]+)/.exec(userText);
+  if (named) return { tool: { name: "Skill", args: { skill: named[1] } } };
   if (/\bload skill\b/i.test(userText)) return { tool: { name: "Skill", args: { skill: "tdd" } } };
   if (/\blist\b/i.test(userText)) return { tool: { name: "bash", args: { command: "ls" } } };
   return { text: "Hello from the mock model. Everything looks fine." };

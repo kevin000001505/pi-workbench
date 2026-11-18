@@ -92,6 +92,40 @@ _Avoid_: setup run (a setup run is the setup step inside any session, not the se
 The setup step a session runs first, on a repo its recorded setup state does not hold as set up. The record decides it, not the worktree, so no repo runs the setup twice.
 _Avoid_: setup session (that is the one session whose whole job is this step, and whose commit lands on the default branch)
 
+### Skills
+
+**Skill**:
+A named, described set of instructions the agent loads only when the task fits it. Three kinds: an **image skill**, a **repo skill**, and an **installed skill**.
+_Avoid_: plugin, prompt (a prompt is what the workbench sends; a skill is what the agent loads), tool (a tool is something the agent executes)
+
+**Image skill**:
+A skill that ships with the workbench and reaches every run of every session.
+_Avoid_: global skill, built-in skill (the TypeSafe skill ships with the workbench but reaches only the sessions that pick it)
+
+**Repo skill**:
+A skill that lives in a tracked repo and reaches that repo's sessions.
+_Avoid_: project skill, local skill
+
+**Installed skill**:
+A skill the workbench took from a git source you named. It reaches only the pipeline places it is **attached** to.
+_Avoid_: third-party skill, external skill, custom skill
+
+**Skill source**:
+One git source you added to the workbench: its URL, the ref you named, the subpath inside it, and the commit it pinned. It carries one or more installed skills, and removing the source removes them.
+_Avoid_: skill install (say **Add skill** for the action), skill repo
+
+**Add skill**:
+Your action that brings a git source's skills into the workbench. The workbench clones it shallowly at the ref you named, records the commit, lists every skill it found, and refuses the whole add when one skill name collides with a pipeline skill name.
+_Avoid_: install (as a noun), import, upload
+
+**Attach**:
+To wire an installed skill into one pipeline place: grill, spec, tickets, implement, review, or a direct session. The workbench gives the skill to the runs of the places you attached it to and names it in their prompts. An attached skill is available to those runs; a **ticket skill tag** makes it required for one ticket.
+_Avoid_: enable (enabling is per place, not global), bind, hook
+
+**Ticket skill tag**:
+The mark on a **Ticket** that names an installed skill its run must load. The agent proposes the tags at the tickets step, you approve them with the breakdown, and you can change them in the card detail before the run. A ticket carries at most three.
+_Avoid_: skill label, skill binding, requirement
+
 ### Board
 
 **Board**:
@@ -178,3 +212,6 @@ _Avoid_: sync, poll, catch up
 - Dragging a **Card** back to **Issues** stops its run; dragging it to **Doing** again resumes the same session, and finished tickets stay finished
 - Dragging a **Card** back to **To do** stops its run and opens the grill again, so the spec and tickets can change
 - A merge conflict at **Approve** gets resolved on the branch, and the **Card** stays in **Review** for a second **Approve**
+- An **Installed skill** reaches a run only through **Attach**: an attached skill is available to that run, and a **Ticket skill tag** makes that run load it
+- The tickets step proposes each **Ticket**'s **Ticket skill tags** from the skills attached to the tickets place, and you approve the tags with the breakdown; a card that never ran the tickets step gets its attached skills advertised instead
+- A **Skill source** carries its installed skills, and removing it clears every **Ticket skill tag** that named one of them

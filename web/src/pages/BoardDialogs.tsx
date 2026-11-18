@@ -1,8 +1,8 @@
-import { useState } from "react";
-import { type Card, COLUMNS } from "../../../shared/board.ts";
+import { useEffect, useState } from "react";
+import { type Card, canEditTicketTags, COLUMNS } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
-import type { SessionSummary } from "../types.ts";
+import type { SessionSummary, SkillSource } from "../types.ts";
 
 // The board's dialogs and its search and filter words: New card (n) and Search (/ or ⌘K).
 
@@ -86,6 +86,155 @@ export function NewCard({ repoId, onCreated, onClose }: { repoId: string; onCrea
         </div>
       </form>
     </>
+  );
+}
+
+/**
+ * Ticket skills (issue #121): the checkbox list that sets one ticket's Ticket skill tags from its card.
+ * The names a ticket may carry are the skill library's installed skills that are switched on, so an
+ * off skill is offered only when the ticket already carries it: saving never drops a tag behind the
+ * user's back. Save sends the chosen names to the ticket's route, which answers with the stored ticket
+ * and names back every name it would drop. The cap on a ticket's tags is the server's: a refused save
+ * states its reason.
+ */
+export function TicketTags({
+  sessionId,
+  ticket,
+  carried,
+  onClose,
+  onSaved,
+}: {
+  sessionId: string;
+  ticket: { num: number; title: string };
+  carried: string[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { toast } = useStore();
+  const [library, setLibrary] = useState<{ name: string; description: string; enabled: boolean }[] | null>(null);
+  const [chosen, setChosen] = useState<string[]>(carried);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    api
+      .get<SkillSource[]>("/api/skill-sources")
+      .then((sources) => {
+        if (!live) return;
+        const byName = new Map<string, { name: string; description: string; enabled: boolean }>();
+        for (const source of sources)
+          for (const s of source.skills) if (!byName.has(s.name)) byName.set(s.name, { name: s.name, description: s.description, enabled: s.enabled });
+        setLibrary([...byName.values()].sort((a, b) => a.name.localeCompare(b.name)));
+      })
+      .catch(() => live && setLibrary([]));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const skills = library ?? [];
+  // A tag the library no longer holds has no checkbox: saving drops it, and the dialog says so.
+  const stale = carried.filter((n) => !skills.some((s) => s.name === n));
+  const toggle = (name: string, on: boolean) => setChosen((cur) => (on ? [...cur.filter((n) => n !== name), name] : cur.filter((n) => n !== name)));
+
+  const save = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const r = await api.patch<{ dropped: string[] }>(`/api/sessions/${sessionId}/tickets/${ticket.num}/skills`, { skills: chosen });
+      // The route kept the names the library holds and named back the rest.
+      if (r.dropped.length > 0) toast(`Not tagged: ${r.dropped.join(", ")} — a ticket's tags are the skills installed and switched on.`, "warning");
+      onSaved();
+    } catch (e) {
+      toast((e as Error).message, "error");
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="kz-modal-backdrop" onClick={onClose} />
+      <form
+        className="kz-modal"
+        role="dialog"
+        aria-label="Ticket skills"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void save();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.stopPropagation();
+            onClose();
+          } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            void save();
+          }
+        }}
+      >
+        <h2>Ticket skills</h2>
+        <div className="small muted">
+          #{ticket.num} {ticket.title}: the skills its runs must load.
+        </div>
+        {library === null && <div className="note">Loading the skills…</div>}
+        {library !== null && skills.length === 0 && <div className="note">No skill is installed. Add one on the Skills page.</div>}
+        <div className="kz-tag-list">
+          {skills.map((s) => {
+            // A switched-off skill is offered only when the ticket already carries it.
+            const blocked = !s.enabled && !carried.includes(s.name);
+            return (
+              <label key={s.name} className="row gap small" title={s.description || undefined}>
+                <input type="checkbox" checked={chosen.includes(s.name)} disabled={saving || blocked} onChange={(e) => toggle(s.name, e.target.checked)} />
+                <span className="mono">{s.name}</span>
+                {blocked && <span className="muted small">switched off</span>}
+              </label>
+            );
+          })}
+        </div>
+        {stale.length > 0 && <div className="note">The ticket carries a tag the library no longer holds: {stale.join(", ")}. Save drops it.</div>}
+        <div className="actions">
+          <button type="button" className="kz-btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="kz-btn primary" disabled={saving || library === null}>
+            {saving ? "Saving…" : "Save tags"}
+          </button>
+        </div>
+      </form>
+    </>
+  );
+}
+
+/**
+ * A ticket's Ticket skill tags and the control that sets them (issue #121): one chip per tag name,
+ * then **Skills** while the card can edit its tags (shared/board.ts canEditTicketTags). The board's
+ * ticket sub-card and the card detail's ticket row both use it, so both state the tags the same way.
+ */
+export function TicketSkills({ tags, session, busy, onEdit }: { tags: string[]; session: { mode: string; phase: string }; busy: boolean; onEdit: () => void }) {
+  const editable = canEditTicketTags(session);
+  if (tags.length === 0 && !editable) return null;
+  return (
+    <span className="kz-skilltags">
+      {tags.map((n) => (
+        <span key={n} className="kz-skilltag" title="A skill this ticket's runs must load">
+          {n}
+        </span>
+      ))}
+      {editable && (
+        <button
+          className="kz-btn"
+          disabled={busy}
+          title="Choose the skills this ticket's runs must load"
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            onEdit();
+          }}
+        >
+          Skills
+        </button>
+      )}
+    </span>
   );
 }
 

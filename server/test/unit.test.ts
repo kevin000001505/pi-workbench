@@ -10,6 +10,7 @@ import { startMockLlm } from "./mock-llm.ts";
 import { startMockReviewer } from "./mock-reviewer.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
 import { openDb } from "../src/db.ts";
+import { recordSkillSource } from "../src/db.ts";
 import { redact } from "../src/git.ts";
 import { checkRequestOrigin, Router } from "../src/http.ts";
 import { needsSetupRun, recordedSetupState, requireTrackedRepo } from "../src/repos.ts";
@@ -18,6 +19,7 @@ import { ISSUE_TRACKER_DOC } from "./remote-repo.ts";
 import { GLOBAL_SCOPE, assertUserScope, SecretStore, userSecrets } from "../src/secrets.ts";
 import { DEFAULT_RULES, getApprovalSettings, getPipelineSettings, LLM_KEY_ENV, saveApprovalSettings, saveModelSettings, savePipelineSettings } from "../src/settings.ts";
 import { listSkills, parseFrontmatter } from "../src/skills.ts";
+import { installedSkill, listAttachedSkills, setSkillSettings } from "../src/skill-library.ts";
 
 const tmpDb = () => openDb(path.join(fs.mkdtempSync(path.join(os.tmpdir(), "wb-")), "t.db"));
 
@@ -325,8 +327,8 @@ test("unclaimed cards: plain and ticketed spec issues both sit in Issues; a sub-
   const sessions = [{ mode: "pipeline", phase: "ready", issueRef: "me/app#8", specRef: null }];
   const cards = unclaimedCards(issues, claimRefs(sessions), "me/app");
   assert.deepEqual(cards, [
-    { id: "issue:1", title: "A plain issue", column: "issues", tickets: { done: 0, total: 0 }, attention: null, status: null, pr: null, specRef: "https://github.com/me/app/issues/1", doneAt: null, specCard: false, subs: null },
-    { id: "issue:5", title: "A spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, status: null, pr: null, specRef: "https://github.com/me/app/issues/5", doneAt: null, specCard: true, subs: null },
+    { id: "issue:1", title: "A plain issue", column: "issues", tickets: { done: 0, total: 0 }, attention: null, status: null, pr: null, specRef: "https://github.com/me/app/issues/1", doneAt: null, specCard: false, ticketTags: [], subs: null },
+    { id: "issue:5", title: "A spec", column: "issues", tickets: { done: 0, total: 2 }, attention: null, status: null, pr: null, specRef: "https://github.com/me/app/issues/5", doneAt: null, specCard: true, ticketTags: [], subs: null },
   ]);
   // On the board, the plain card sits in Issues, before the spec's Issues card.
   assert.deepEqual(boardCards([], cards).map((c) => c.id), ["issue:1", "issue:5"]);
@@ -573,7 +575,7 @@ test("columnCounts: a column states its cards and the attention in them, and a c
   const { columnCounts } = await import("../../shared/board.ts");
   let n = 0;
   const card = (column: string, status: string | null) =>
-    ({ id: `${column}-${++n}`, title: "T", column, tickets: { done: 0, total: 0 }, attention: null, status, pr: null, specRef: null, doneAt: null, specCard: false, subs: null }) as any;
+    ({ id: `${column}-${++n}`, title: "T", column, tickets: { done: 0, total: 0 }, attention: null, status, pr: null, specRef: null, doneAt: null, specCard: false, ticketTags: [], subs: null }) as any;
   const counts = columnCounts([
     card("todo", null),
     card("issues", "waiting"),
@@ -639,7 +641,7 @@ test("a direct card follows its PR: Review in phase pr, Done in phase done, Doin
     specRef: null,
     doneAt: null,
     specCard: false,
-    subs: null,
+    ticketTags: [], subs: null,
   });
   assert.equal(cardOf(session("direct", "setup"))?.column, "doing", "a direct session in setup is in Doing, not To do");
   // A direct card with a PR but not in phase `pr` (a session of an older database) is still in Doing.
@@ -654,6 +656,67 @@ test("a direct card follows its PR: Review in phase pr, Done in phase done, Doin
   assert.equal(cardOf(session("direct", "done", { doneAt: 1000 }))?.doneAt, 1000);
   // A pipeline card keeps its phase's column through cardOf as well.
   assert.equal(cardOf(session("pipeline", "implement"))?.column, "doing");
+});
+
+test("a card carries its tickets' Ticket skill tag names: one entry per tagged ticket, in ticket order (issue #121)", async () => {
+  const { cardOf } = await import("../../shared/board.ts");
+  const card = cardOf({
+    id: "s1",
+    title: "T",
+    mode: "pipeline",
+    phase: "ready",
+    attention: null,
+    prNumber: null,
+    prUrl: null,
+    specRef: "https://github.com/me/app/issues/9",
+    tickets: [
+      { num: 1, status: "ready", trackerRef: "https://github.com/me/app/issues/10", skillTags: ["design-rules", "a11y-check"] },
+      { num: 2, status: "done", trackerRef: "https://github.com/me/app/issues/11", skillTags: [] },
+      { num: 3, status: "ready", trackerRef: null },
+    ],
+  } as any)!;
+  // Only the ticket that carries tags has an entry, so a ticket sub-card states a chip only for it.
+  assert.deepEqual(card.ticketTags, [{ num: 1, names: ["design-rules", "a11y-check"] }], "the names keep the ticket's own order");
+  // Nothing else about the card changes: the tags are beside the ticket list, not instead of it.
+  assert.deepEqual(card.tickets, { done: 1, total: 3 });
+  assert.equal(card.column, "issues");
+  assert.equal(card.specCard, true);
+
+  // A card whose tickets carry no tags, or name no tag at all, carries no entry.
+  const noTickets = { id: "s3", title: "T", mode: "pipeline", phase: "ready", attention: null, prNumber: null, prUrl: null, specRef: null, tickets: [] } as any;
+  assert.deepEqual(cardOf(noTickets)!.ticketTags, []);
+  assert.deepEqual(
+    cardOf({
+      id: "s2",
+      title: "T",
+      mode: "pipeline",
+      phase: "ready",
+      attention: null,
+      prNumber: null,
+      prUrl: null,
+      specRef: null,
+      tickets: [{ num: 1, status: "ready", trackerRef: null, skillTags: [] }],
+    } as any)!.ticketTags,
+    [],
+  );
+});
+
+test("skillTagNames states each stored tag once, and a tag whose skill is gone names nothing (issue #121)", async () => {
+  const { skillTagNames } = await import("../src/pipeline.ts");
+  const names = (id: string) => ({ "s-design": "design-rules", "s-a11y": "a11y-check" })[id] ?? null;
+  assert.deepEqual(skillTagNames(["s-design", "s-a11y"], names), ["design-rules", "a11y-check"]);
+  assert.deepEqual(skillTagNames(["s-design", "s-design"], names), ["design-rules"], "each name is stated once");
+  assert.deepEqual(skillTagNames(["s-design", "s-gone"], names), ["design-rules"], "a tag the library no longer holds names nothing");
+  assert.deepEqual(skillTagNames([], names), []);
+});
+
+test("a ticket's tags are editable on a pipeline card that is not Done, and on no other card (issue #121)", async () => {
+  const { canEditTicketTags } = await import("../../shared/board.ts");
+  assert.equal(canEditTicketTags({ mode: "pipeline", phase: "ready" }), true, "the card sits in Issues, before the run");
+  assert.equal(canEditTicketTags({ mode: "pipeline", phase: "implement" }), true, "the next ticket run reads the tags");
+  assert.equal(canEditTicketTags({ mode: "pipeline", phase: "pr" }), true, "the card waits in Review for Approve");
+  assert.equal(canEditTicketTags({ mode: "pipeline", phase: "done" }), false, "a Done card states its tags and sets no new one");
+  assert.equal(canEditTicketTags({ mode: "direct", phase: "direct" }), false, "a direct session has no ticket to tag");
 });
 
 test("a card's whole-card actions follow its session: Approve with the PR, Abandon until Done", async () => {
@@ -755,7 +818,7 @@ test("done cards: a merged card and the issues it closed sit in Done, newest fir
     specRef: "https://github.com/me/app/issues/5",
     doneAt: 2000,
     specCard: false,
-    subs: null,
+    ticketTags: [], subs: null,
   });
   // In Done, the newest card sits first: the issue card, then the session card, then the older issue card.
   assert.deepEqual(boardCards([doneSession("s1", 1000)], issues).map((c) => c.id), ["issue:5", "s1", "issue:7"]);
@@ -1545,4 +1608,338 @@ test("validateDiagnosis: a diagnosis needs a command and a file:line causal chai
   assert.throws(() => validateDiagnosis({ status: "diagnosed", command: "npm test", chain: [], note: "" }), /causal chain/);
   assert.throws(() => validateDiagnosis({ status: "diagnosed", command: "npm test", chain: ["a.ts:1 x", "somewhere in b.ts"], note: "" }), /file:line \(got "somewhere in b.ts"\)/);
   assert.equal(validateDiagnosis({ status: "diagnosed", command: "c", chain: ["a.ts:1"], harness: "file x", note: "" }).harness, "file x");
+});
+
+test("the pipeline skill names are one list: every prompt calls exactly the names the install check refuses", async () => {
+  const p = await import("../src/pipeline.ts");
+  const { SETUP_PROMPT } = await import("../src/sessions.ts");
+  const ticket: any = { num: 1, title: "t", body: "b", blockedBy: [], trackerRef: null, status: "ready", note: null, runId: null, rescueState: null, rescueRunId: null, fixRunId: null };
+  const prompts = [
+    SETUP_PROMPT,
+    p.grillPrompt("the task"),
+    p.grillIssuePrompt({ number: 1, title: "i", body: null, htmlUrl: "u", hasParent: false }),
+    p.specPrompt(),
+    p.ticketsPrompt(null, 4096),
+    p.splitPrompt("https://x/1", 4096),
+    p.implementPrompt(ticket, null, null, []),
+    p.reviewPrompt("main", null, null, [ticket]),
+    p.reworkPrompt(null),
+    p.mergePrompt("main", "git merge stopped", ["a.ts"]),
+    p.rescuePrompt({ ticket, spec: null, specRef: null, stopReason: "s", startCommit: null, diff: "", toolErrors: [], sessionFile: null }),
+    p.fixPrompt(ticket, null, null, [], { status: "diagnosed", command: "npm test", chain: ["a.ts:1"], note: "" }),
+    p.retroPrompt([], { pipeline: {}, model: {} }),
+  ];
+  const named = new Set(prompts.flatMap((text) => [...text.matchAll(/^\/skill:([\w-]+)/gm)].map((m) => m[1])));
+  assert.deepEqual(
+    [...named].sort(),
+    [...p.PIPELINE_SKILL_NAMES].sort(),
+    "a prompt that calls a skill outside PIPELINE_SKILL_NAMES, or a listed name no prompt uses, breaks the install check",
+  );
+});
+
+test("the library keeps each installed skill switched on and attached to nothing, and answers with both", () => {
+  const db = tmpDb();
+  recordSkillSource(
+    db,
+    { id: "src-1", url: "file:///r.git", ref: null, subpath: null, commit_sha: "c".repeat(40), size_bytes: 1, created_at: 0, updated_at: 0 },
+    [
+      { id: "sk-impl", source_id: "src-1", name: "implement-style", description: "d", dir: "/install/implement-style", files: "[]" },
+      { id: "sk-off", source_id: "src-1", name: "switched-off", description: "d", dir: "/install/switched-off", files: "[]" },
+    ],
+  );
+  assert.deepEqual(listAttachedSkills(db, "implement"), [], "a new installed skill reaches no run");
+
+  setSkillSettings(db, "src-1", "sk-impl", { attach: ["implement", "review"] });
+  setSkillSettings(db, "src-1", "sk-off", { attach: ["implement"], enabled: false });
+  assert.deepEqual(listAttachedSkills(db, "implement").map((s) => s.name), ["implement-style"], "only a switched-on skill reaches the run");
+  assert.deepEqual(listAttachedSkills(db, "review").map((s) => s.name), ["implement-style"], "and it reaches every place it is attached to");
+  assert.deepEqual(listAttachedSkills(db, "grill"), [], "a place it is not attached to gets nothing");
+});
+
+test("an installed skill setting is validated, and the attach points are stored in one order", () => {
+  const db = tmpDb();
+  recordSkillSource(
+    db,
+    { id: "src-1", url: "file:///r.git", ref: null, subpath: null, commit_sha: "c".repeat(40), size_bytes: 1, created_at: 0, updated_at: 0 },
+    [{ id: "sk-1", source_id: "src-1", name: "style", description: "d", dir: "/install/style", files: "[]" }],
+  );
+  const refuse = (body: any, pattern: RegExp, what: string) => assert.throws(() => setSkillSettings(db, "src-1", "sk-1", body), pattern, what);
+
+  // The attach points are stored in the order the pipeline names them, whatever order the body came in.
+  setSkillSettings(db, "src-1", "sk-1", { attach: ["direct", "review", "implement", "implement"] });
+  assert.deepEqual(installedSkill(db, "sk-1")!.attach, ["implement", "review", "direct"], "one order, no repeats");
+  // The switch alone keeps the attach points: switching off is not un-attaching.
+  setSkillSettings(db, "src-1", "sk-1", { enabled: false });
+  assert.deepEqual(installedSkill(db, "sk-1")!.attach, ["implement", "review", "direct"]);
+  assert.equal(installedSkill(db, "sk-1")!.enabled, false);
+  setSkillSettings(db, "src-1", "sk-1", { enabled: true, attach: [] });
+  assert.deepEqual(installedSkill(db, "sk-1")!.attach, [], "no attach point: the skill reaches no run");
+  assert.equal(installedSkill(db, "sk-1")!.enabled, true);
+
+  refuse({ attach: ["done"] }, /attach point/, "a place outside the six is refused, not ignored");
+  refuse({ attach: ["implement", "setup"] }, /attach point/, "neither is a run the skill may attach to");
+  refuse({ attach: "implement" }, /attach point/, "a bare string is not a list of places");
+  refuse({ attach: [7] }, /attach point/, "nor is a number");
+  refuse({ enabled: "true" }, /true or false/, "the switch is a boolean, like the TypeSafe choice");
+  refuse({}, /Nothing to change/, "a body that changes nothing is refused");
+  assert.throws(() => setSkillSettings(db, "src-1", "sk-nope", { enabled: false }), /No installed skill/, "an unknown skill is refused");
+  assert.throws(() => setSkillSettings(db, "src-other", "sk-1", { enabled: false }), /No installed skill/, "a skill is set under its own source only");
+  assert.deepEqual(listAttachedSkills(db, "implement"), [], "and a refused setting stored nothing");
+});
+
+test("the attach table: one function maps a run to the pipeline place it serves", async () => {
+  const p = await import("../src/pipeline.ts");
+  assert.deepEqual([...p.ATTACH_POINTS], ["grill", "spec", "tickets", "implement", "review", "direct"], "the pipeline places an installed skill can attach to");
+
+  const run = (over: Partial<p.RunFacts>): p.RunFacts => ({ mode: "pipeline", phase: "implement", ticketRun: null, specialRun: null, ...over });
+
+  // A ticket run, its fix run, and a solo ticket run are all the implement place.
+  assert.equal(p.attachPointOf(run({ ticketRun: "ticket" })), "implement");
+  assert.equal(p.attachPointOf(run({ ticketRun: "fix" })), "implement");
+  // A split card's held prompt and the tickets step are the tickets place; a card paused in Issues waits on the same place.
+  assert.equal(p.attachPointOf(run({ phase: "tickets" })), "tickets");
+  assert.equal(p.attachPointOf(run({ phase: "ready" })), "tickets");
+  // The plan steps, and the one review run.
+  assert.equal(p.attachPointOf(run({ phase: "grill" })), "grill");
+  assert.equal(p.attachPointOf(run({ phase: "spec" })), "spec");
+  assert.equal(p.attachPointOf(run({ specialRun: "review" })), "review");
+  assert.equal(p.attachPointOf(run({ phase: "implement" })), "implement", "a reply on a card whose ticket run ended reads as that run");
+  // The runs with a narrow job of their own get nothing.
+  assert.equal(p.attachPointOf(run({ phase: "setup" })), null, "the agent-skills setup run");
+  assert.equal(p.attachPointOf(run({ ticketRun: "rescue" })), null, "a rescue run runs under the Reviewer model, not as a pipeline run");
+  assert.equal(p.attachPointOf(run({ specialRun: "retro" })), null, "the retro run reads the run logs, it writes no code");
+  assert.equal(p.attachPointOf(run({ specialRun: "merge" })), null, "the merge run only settles the merge");
+  assert.equal(p.attachPointOf(run({ phase: "pr" })), null, "a card in Review has no step running");
+  assert.equal(p.attachPointOf(run({ phase: "done" })), null, "a Done card has no run at all");
+  // A direct session's runs are all the direct place, whatever phase its card sits in.
+  const direct = (phase: string) => run({ mode: "direct", phase: phase as p.RunFacts["phase"] });
+  assert.equal(p.attachPointOf(direct("direct")), "direct");
+  assert.equal(p.attachPointOf(direct("review")), "direct");
+  assert.equal(p.attachPointOf(direct("pr")), "direct");
+  assert.equal(p.attachPointOf(direct("setup")), null, "its agent-skills setup run keeps its narrow job");
+
+  // The names the library stores are the attach points, so a setting the table does not know is refused.
+  for (const place of p.ATTACH_POINTS) assert.ok(p.isAttachPoint(place), place);
+  for (const place of ["done", "setup", "rescue", "", "TDD", null, undefined, 7]) assert.ok(!p.isAttachPoint(place), String(place));
+});
+
+test("an attached place's prompt names its skills by name and description and tells the agent to load them", async () => {
+  const p = await import("../src/pipeline.ts");
+  const prompt = p.grillPrompt("add a greeting", { advertised: [{ name: "design-rules", description: "The workbench UI design rules." }] });
+  assert.match(prompt, /^\/skill:grill-with-docs add a greeting/, "the phase's own skill call is still the first line");
+  assert.match(prompt, /## Skills attached to this pipeline place/);
+  assert.ok(prompt.includes("- design-rules: The workbench UI design rules."), "names the skill with its description");
+  assert.match(prompt, /load the ones that fit this work with the Skill tool/i, "the load instruction names the Skill tool");
+});
+
+const promptTicket: any = { num: 2, title: "Add a test", body: "Test that hello.txt says Hello.", blockedBy: [1], trackerRef: "8", status: "ready", note: null, runId: null, rescueState: null, rescueRunId: null, fixRunId: null };
+const attachedSkills = { advertised: [{ name: "design-rules", description: "The workbench UI design rules." }] };
+
+test("the grill, spec, tickets, implement and review prompts name the skills attached to their place, and keep their own skill call first", async () => {
+  const p = await import("../src/pipeline.ts");
+  const issue = { number: 4, title: "Fix the crash", body: "It crashes on load", htmlUrl: "https://github.com/a/b/issues/4", hasParent: false };
+  const cases: [string, string, string][] = [
+    ["grill", p.grillPrompt("add a greeting", attachedSkills), "grill-with-docs"],
+    // A held prompt (a plain issue card's grill, a Split) is built without skills: `withSkills` adds them
+    // when the server sends it, so the stored text never carries a stale list.
+    ["issue grill", p.withSkills(p.grillIssuePrompt(issue), attachedSkills), "grill-with-docs"],
+    ["rework", p.reworkPrompt("#4", attachedSkills), "grill-with-docs"],
+    ["spec", p.specPrompt(attachedSkills), "to-spec"],
+    ["tickets", p.ticketsPrompt("#4", 131072, attachedSkills), "to-tickets"],
+    ["split", p.withSkills(p.splitPrompt("https://github.com/a/b/issues/4", 131072), attachedSkills), "to-tickets"],
+    ["implement", p.implementPrompt(promptTicket, "hello.txt says Hello", "#4", [], attachedSkills), "tdd"],
+    ["review", p.reviewPrompt("main", "hello.txt says Hello", "#4", [promptTicket], attachedSkills), "code-review"],
+  ];
+  for (const [name, prompt, own] of cases) {
+    assert.ok(prompt.split("\n")[0].startsWith(`/skill:${own} `), `${name}: the phase's own /skill: call stays the first line`);
+    assert.match(prompt, /^## Skills attached to this pipeline place$/m, `${name}: one section names the place's skills`);
+    assert.ok(prompt.includes("- design-rules: The workbench UI design rules."), `${name}: the skill is named with its description`);
+    assert.match(prompt, /Load the ones that fit this work with the Skill tool:/, `${name}: the instruction names the Skill tool`);
+  }
+});
+
+test("the setup, rescue, retro and merge prompts name no attached skill, and a run with nothing attached keeps its prompt unchanged", async () => {
+  const p = await import("../src/pipeline.ts");
+  assert.equal(p.skillsSection(undefined), "", "nothing asked for: no section");
+  assert.equal(p.skillsSection({ advertised: [], required: [] }), "", "nothing attached: no section");
+  assert.equal(p.skillsSection(attachedSkills).split("\n").length, 3, "one header, one instruction line, one skill line");
+
+  const prompts = [
+    p.grillPrompt("the task"),
+    p.grillPrompt("the task", { advertised: [] }),
+    p.grillIssuePrompt({ number: 4, title: "i", body: null, htmlUrl: "u", hasParent: false }),
+    p.reworkPrompt("#4", { advertised: [] }),
+    p.specPrompt(),
+    p.specPrompt({ advertised: [] }),
+    p.ticketsPrompt("#4", 4096, { advertised: [] }),
+    p.withSkills(p.splitPrompt("https://x/1", 4096), { advertised: [] }),
+    p.implementPrompt(promptTicket, null, null, [], { advertised: [] }),
+    p.reviewPrompt("main", null, null, [promptTicket], { advertised: [] }),
+    p.rescuePrompt({ ticket: promptTicket, spec: null, specRef: null, stopReason: "s", startCommit: null, diff: "", toolErrors: [], sessionFile: null }),
+    p.fixPrompt(promptTicket, null, null, [], { status: "diagnosed", command: "npm test", chain: ["a.ts:1"], note: "" }),
+    p.mergePrompt("main", "git merge stopped", ["a.ts"]),
+    p.retroPrompt([], { pipeline: {}, model: {} }),
+  ];
+  for (const prompt of prompts) assert.ok(!prompt.includes("Skills attached"), `no section: ${prompt.split("\n")[0]}`);
+  assert.equal(p.withSkills("/skill:to-tickets Split the issue (https://x/1) into tickets."), "/skill:to-tickets Split the issue (https://x/1) into tickets.", "a held prompt with nothing attached is sent as it is");
+});
+
+test("a required skill is named as required, and the place's other skills as advertised", async () => {
+  const p = await import("../src/pipeline.ts");
+  const skills = {
+    required: [{ name: "design-rules", description: "The workbench UI design rules." }],
+    advertised: [{ name: "design-rules", description: "The workbench UI design rules." }, { name: "a11y-checks", description: "Accessibility rules for web UI." }],
+  };
+  const prompt = p.implementPrompt(promptTicket, "hello.txt says Hello", "#4", [], skills);
+  assert.match(prompt, /^Required\. Load each one with the Skill tool before you write any code:$/m, "the required list names the load-before-any-code instruction");
+  assert.match(prompt, /^Advertised\. Load the ones that fit this work with the Skill tool:$/m, "the other skills are stated apart, as a choice");
+  assert.ok(prompt.indexOf("- design-rules:") < prompt.indexOf("- a11y-checks:"), "required is named before advertised");
+  assert.equal(prompt.split("- design-rules:").length - 1, 1, "a skill in both lists is named once, as required");
+
+  // A fix run is the implement place too: it carries the same section, before its diagnosis.
+  const fix = p.fixPrompt(promptTicket, "hello.txt says Hello", "#4", [], { status: "diagnosed", command: "npm test", chain: ["a.ts:1"], note: "" }, skills);
+  assert.match(fix, /Required\. Load each one with the Skill tool/);
+  assert.ok(fix.indexOf("## Skills attached") < fix.indexOf("## Diagnosis"), "the skills are named before the diagnosis the run must follow");
+  assert.ok(p.implementPrompt(promptTicket, null, null, [], { advertised: [{ name: "x", description: "  " }] }).includes("- x: (no description)"), "a skill with no description is still named");
+});
+
+test("a ticket's skill tags keep the names attached to the tickets step, drop the rest, and refuse a fourth", async () => {
+  const p = await import("../src/pipeline.ts");
+  const attached = ["design-rules", "a11y-checks"];
+
+  assert.deepEqual(p.validateSkillTags(["design-rules"], attached), { skills: ["design-rules"], dropped: [] }, "a plain list of attached names is accepted");
+  assert.deepEqual(p.validateSkillTags(undefined, attached), { skills: [], dropped: [] }, "a ticket with no tags needs no skills field");
+  assert.deepEqual(p.validateSkillTags(["frontend-design", "design-rules"], attached), { skills: ["design-rules"], dropped: ["frontend-design"] }, "a name outside the attached set is dropped, and the dropped name is reported");
+  assert.deepEqual(p.validateSkillTags([], ["design-rules"]).skills, [], "nothing is attached to the tickets step: no tag survives");
+  assert.deepEqual(p.validateSkillTags(["design-rules", "a11y-checks", "design-rules"], attached).skills, ["design-rules", "a11y-checks"], "a name named twice is one tag");
+  assert.throws(() => p.validateSkillTags(["design-rules", "a11y-checks", "other", "x"], attached), /at most 3/, "a fourth tag name is a validation error");
+  assert.throws(() => p.validateSkillTags("design-rules", attached), /list of skill names/);
+  assert.throws(() => p.validateSkillTags([7], attached), /skill names/);
+  assert.equal(p.TICKET_SKILL_TAG_LIMIT, 3, "the cap the prompt names and the validator enforce are one number");
+
+  // record_tickets keeps the tags it validated; the dropped ones never reach storage.
+  const recorded = p.validateTickets(
+    [
+      { number: 1, title: "Header", body: "b", skills: ["design-rules", "frontend-design"] },
+      { number: 2, title: "Query", body: "b", blockedBy: [1] },
+    ],
+    attached,
+  );
+  assert.deepEqual(recorded.map((t) => t.skills), [["design-rules"], []], "the kept tags come back on each ticket, and a ticket with none is empty");
+  assert.throws(() => p.validateTickets([{ number: 1, title: "Header", body: "b", skills: ["design-rules", "a11y-checks", "other", "x"] }], attached), /at most 3/, "a fourth tag fails the whole record_tickets call");
+
+  // A card that never ran the tickets step records no tags: Solve, and a Solve on a sub-issue.
+  const plain = p.validateTickets([{ number: 1, title: "Fix", body: "b", trackerRef: "5" }]);
+  assert.equal(plain[0].skills, undefined, "no attached list was given, so no tag rule was applied");
+  const fromSubs = p.ticketsFromSubIssues([{ number: 5, title: "A ticket", body: "b", url: "u", blockedBy: [] }]);
+  assert.equal(fromSubs[0].skills, undefined, "a sub-issue ticket carries no tags");
+});
+
+test("a ticket's tag names become the library's identifiers, in the order the agent named them", async () => {
+  const p = await import("../src/pipeline.ts");
+  const library = [
+    { id: "sk-a11y", name: "a11y-checks" },
+    { id: "sk-design", name: "design-rules" },
+  ];
+  assert.deepEqual(p.skillTagIds(["design-rules", "a11y-checks"], library), ["sk-design", "sk-a11y"], "the tags are stored as identifiers, not names");
+  assert.deepEqual(p.skillTagIds(["design-rules", "design-rules"], library), ["sk-design"], "each identifier once");
+  assert.deepEqual(p.skillTagIds(["design-rules", "gone-skill"], library), ["sk-design"], "a name the library does not hold is dropped");
+  assert.deepEqual(p.skillTagIds([], library), [], "no tags");
+});
+
+test("the tickets step asks for a tag list per ticket when its place has an attached skill, and asks for none when it has nothing", async () => {
+  const p = await import("../src/pipeline.ts");
+  const attached = { advertised: [{ name: "design-rules", description: "The workbench UI design rules." }] };
+  const prompt = p.ticketsPrompt("#4", 131072, attached);
+  assert.match(prompt, /^Ticket skill tags:.*`skills` list/m, "the tickets step is told to give each ticket a skills list");
+  assert.match(prompt, new RegExp(`at most ${p.TICKET_SKILL_TAG_LIMIT}`), "the prompt names the cap the validator enforces");
+  assert.match(prompt, /State every ticket's tags in the breakdown/, "the user approves the tags with the breakdown they already answer");
+  assert.ok(prompt.includes("- design-rules: The workbench UI design rules."), "the taggable names are the ones the section lists");
+  assert.ok(prompt.indexOf("- design-rules:") < prompt.indexOf("Ticket skill tags:"), "the names come before the instruction that points at them");
+
+  // A Split held prompt releases into the tickets place, so it asks for tags too.
+  const split = p.withSkills(p.splitPrompt("https://github.com/a/b/issues/5", 131072), attached, "tickets");
+  assert.match(split, /^Ticket skill tags:/m, "a split records its sub-issues with tags too");
+  // Nothing attached to the tickets place: no tag instruction at all, and the prompt is unchanged.
+  assert.equal(
+    p.withSkills(p.splitPrompt("https://github.com/a/b/issues/5", 4096), { advertised: [] }, "tickets"),
+    p.splitPrompt("https://github.com/a/b/issues/5", 4096),
+    "a split on a library with nothing attached is the prompt it always was",
+  );
+  for (const [name, prompt] of [
+    ["tickets with nothing attached", p.ticketsPrompt("#4", 4096, { advertised: [] })],
+    ["tickets with no skills argument", p.ticketsPrompt("#4", 4096)],
+    ["grill", p.grillPrompt("the task", attached)],
+    ["spec", p.specPrompt(attached)],
+    ["implement", p.implementPrompt(promptTicket, null, null, [], attached)],
+    ["review", p.reviewPrompt("main", "the spec", "#4", [promptTicket], attached)],
+    ["a rework", p.reworkPrompt("https://github.com/a/b/issues/4", attached)],
+  ])
+    assert.ok(!prompt.includes("Ticket skill tags"), `${name} asks for no tags`);
+});
+
+// --- a tagged ticket's run loads its tags (issue #120) -----------------------------------------
+
+const tagSkills = {
+  "skill-design": { name: "design-rules", description: "The workbench UI design rules." },
+  "skill-a11y": { name: "a11y-checks", description: "Accessibility rules for web UI." },
+};
+const taggedTicket: any = {
+  ...promptTicket,
+  num: 1,
+  runId: "s-t1-run1",
+  fixRunId: "s-t1-fix1",
+  rescueRunId: "s-t1-rescue1",
+  skills: ["skill-design", "skill-a11y"],
+};
+const plainTicket: any = { ...promptTicket, num: 2, runId: "s-t2-run2", fixRunId: null, rescueRunId: null, skills: [] };
+
+test("a tagged ticket's run is its ticket's run: the ticket run, its fix run and a solo ticket run name its tags, and no other run does", async () => {
+  const p = await import("../src/pipeline.ts");
+  const tickets = [taggedTicket, plainTicket];
+
+  assert.deepEqual(p.ticketRunTagIds(tickets, "s-t1-run1"), ["skill-design", "skill-a11y"], "a ticket run names its ticket's tags");
+  assert.deepEqual(p.ticketRunTagIds(tickets, "s-t1-fix1"), ["skill-design", "skill-a11y"], "the ticket's fix run names the same tags");
+  assert.deepEqual(p.ticketRunTagIds([{ ...taggedTicket, fixRunId: null }], "s-t1-run1"), ["skill-design", "skill-a11y"], "a solo ticket run is its ticket's run, so it names them too");
+  assert.deepEqual(p.ticketRunTagIds(tickets, "s-t2-run2"), [], "a ticket with no tags names none");
+  for (const runId of ["s-t1-rescue1", "s-review", "s-retro-1", "s-merge-1", "s-plan"])
+    assert.deepEqual(p.ticketRunTagIds(tickets, runId), [], `no tag for ${runId}`);
+
+  // The tags as prompt skills, in the order the ticket carries them.
+  assert.deepEqual(p.requiredTagSkills(tickets, "s-t1-run1", (id) => tagSkills[id] ?? null), [tagSkills["skill-design"], tagSkills["skill-a11y"]]);
+  assert.deepEqual(
+    p.requiredTagSkills([{ ...taggedTicket, skills: ["skill-design", "skill-the-library-no-longer-holds"] }], "s-t1-run1", (id) => tagSkills[id] ?? null),
+    [tagSkills["skill-design"]],
+    "a tag whose skill the library no longer holds names nothing",
+  );
+  assert.deepEqual(p.requiredTagSkills(tickets, "s-t1-run1", () => null), [], "a run of an untagged ticket asks for nothing");
+});
+
+test("a tagged ticket run names its tags as required, and the place's attached skills it was not tagged with as advertised", async () => {
+  const p = await import("../src/pipeline.ts");
+  const required = p.requiredTagSkills([taggedTicket], "s-t1-run1", (id) => tagSkills[id] ?? null);
+  // design-rules is both attached to the place and tagged: it is named once, as required.
+  const skills = { required, advertised: [{ name: "design-rules", description: "The workbench UI design rules." }, { name: "frontend-rules", description: "The house frontend conventions." }] };
+  for (const [name, prompt] of [
+    ["a ticket run", p.implementPrompt({ ...taggedTicket, skills: ["skill-design", "skill-a11y"] }, "hello.txt says Hello", "#4", [], skills)],
+    [
+      "a fix run",
+      p.fixPrompt({ ...taggedTicket }, "hello.txt says Hello", "#4", [], { status: "diagnosed", command: "npm test", chain: ["a.ts:1"], note: "" }, skills),
+    ],
+  ]) {
+    assert.match(prompt, /^Required\. Load each one with the Skill tool before you write any code:$/m, `${name}: the load-before-any-code instruction`);
+    assert.ok(prompt.includes("- design-rules: The workbench UI design rules."), `${name}: the first tag`);
+    assert.ok(prompt.includes("- a11y-checks: Accessibility rules for web UI."), `${name}: the second tag`);
+    assert.match(prompt, /^Advertised\. Load the ones that fit this work with the Skill tool:$/m, `${name}: the attached-but-untagged skills are stated apart`);
+    assert.ok(prompt.includes("- frontend-rules: The house frontend conventions."), `${name}: the untagged skill is advertised`);
+    assert.ok(prompt.indexOf("- design-rules:") < prompt.indexOf("- frontend-rules:"), `${name}: required comes before advertised`);
+    assert.equal(prompt.split("- design-rules:").length - 1, 1, `${name}: a tagged skill is named once, never in both lists`);
+  }
+
+  // No tags and nothing attached: the run's prompt is the prompt it always was.
+  assert.equal(
+    p.implementPrompt({ ...taggedTicket, skills: [] }, "hello.txt says Hello", "#4", [], { required: [], advertised: [] }),
+    p.implementPrompt({ ...taggedTicket, skills: [] }, "hello.txt says Hello", "#4", []),
+    "an untagged ticket run with nothing attached keeps its prompt exactly",
+  );
 });

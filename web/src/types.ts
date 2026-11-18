@@ -1,4 +1,5 @@
 import { waitsOnUser } from "../../shared/pending.ts";
+import type { AttachPoint } from "../../shared/attach.ts";
 
 export type SessionStatus = "stopped" | "starting" | "running" | "waiting" | "idle" | "error";
 
@@ -110,6 +111,10 @@ export type Ticket = {
   rescueState: "diagnosing" | "fixing" | "rescued" | "failed" | null;
   rescueRunId: string | null;
   fixRunId: string | null;
+  /** The library ids of the skills this ticket's runs must load (its Ticket skill tags); empty when it carries none. */
+  skills: string[];
+  /** Those tags as the names the user reads, in the ticket's own order; empty with no tags. */
+  skillTags: string[];
 };
 
 export type RepoSetupState = "set_up" | "not_set_up" | "in_progress";
@@ -142,7 +147,43 @@ export type UnclaimedSpecTickets = {
   subIssues: { number: number; title: string; url: string; blockedBy: number[] }[];
 };
 
-export type Skill = { name: string; description: string; source: "global" | "repo"; manualOnly: boolean };
+export type Skill = {
+  name: string;
+  description: string;
+  /** "global": an image skill, "repo": a repo skill, "installed": a skill library install,
+   * "optional": the built-in skill only the sessions that pick it load (the TypeSafe skill). */
+  source: "global" | "repo" | "installed" | "optional";
+  manualOnly: boolean;
+};
+
+/** One installed skill: a SKILL.md a Skill source brought (GET /api/skill-sources). */
+export type InstalledSkill = {
+  id: string;
+  sourceId: string;
+  name: string;
+  description: string;
+  /** The server's directory for it; the page never shows it. */
+  dir: string;
+  files: string[];
+  /** The on/off switch: an off skill reaches no run, and its attach points stay as they are. */
+  enabled: boolean;
+  /** The pipeline places it is attached to, in the pipeline's order (shared/attach.ts). */
+  attach: AttachPoint[];
+};
+
+/** A Skill source the user added with Add skill: what it was cloned from, and what it installed. */
+export type SkillSource = {
+  id: string;
+  url: string;
+  ref: string | null;
+  subpath: string | null;
+  /** The commit the clone pinned: what every run of this source loads. */
+  commit: string;
+  sizeBytes: number;
+  createdAt: number;
+  updatedAt: number;
+  skills: InstalledSkill[];
+};
 
 export type ModelSettings = {
   baseUrl: string;

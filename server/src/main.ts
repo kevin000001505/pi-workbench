@@ -30,6 +30,7 @@ import {
   writePiConfig,
 } from "./settings.ts";
 import { listSkills } from "./skills.ts";
+import { addSkillSource, listSkillSources, setSkillSettings } from "./skill-library.ts";
 
 const db = openDb(config.dbFile);
 const secrets = new SecretStore(db, config.masterKey);
@@ -373,6 +374,13 @@ const router = new Router()
     if (!Number.isInteger(num) || num < 1) throw new HttpError(400, "The ticket number must be a whole number");
     return sessions.solveTicket(params.id, num);
   })
+  // Change one ticket's Ticket skill tags by hand (issue #121): the answer is the stored ticket, with
+  // any name the library holds no switched-on skill for named back.
+  .on("PATCH", "/api/sessions/:id/tickets/:num/skills", ({ params, body }) => {
+    const num = Number(params.num);
+    if (!Number.isInteger(num) || num < 1) throw new HttpError(400, "The ticket number must be a whole number");
+    return sessions.setTicketTags(params.id, num, body);
+  })
   .on("POST", "/api/sessions/:id/move", async ({ params, body }) => {
     await sessions.move(params.id, body.column);
     return sessions.summary(params.id);
@@ -415,8 +423,19 @@ const router = new Router()
     const cwd = id ? sessions.repoOf(id).row.worktree : undefined;
     // `typesafe=1`: the New session form, with the TypeSafe box ticked, before the session exists.
     const extra = id ? sessions.extraSkillDirs(id) : query.get("typesafe") === "1" ? [path.join(config.optionalSkillsDir, TYPESAFE_SKILL)] : [];
-    return listSkills(config.skillsDir, cwd, extra).map(({ path: _p, ...s }) => s);
+    // The installed skills are stated for the place this session's runs serve (issue #117).
+    const installed = id ? sessions.installedSkillDirs(id) : [];
+    return listSkills(config.skillsDir, cwd, extra, installed).map(({ path: _p, ...s }) => s);
   })
+
+  // --- skill library -----------------------------------------------------------------------
+  // The library's Skill sources and what each one installed (issue #114). An add clones through the
+  // global secret scope, as a repo clone does, so a private skill repo works with the saved token.
+  .on("GET", "/api/skill-sources", () => listSkillSources(db))
+  .on("POST", "/api/skill-sources", async ({ body }) => addSkillSource(db, body ?? {}, await gitEnv()))
+  // The Skills page's on/off switch and attach checkboxes (issue #117): one installed skill of one
+  // source. The change reaches the next run of the places it names, never a run going now.
+  .on("PATCH", "/api/skill-sources/:sourceId/skills/:skillId", ({ params, body }) => setSkillSettings(db, params.sourceId, params.skillId, body ?? {}))
 
   // --- settings & secrets ---------------------------------------------------------------
   .on("GET", "/api/settings", () => ({ model: getModelSettings(db), approval: getApprovalSettings(db), autoApprove: autoApproveView(db, secrets), pipeline: getPipelineSettings(db) }))

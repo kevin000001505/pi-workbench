@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Card } from "../../../shared/board.ts";
-import { boardCardActions, COLUMNS, isPlainUnclaimedCard, issueNumberOf, parseIssueRef, refLabel, unclaimedNumber } from "../../../shared/board.ts";
+import { boardCardActions, canEditTicketTags, COLUMNS, isPlainUnclaimedCard, issueNumberOf, parseIssueRef, refLabel, unclaimedNumber } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { PendingCard } from "../session/PendingCard.tsx";
 import { phaseLabel } from "../session/PipelinePanel.tsx";
@@ -8,6 +8,7 @@ import { useStore } from "../store.tsx";
 import { isResolvedNote, type SessionSummary, type Ticket, type UnclaimedSpecTickets } from "../types.ts";
 import { Markdown, Spinner } from "../ui.tsx";
 import { CardActions, SOLVE, SPLIT } from "./CardActions.tsx";
+import { TicketSkills, TicketTags } from "./BoardDialogs.tsx";
 
 /** The TICKET_STATE labels for a card's tickets; the board's ticket sub-cards use the same map. */
 export const TICKET_STATE: Record<Ticket["status"], string> = { ready: "Ready", running: "Running", done: "Done", blocked: "Blocked" };
@@ -28,8 +29,11 @@ export const issueParts = (specRef: string | null) => {
  * blockers that are not done, Solve on a ticket the card can solve (disabled otherwise), and a link:
  * the run link for a ticket with a run, the GitHub issue for a tracker ref that names an issue of
  * this repo, no link for any other ticket.
+ *
+ * The row states the ticket's Ticket skill tags, one chip per name, and while the card is not Done it
+ * carries **Skills**, which opens the checkbox list that sets them (issue #121).
  */
-function TicketRow({ s, t, busy, onSolve }: { s: SessionSummary; t: Ticket; busy: boolean; onSolve: (num: number) => void }) {
+function TicketRow({ s, t, tags, busy, onSolve, onEditTags }: { s: SessionSummary; t: Ticket; tags: string[]; busy: boolean; onSolve: (num: number) => void; onEditTags: (ticket: { num: number; title: string; tags: string[] }) => void }) {
   const done = new Set(s.tickets.filter((x) => x.status === "done").map((x) => x.num));
   const waitingOn = t.blockedBy.filter((b) => !done.has(b));
   const issue = issueNumberOf(t.trackerRef, s.repoId);
@@ -69,6 +73,11 @@ function TicketRow({ s, t, busy, onSolve }: { s: SessionSummary; t: Ticket; busy
           </button>
         )}
       </div>
+      {(tags.length > 0 || canEditTicketTags(s)) && (
+        <div className="row gap wrap kz-detail-tags">
+          <TicketSkills tags={tags} session={s} busy={busy} onEdit={() => onEditTags({ num: t.num, title: t.title, tags })} />
+        </div>
+      )}
       {t.note && <p className="note">{t.note}</p>}
     </li>
   );
@@ -115,6 +124,8 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
   const plain = isPlainUnclaimedCard(card);
   const unclaimedSpec = unclaimedNumber(card.id) !== null && !plain;
   const [busy, setBusy] = useState(false);
+  // The ticket whose Ticket skill tags the user sets from this card detail (issue #121).
+  const [tagEdit, setTagEdit] = useState<{ num: number; title: string; tags: string[] } | null>(null);
 
   // An unclaimed spec card has no session yet: its ticket list comes from the spec's open sub-issues.
   const [specTickets, setSpecTickets] = useState<UnclaimedSpecTickets | null | undefined>(undefined);
@@ -422,7 +433,15 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
                 </h3>
                 <ol className="kz-detail-tickets">
                   {s.tickets.map((t) => (
-                    <TicketRow key={t.num} s={s} t={t} busy={busy} onSolve={solveTicket} />
+                    <TicketRow
+                      key={t.num}
+                      s={s}
+                      t={t}
+                      tags={card.ticketTags.find((g) => g.num === t.num)?.names ?? []}
+                      busy={busy}
+                      onSolve={solveTicket}
+                      onEditTags={setTagEdit}
+                    />
                   ))}
                 </ol>
               </section>
@@ -435,6 +454,19 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
               </section>
             )}
           </>
+        )}
+        {tagEdit && s && (
+          <TicketTags
+            sessionId={s.id}
+            ticket={{ num: tagEdit.num, title: tagEdit.title }}
+            carried={tagEdit.tags}
+            onClose={() => setTagEdit(null)}
+            onSaved={() => {
+              setTagEdit(null);
+              // The dialog stated every name the route dropped. The server's summary event carries the
+              // saved ticket to this detail, and its board event to the Board behind it.
+            }}
+          />
         )}
       </aside>
     </>
