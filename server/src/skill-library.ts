@@ -63,8 +63,11 @@ export type SkillSource = {
   skills: InstalledSkill[];
 };
 
-/** One card whose ticket tags a library write changed: its Board and its card detail read again. */
-export type ChangedCard = TicketTagCard;
+/**
+ * What a library write answers: the source as the library states it now, and the cards whose Ticket skill
+ * tags it changed, so their Board and their card detail read again.
+ */
+export type LibraryWrite = { source: SkillSource; changed: TicketTagCard[] };
 
 /** The directory one install keeps. It lives in the data volume, so a restart keeps it. */
 export const skillInstallDir = (sourceId: string) => path.join(config.installedSkillsDir, sourceId);
@@ -118,12 +121,11 @@ function toSkillRow(s: InstalledSkill): InstalledSkillRow {
  * Nothing else walks the install directory, and every read of the library goes through these rows, so a
  * removed skill reaches no run and no card again.
  */
-export function removeSkillSource(db: Db, sourceId: string): { source: SkillSource; changed: ChangedCard[] } {
-  const row = skillSourceRow(db, sourceId);
-  if (!row) throw notFound(`No Skill source ${sourceId} in the library`);
+export function removeSkillSource(db: Db, sourceId: string): LibraryWrite {
+  const row = requireSource(db, sourceId);
   // A Remove that went under a clone in flight would leave the new version's rows stated for a source the
   // library no longer holds.
-  if (updating.has(sourceId)) throw alreadyRunning(row.url, row.subpath);
+  if (updating.has(row.id)) throw alreadyRunning("Update", row.url, row.subpath);
   const prior = installedSkillRows(db).filter((r) => r.source_id === sourceId);
   const source: SkillSource = { ...toSource(row), skills: prior.map(toSkill) };
   // The rows go first: a library that cannot drop them keeps stating the source, and its tree with it.
@@ -152,21 +154,27 @@ export async function addSkillSource(
   // for no reason the user can see. Update is the action that takes a new version of a source the library
   // already holds, and it keeps the installed skills' identities while it does.
   const held = skillSourceRows(db).find((r) => r.url === url && r.ref === ref && r.subpath === subpath);
-  if (held) {
-    throw Object.assign(
-      new Error(`${where(url, subpath)} is already in the library, pinned at ${held.commit_sha.slice(0, 12)}: Update takes its new version`),
-      { status: 409 },
-    );
+  if (held) throw alreadyInLibrary(held, url, subpath);
+  // The same source named twice at once: both reads find an empty library and both clone, so the guard is
+  // on the source the user named, not only on a row the library already has.
+  const key = sourceKey(url, ref, subpath);
+  if (adding.has(key)) throw alreadyRunning("Add skill", url, subpath);
+  adding.add(key);
+  try {
+    const plan: InstallPlan = { id: crypto.randomUUID(), url, ref, subpath, createdAt: Date.now(), action: "Add skill" };
+    const { source } = await installInPlace(plan, env, () => [], (facts, storedAt) => {
+      recordSkillSource(
+        db,
+        { id: plan.id, url, ref, subpath, commit_sha: facts.commit, size_bytes: facts.sizeBytes, created_at: plan.createdAt, updated_at: storedAt },
+        facts.skills.map(toSkillRow),
+      );
+      // A fresh source holds no ticket tag yet, so it changes no card.
+      return [];
+    });
+    return source;
+  } finally {
+    adding.delete(key);
   }
-
-  const plan: InstallPlan = { id: crypto.randomUUID(), url, ref, subpath, createdAt: Date.now(), action: "Add skill" };
-  return installInPlace(db, plan, env, [], (facts, storedAt) => {
-    recordSkillSource(
-      db,
-      { id: plan.id, url, ref, subpath, commit_sha: facts.commit, size_bytes: facts.sizeBytes, created_at: plan.createdAt, updated_at: storedAt },
-      facts.skills.map(toSkillRow),
-    );
-  });
 }
 
 /**
@@ -185,43 +193,70 @@ export async function addSkillSource(
  * and with it every ticket tag that named it — no run and no card is left told to load a skill the library
  * no longer holds.
  */
-export async function updateSkillSource(db: Db, sourceId: string, env: GitEnv): Promise<{ source: SkillSource; changed: ChangedCard[] }> {
-  const row = skillSourceRow(db, sourceId);
-  if (!row) throw notFound(`No Skill source ${sourceId} in the library`);
+export async function updateSkillSource(db: Db, sourceId: string, env: GitEnv): Promise<LibraryWrite> {
+  const row = requireSource(db, sourceId);
   // One clone per source at a time (issue #122): two Update clicks write the same place, and the second
   // would answer for a version the first already replaced.
-  if (updating.has(sourceId)) throw alreadyRunning(row.url, row.subpath);
-  updating.add(sourceId);
-  const prior = installedSkillRows(db).filter((r) => r.source_id === sourceId);
+  if (updating.has(row.id)) throw alreadyRunning("Update", row.url, row.subpath);
+  updating.add(row.id);
   const plan: InstallPlan = { id: row.id, url: row.url, ref: row.ref, subpath: row.subpath, createdAt: row.created_at, action: "Update" };
-  let changed: ChangedCard[] = [];
   try {
-    const source = await installInPlace(db, plan, env, prior, (facts, storedAt) => {
-      changed = recordSkillSourceUpdate(
-        db,
-        sourceId,
-        { commit_sha: facts.commit, size_bytes: facts.sizeBytes, updated_at: storedAt },
-        facts.skills.map(toSkillRow),
-        facts.droppedSkillIds,
-      );
-    });
-    return { source, changed };
+    return await installInPlace(
+      plan,
+      env,
+      // What the library holds for this source, read when the clone is done: a switch or an attach point
+      // the user changed while the clone ran is carried into the new version, not answered with the
+      // setting the source had before the click.
+      () => installedSkillRows(db).filter((r) => r.source_id === row.id),
+      (facts, storedAt) =>
+        recordSkillSourceUpdate(
+          db,
+          sourceId,
+          { commit_sha: facts.commit, size_bytes: facts.sizeBytes, updated_at: storedAt },
+          facts.skills.map(toSkillRow),
+          facts.droppedSkillIds,
+        ),
+    );
   } catch (err) {
     // The version that works is still installed. What the library adds is the reason this one is not.
-    recordSkillSourceFailure(db, sourceId, (err as Error).message);
+    recordSkillSourceFailure(db, sourceId, failureReason(err));
     throw err;
   } finally {
-    updating.delete(sourceId);
+    updating.delete(row.id);
   }
 }
 
 /** The sources whose Update is on its way (issue #122): one clone per source at a time. */
 const updating = new Set<string>();
 
-/** A source already being updated: the second write waits instead of writing over the clone. */
-function alreadyRunning(url: string, subpath: string | null): Error {
-  return Object.assign(new Error(`Update already runs for ${where(url, subpath)}: try again when it finishes`), { status: 409 });
+/** The (url, ref, subpath) whose Add skill is on its way (issue #122): one clone per source named. */
+const adding = new Set<string>();
+
+/** One source the user named, as the Add skill guard knows it: URL, ref and subpath together. */
+const sourceKey = (url: string, ref: string | null, subpath: string | null) => `${url}\u0000${ref ?? ""}\u0000${subpath ?? ""}`;
+
+/** The source a write names: the row, or the 404 every other write route answers for what it cannot find. */
+function requireSource(db: Db, sourceId: string): SkillSourceRow {
+  const row = skillSourceRow(db, sourceId);
+  if (!row) throw notFound(`No Skill source ${sourceId} in the library`);
+  return row;
 }
+
+/** An install of this source already runs: the second write waits instead of writing over the clone. */
+function alreadyRunning(action: SkillAction, url: string, subpath: string | null): Error {
+  return Object.assign(new Error(`${action} already runs for ${where(url, subpath)}: try again when it finishes`), { status: 409 });
+}
+
+/** The source the library already holds: the refusal that names Update as the way to take its new version. */
+function alreadyInLibrary(row: SkillSourceRow, url: string, subpath: string | null): Error {
+  return Object.assign(
+    new Error(`${where(url, subpath)} is already in the library, pinned at ${row.commit_sha.slice(0, 12)}: Update takes its new version`),
+    { status: 409 },
+  );
+}
+
+/** What a failed install states on its source: the reason the write answered with, whatever its shape. */
+const failureReason = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 /** What a validated install knows, before any of it is recorded. */
 type InstallFacts = { commit: string; sizeBytes: number; skills: InstalledSkill[]; droppedSkillIds: string[] };
@@ -234,21 +269,22 @@ type InstallPlan = { id: string; url: string; ref: string | null; subpath: strin
  * no ref resolves to the source's default head — validate the tree where it lies, and only then move it
  * into the source's place, so a refusal installs nothing.
  *
- * `prior` is what the library held for this source, by declared name: a skill the new version carries too
- * keeps its identifier, its switch and its attach points, because a Ticket skill tag names an identifier
- * and new identifiers would orphan every card that carries one.
+ * `priorSkills` answers with what the library holds for this source, read once the clone is validated:
+ * a skill the new version carries too keeps its identifier, its switch and its attach points, because a
+ * Ticket skill tag names an identifier and new identifiers would orphan every card that carries one. Each
+ * prior row answers for at most one carried name, so a source that declares one name twice keeps two
+ * distinct rows (`keepIdentity`).
  *
  * The version an Update replaces moves to a stashed directory beside the source's place, which this
  * function always removes: the source's place is never empty, and a new version whose rows cannot be
  * recorded is put back where it was. A failure before the tree is moved leaves the old tree untouched.
  */
 async function installInPlace(
-  db: Db,
   plan: InstallPlan,
   env: GitEnv,
-  prior: InstalledSkillRow[],
-  write: (facts: InstallFacts, storedAt: number) => void,
-): Promise<SkillSource> {
+  priorSkills: () => InstalledSkillRow[],
+  record: (facts: InstallFacts, storedAt: number) => TicketTagCard[],
+): Promise<LibraryWrite> {
   const temp = path.join(config.installedSkillsDir, `.tmp-${plan.id}`);
   const stash = path.join(config.installedSkillsDir, `.replaced-${plan.id}`);
   const dir = skillInstallDir(plan.id);
@@ -258,10 +294,8 @@ async function installInPlace(
     // Validation reads the clone where it lies. The recorded directories are the same paths under the
     // install directory, which is where the tree lands once every check passes.
     const root = installRoot(temp, plan.url, plan.subpath);
-    const found = readSkills(root, plan.id).map((s) => {
-      const held = prior.find((r) => r.name === s.name);
-      return held ? { ...s, id: held.id, enabled: held.enabled === 1, attach: parseAttach(held.attach) } : s;
-    });
+    const prior = priorSkills();
+    const found = keepIdentity(readSkills(root, plan.id), prior);
     if (!found.length) {
       throw refuse(`${where(plan.url, plan.subpath)} carries no skill: no SKILL.md with a name and a description`);
     }
@@ -283,23 +317,31 @@ async function installInPlace(
 
     const replaces = fs.existsSync(dir);
     try {
-      if (replaces) fs.renameSync(dir, stash);
+      if (replaces) {
+        // A stashed version left by a run that died mid-install has no place to go: it goes before the
+        // working version moves aside, so the swap never fails on a name the directory already holds.
+        fs.rmSync(stash, { recursive: true, force: true });
+        fs.renameSync(dir, stash);
+      }
       fs.renameSync(root, dir);
       const skills = found.map((s) => ({ ...s, dir: path.join(dir, path.relative(root, s.dir)) }));
       const droppedSkillIds = prior.map((r) => r.id).filter((id) => !skills.some((s) => s.id === id));
       const storedAt = Date.now();
-      write({ commit, sizeBytes, skills, droppedSkillIds }, storedAt);
+      const changed = record({ commit, sizeBytes, skills, droppedSkillIds }, storedAt);
       return {
-        id: plan.id,
-        url: plan.url,
-        ref: plan.ref,
-        subpath: plan.subpath,
-        commit,
-        sizeBytes,
-        createdAt: plan.createdAt,
-        updatedAt: storedAt,
-        lastError: null,
-        skills,
+        source: {
+          id: plan.id,
+          url: plan.url,
+          ref: plan.ref,
+          subpath: plan.subpath,
+          commit,
+          sizeBytes,
+          createdAt: plan.createdAt,
+          updatedAt: storedAt,
+          lastError: null,
+          skills,
+        },
+        changed,
       };
     } catch (err) {
       // The tree and its rows are one fact: the new version goes, and the version that worked is put back
@@ -312,6 +354,20 @@ async function installInPlace(
     fs.rmSync(temp, { recursive: true, force: true });
     fs.rmSync(stash, { recursive: true, force: true });
   }
+}
+
+/**
+ * The skills the new version carries, each one matched to the library row it replaces: the same declared
+ * name, and each prior row used once, so a source that declares one name twice keeps two distinct rows
+ * and Update never writes one identifier twice.
+ */
+function keepIdentity(found: InstalledSkill[], prior: InstalledSkillRow[]): InstalledSkill[] {
+  const carried = new Map<string, InstalledSkillRow[]>();
+  for (const r of prior) carried.set(r.name, [...(carried.get(r.name) ?? []), r]);
+  return found.map((s) => {
+    const held = (carried.get(s.name) ?? []).shift();
+    return held ? { ...s, id: held.id, enabled: held.enabled === 1, attach: parseAttach(held.attach) } : s;
+  });
 }
 
 /** Something the clone can take: a git URL, `file://` included. An absolute local path is refused. */

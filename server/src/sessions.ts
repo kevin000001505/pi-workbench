@@ -13,7 +13,7 @@ import {
   withMessages,
 } from "../../shared/transcript.ts";
 import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
-import { doneIssuesOf, issueQueueClear, issueQueueOf, issueQueueSave, issueQueueStep, recordIssueDone, specWatchOf, specWatchRemove, type Db, type IssueQueueStepState, type RepoRow, type SessionRow, type TicketRow } from "./db.ts";
+import { doneIssuesOf, issueQueueClear, issueQueueOf, issueQueueSave, issueQueueStep, recordIssueDone, specWatchOf, specWatchRemove, type Db, type IssueQueueStepState, type RepoRow, type SessionRow, type TicketRow, type TicketTagCard } from "./db.ts";
 import { git, type GitEnv, redact } from "./git.ts";
 import type { Delivery, MergeResult } from "./delivery.ts";
 import type { GhIssueState } from "./github.ts";
@@ -55,7 +55,7 @@ import {
   type RunSkills,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { listAttachedSkills, installedSkill, listInstalledSkills, listTaggableSkills, removeSkillSource as libraryRemove, updateSkillSource as libraryUpdate, type ChangedCard, type SkillSource } from "./skill-library.ts";
+import { listAttachedSkills, installedSkill, listInstalledSkills, listTaggableSkills, removeSkillSource as libraryRemove, updateSkillSource as libraryUpdate, type SkillSource } from "./skill-library.ts";
 import { claimRefs, type Column, COLUMNS, holdsQueue, issueNumberOf, type IssueQueueState, issueQueueState, liveQueueSteps, type PrState, resolvedNote, sessionColumn, type SessionLiveStatus } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
@@ -1634,7 +1634,7 @@ export class SessionManager extends EventEmitter {
    * card that lost one read again, as a tag change does. No run going now is touched: `spawn` reads the
    * skill directories when a run starts, so the change reaches the ticket's next run.
    */
-  private announceTagChange(cards: ChangedCard[]) {
+  private announceTagChange(cards: TicketTagCard[]) {
     const repos = new Set<string>();
     for (const card of cards) {
       this.emitSummary(card.session, true);

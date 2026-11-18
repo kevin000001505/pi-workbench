@@ -597,6 +597,66 @@ test("Add skill refuses a source the library already holds, and names Update as 
   assert.equal(rows.length, 3, "the three sources the user named, not a copy of one of them");
 });
 
+test("two Add skill clicks for one source at once start one clone", async () => {
+  await waitReady();
+  const url = gitSourceUrl("acme", "racing");
+  seedBareRepo(gitRoot, "acme", "racing", { "race/SKILL.md": skillDoc("race-skill", "One skill of a source added twice at once.") });
+
+  // Both clicks read the library before either has recorded a row: the guard is on the source the user
+  // named, so the second click waits and no second copy of the tree is cloned.
+  const both = await Promise.all([api("POST", "/api/skill-sources", { url }), api("POST", "/api/skill-sources", { url })]);
+  const answers = both.map((r) => [r.status, r.json?.error ?? ""]);
+  assert.equal(both.filter((r) => r.status === 200).length, 1, `one clone started: ${JSON.stringify(answers)}`);
+  assert.equal(both.filter((r) => r.status === 409).length, 1, `the other click waits: ${JSON.stringify(answers)}`);
+  for (const r of both.filter((x) => x.status === 409)) assert.match(r.json.error, /already/, JSON.stringify(r.json));
+  assert.deepEqual(await strayInstalls(), [], "a refused second clone installs nothing");
+
+  // The library holds the source once, so its switch, its attach points and a ticket tag each have one owner.
+  const listed = await api("GET", "/api/skill-sources");
+  const held = listed.json.filter((s: any) => s.url === url);
+  assert.equal(held.length, 1, "one row for the source the user named twice");
+  assert.deepEqual(skillNames(held[0]), ["race-skill"]);
+
+  // Once the clone finished, the same source named again is the refusal that names Update.
+  const again = await api("POST", "/api/skill-sources", { url });
+  assert.equal(again.status, 409, JSON.stringify(again.json));
+  assert.match(again.json.error, /already in the library/, "and the row that stands names Update as the way in");
+});
+
+test("Update keeps each installed skill of a source that declares one name twice", async () => {
+  await waitReady();
+  const { config } = await import("../src/config.ts");
+  const url = gitSourceUrl("acme", "samename");
+  seedBareRepo(gitRoot, "acme", "samename", {
+    "a/SKILL.md": skillDoc("same-name", "The first directory that declares this name."),
+    "b/SKILL.md": skillDoc("same-name", "The second directory that declares this name."),
+  });
+  const added = await api("POST", "/api/skill-sources", { url });
+  assert.equal(added.status, 200, JSON.stringify(added.json));
+  assert.deepEqual(skillNames(added.json), ["same-name", "same-name"], "Add skill installs a source that declares one name twice");
+  const [firstId, secondId] = added.json.skills.map((s: any) => s.id);
+  assert.notEqual(firstId, secondId);
+  // The user's setting on the first of them, so the Update has a setting to carry.
+  assert.equal((await api("PATCH", `/api/skill-sources/${added.json.id}/skills/${firstId}`, { attach: ["implement"], enabled: false })).status, 200);
+
+  editRemoteFile(gitRoot, "acme", "samename", "c/SKILL.md", skillDoc("third", "The skill the new version adds."));
+  const updated = await api("POST", `/api/skill-sources/${added.json.id}/update`, {});
+  assert.equal(updated.status, 200, JSON.stringify(updated.json));
+  assert.deepEqual(skillNames(updated.json), ["same-name", "same-name", "third"], "the new version is installed with both");
+  assert.equal(updated.json.lastError, null, "and the source states no failure");
+
+  // Each carried name matches one library row, so no identifier is written twice.
+  const carried = updated.json.skills.filter((s: any) => s.name === "same-name");
+  assert.deepEqual(carried.map((s: any) => s.id).sort(), [firstId, secondId].sort(), "each keeps one of the two identifiers");
+  assert.equal(carried.filter((s: any) => !s.enabled).length, 1, "and one of them keeps the switch the user set");
+  assert.deepEqual(carried.find((s: any) => !s.enabled).attach, ["implement"]);
+
+  const dir = path.join(config.installedSkillsDir, added.json.id);
+  assert.ok(fs.existsSync(path.join(dir, "c", "SKILL.md")), "the skill the source added is installed");
+  assert.ok(fs.existsSync(path.join(dir, "a", "SKILL.md")) && fs.existsSync(path.join(dir, "b", "SKILL.md")), "with both directories that share a name");
+  assert.deepEqual(await strayInstalls(), [], "no temporary clone and no stashed version is left on disk");
+});
+
 test("Update re-resolves the source's ref, installs the new version, and each installed skill keeps its identity and its settings", async () => {
   await waitReady();
   const { config } = await import("../src/config.ts");
@@ -752,4 +812,30 @@ test("two Update clicks on one source at once start one clone, and Remove waits 
   assert.deepEqual(skillNames(listed), ["double-skill", "second-skill"]);
   assert.ok(fs.existsSync(path.join(config.installedSkillsDir, listed.id, "two", "SKILL.md")), "the installed directory is the new version's");
   assert.deepEqual(await strayInstalls(), [], "no temporary clone and no stashed version is left on disk");
+});
+
+test("Update carries the setting the user changed on an installed skill while its clone ran", async () => {
+  await waitReady();
+  const url = gitSourceUrl("acme", "midclone");
+  seedBareRepo(gitRoot, "acme", "midclone", { "one/SKILL.md": skillDoc("mid-skill", "One skill of the source.") });
+  const added = await api("POST", "/api/skill-sources", { url });
+  assert.equal(added.status, 200, JSON.stringify(added.json));
+  const skillId = added.json.skills[0].id;
+  assert.deepEqual(added.json.skills[0].attach, [], "the skill starts attached to no place");
+  editRemoteFile(gitRoot, "acme", "midclone", "two/SKILL.md", skillDoc("later-skill", "The skill the new version adds."));
+
+  // The user ticks two places for one installed skill while the Update is cloning. The Update reads what
+  // the library holds when its clone is done, so the new version carries the setting the user just made.
+  const [updated, patched] = await Promise.all([
+    api("POST", `/api/skill-sources/${added.json.id}/update`, {}),
+    api("PATCH", `/api/skill-sources/${added.json.id}/skills/${skillId}`, { attach: ["implement", "review"] }),
+  ]);
+  assert.equal(patched.status, 200, JSON.stringify(patched.json));
+  assert.equal(updated.status, 200, JSON.stringify(updated.json));
+
+  const held = await sourceAt(url);
+  assert.deepEqual(skillNames(held), ["later-skill", "mid-skill"], "the new version is installed");
+  const carried = held.skills.find((s: any) => s.name === "mid-skill");
+  assert.equal(carried.id, skillId, "and the skill the library already had keeps its identity");
+  assert.deepEqual(carried.attach, ["implement", "review"], "with the attach points the user set during the clone");
 });
