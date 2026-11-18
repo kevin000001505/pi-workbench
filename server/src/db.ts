@@ -109,6 +109,9 @@ export type SkillSourceRow = {
   size_bytes: number;
   created_at: number;
   updated_at: number;
+  /** Why the last Update of this source failed, or null when the installed version is the last one the
+   * library tried (issue #122). */
+  last_error: string | null;
 };
 
 /** One installed skill of a Skill source. `dir` is its directory under the install directory,
@@ -180,7 +183,7 @@ CREATE TABLE IF NOT EXISTS spec_watch (
 -- installed. The install directory (config.installedSkillsDir) holds the tree these rows describe.
 CREATE TABLE IF NOT EXISTS skill_sources (
   id TEXT PRIMARY KEY, url TEXT NOT NULL, ref TEXT, subpath TEXT, commit_sha TEXT NOT NULL,
-  size_bytes INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  size_bytes INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_error TEXT
 );
 CREATE TABLE IF NOT EXISTS installed_skills (
   id TEXT PRIMARY KEY, source_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL,
@@ -248,6 +251,9 @@ const ADDED_COLUMNS: [string, string, string][] = [
   // A ticket's Ticket skill tags (issue #119): a JSON list of installed_skills ids — the library skills
   // its runs must load.
   ["tickets", "skills", "TEXT NOT NULL DEFAULT '[]'"],
+  // Why the last Update of a Skill source failed (issue #122): the reason the Skills page states, so a
+  // source that could not take its new version says so instead of looking up to date.
+  ["skill_sources", "last_error", "TEXT"],
 ];
 
 function migrate(db: DatabaseSync) {
@@ -382,6 +388,113 @@ export function recordSkillSource(db: Db, source: SkillSourceRow, skills: Instal
 /** Every Skill source in the library, newest first. */
 export function skillSourceRows(db: Db): SkillSourceRow[] {
   return db.prepare("SELECT * FROM skill_sources ORDER BY created_at DESC, id").all() as SkillSourceRow[];
+}
+
+/** One Skill source, by its id. */
+export function skillSourceRow(db: Db, id: string): SkillSourceRow | undefined {
+  return db.prepare("SELECT * FROM skill_sources WHERE id = ?").get(id) as SkillSourceRow | undefined;
+}
+
+/**
+ * Take a Skill source out of the library (issue #122, Remove): its row, the rows of the skills it
+ * installed, and every ticket's Ticket skill tag that named one of them — all in one transaction, so no
+ * card is left holding a tag that names nothing and no skill is left stated without its source.
+ * Answers with the cards whose tags changed, so their boards and card details can be told to read again.
+ */
+export function deleteSkillSource(db: Db, sourceId: string, skillIds: readonly string[]): TicketTagCard[] {
+  db.exec("BEGIN");
+  try {
+    const cards = clearSkillTags(db, skillIds);
+    db.prepare("DELETE FROM installed_skills WHERE source_id = ?").run(sourceId);
+    db.prepare("DELETE FROM skill_sources WHERE id = ?").run(sourceId);
+    db.exec("COMMIT");
+    return cards;
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+/** The version an Update installed: the commit the source's ref resolved to, and the tree it keeps. */
+export type SkillSourceVersion = { commit_sha: string; size_bytes: number; updated_at: number };
+
+/**
+ * Record the version an Update installed (issue #122), in one transaction: the commit the source now
+ * pins and the size of the tree it keeps, the failure the source stated (cleared), the source's
+ * installed skills written whole, and every ticket's Ticket skill tag that named a skill the new version
+ * no longer carries (dropped). One transaction because these facts are one fact: a library that cannot
+ * record them all records none of them and keeps stating the version it had.
+ *
+ * A skill the new version carries too keeps its row only if the caller passes it — and with the row its
+ * identifier, its on/off switch and its attach points, which a Ticket skill tag and a run read.
+ */
+export function recordSkillSourceUpdate(
+  db: Db,
+  sourceId: string,
+  version: SkillSourceVersion,
+  skills: InstalledSkillRow[],
+  droppedSkillIds: readonly string[],
+): TicketTagCard[] {
+  db.exec("BEGIN");
+  try {
+    const cards = clearSkillTags(db, droppedSkillIds);
+    db.prepare("UPDATE skill_sources SET commit_sha = ?, size_bytes = ?, updated_at = ?, last_error = NULL WHERE id = ?").run(
+      version.commit_sha,
+      version.size_bytes,
+      version.updated_at,
+      sourceId,
+    );
+    db.prepare("DELETE FROM installed_skills WHERE source_id = ?").run(sourceId);
+    const ins = db.prepare("INSERT INTO installed_skills (id, source_id, name, description, dir, files, enabled, attach) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+    for (const s of skills) ins.run(s.id, sourceId, s.name, s.description, s.dir, s.files, s.enabled, s.attach);
+    db.exec("COMMIT");
+    return cards;
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+/**
+ * State why an Update failed, and change nothing else (issue #122): an Update that could not clone or
+ * validate keeps its pinned commit and its installed tree, so the only fact it writes is the reason the
+ * Skills page has to show.
+ */
+export function recordSkillSourceFailure(db: Db, sourceId: string, reason: string) {
+  db.prepare("UPDATE skill_sources SET last_error = ? WHERE id = ?").run(reason, sourceId);
+}
+
+/** One card whose ticket tags a library change changed. */
+export type TicketTagCard = { session: string; repo: string };
+
+/**
+ * Take these installed skills out of every ticket's Ticket skill tags (issue #122): a card is never told
+ * to load a skill the library no longer holds, on a run or on the Board. The tags that still name a
+ * skill the library holds keep their order. Answers with the cards that changed, each named once.
+ */
+export function clearSkillTags(db: Db, skillIds: readonly string[]): TicketTagCard[] {
+  if (!skillIds.length) return [];
+  const gone = new Set(skillIds);
+  const cards = new Map<string, TicketTagCard>();
+  // The card's repo comes from the session: a ticket names its card, and a board is told per repo.
+  const rows = db.prepare(
+    "SELECT t.session_id, t.num, t.skills, s.repo_id FROM tickets t JOIN sessions s ON s.id = t.session_id WHERE t.skills IS NOT NULL",
+  ).all() as { session_id: string; num: number; skills: string; repo_id: string }[];
+  const update = db.prepare("UPDATE tickets SET skills = ? WHERE session_id = ? AND num = ?");
+  for (const t of rows) {
+    let stored: unknown;
+    try {
+      stored = JSON.parse(t.skills);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(stored)) continue;
+    const kept = stored.filter((id) => typeof id !== "string" || !gone.has(id));
+    if (kept.length === stored.length) continue;
+    update.run(JSON.stringify(kept), t.session_id, t.num);
+    cards.set(t.session_id, { session: t.session_id, repo: t.repo_id });
+  }
+  return [...cards.values()];
 }
 
 /** The installed skill's on/off switch and its attach points (issue #117). */
