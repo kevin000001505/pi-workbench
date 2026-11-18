@@ -212,32 +212,72 @@ export const allDone = (tickets: Ticket[]) => tickets.length > 0 && tickets.ever
  */
 export const isSkillCall = (prompt: string) => /^\/skill:[\w-]+ \S/.test(prompt);
 
-export function grillPrompt(task: string) {
-  return `/skill:${PIPELINE_SKILLS.grill} ${task}
+/** One installed skill a prompt names: the name the agent types into the `Skill` tool, and the line that says what it is for. */
+export type PromptSkill = { name: string; description: string };
+
+/**
+ * The installed skills one run's prompt names (issue #118).
+ * `required` is the run's own list — the ticket's tags — and `advertised` is what the place carries
+ * without naming it for this run.
+ */
+export type RunSkills = { required?: readonly PromptSkill[]; advertised?: readonly PromptSkill[] };
+
+/** A skill line: `- <name>: <description>`, on one line whatever the description holds. */
+const skillLine = (s: PromptSkill) => `- ${s.name}: ${s.description.replace(/\s+/g, " ").trim() || "(no description)"}`;
+
+/**
+ * The prompt section that names the installed skills of the run's pipeline place, or "" when nothing
+ * is attached to it, so a run with nothing attached keeps its prompt exactly as it is today. A
+ * required skill is named with the instruction to load it before any code; an advertised one with the
+ * instruction to load it when it fits the work.
+ */
+export function skillsSection(skills?: RunSkills): string {
+  const required = [...new Map((skills?.required ?? []).map((s) => [s.name, s])).values()];
+  const advertised = (skills?.advertised ?? []).filter((s) => !required.some((r) => r.name === s.name));
+  if (!required.length && !advertised.length) return "";
+  const parts = ["## Skills attached to this pipeline place"];
+  if (required.length) parts.push("Required. Load each one with the Skill tool before you write any code:", ...required.map(skillLine));
+  if (advertised.length) parts.push("Advertised. Load the ones that fit this work with the Skill tool:", ...advertised.map(skillLine));
+  return parts.join("\n");
+}
+
+/**
+ * Add the place's skills section to a prompt that is already built. The held prompts (Split, a plain
+ * issue card's grill, a rework) go through this at the moment they are sent or released, never when
+ * they are stored: a card that waits for a setup run releases with the skills attached then.
+ */
+export function withSkills(prompt: string, skills?: RunSkills): string {
+  const section = skillsSection(skills);
+  return section ? `${prompt}\n\n${section}` : prompt;
+}
+
+export function grillPrompt(task: string, skills?: RunSkills) {
+  return withSkills(`/skill:${PIPELINE_SKILLS.grill} ${task}
 
 [pi-workbench pipeline: grill-with-docs → to-spec → to-tickets → implement → review]
 Ask your questions with the ask_user tool. Keep going until the user explicitly confirms, through ask_user, that we have reached a shared understanding.
 Commit any docs you wrote along the way (glossary, ADRs) to the current branch. Do not push.
-Then call save_grill_summary with a short summary of the decisions made, and stop. Do not write the spec, tickets or code yet.`;
+Then call save_grill_summary with a short summary of the decisions made, and stop. Do not write the spec, tickets or code yet.`, skills);
 }
 
 /**
  * A plain issue card's Grill: grill-with-docs on the issue's own words. The issue is the session's
  * origin, not its spec: the grill and the to-spec step that follows write the spec, and the PR closes
- * the issue through the session's issue ref.
+ * the issue through the session's issue ref. It is a held prompt, so its place's skills come from
+ * `withSkills` when the prompt is sent (issue #118).
  */
 export function grillIssuePrompt(issue: TicketSeed["spec"]) {
   const body = (issue.body ?? "").trim() || "(the issue has no description)";
   return grillPrompt(`Issue #${issue.number} (${issue.htmlUrl}): ${issue.title.trim()}\n\n${body}`);
 }
 
-export function specPrompt() {
+export function specPrompt(skills?: RunSkills) {
   // pi only expands "/skill:name" when an argument follows on the same line.
-  return `/skill:${PIPELINE_SKILLS.spec} Write the spec from what we just agreed.
+  return withSkills(`/skill:${PIPELINE_SKILLS.spec} Write the spec from what we just agreed.
 
 [pi-workbench pipeline]
 Check the testing seams with the user using ask_user. After you publish the spec to the tracker,
-call save_spec with the full spec text and trackerRef (the file path or issue number/URL). Then stop.`;
+call save_spec with the full spec text and trackerRef (the file path or issue number/URL). Then stop.`, skills);
 }
 
 /**
@@ -255,20 +295,21 @@ Split a ticket that is too big, or that you are not sure fits, into smaller tick
 In the breakdown you present, give each ticket a size estimate in tokens against this budget.`;
 }
 
-export function ticketsPrompt(specRef: string | null, contextWindow: number) {
-  return `/skill:${PIPELINE_SKILLS.tickets} ${specRef ? `Break the spec (${specRef}) into tickets.` : "Break the spec we just wrote into tickets."}
+export function ticketsPrompt(specRef: string | null, contextWindow: number, skills?: RunSkills) {
+  return withSkills(`/skill:${PIPELINE_SKILLS.tickets} ${specRef ? `Break the spec (${specRef}) into tickets.` : "Break the spec we just wrote into tickets."}
 
 [pi-workbench pipeline]
 ${ticketSizeRule(contextWindow)}
 Present the breakdown and ask the user to approve it with ask_user before publishing. After you publish the approved tickets to the tracker,
 call record_tickets with every ticket: its number, title, full body (what to build and acceptance criteria), blockedBy (ticket numbers) and trackerRef (the file path or issue number/URL).
-Then stop. Do not start implementing.`;
+Then stop. Do not start implementing.`, skills);
 }
 
 /**
  * A plain issue is too big for one ticket: break it into tickets with to-tickets, publishing each
  * as a sub-issue of the issue with its blocking edges, so it becomes a spec issue that waits in
- * Issues for Solve all. The issue itself is not changed or closed.
+ * Issues for Solve all. The issue itself is not changed or closed. It is a held prompt, so its place's
+ * skills come from `withSkills` when the prompt is sent (issue #118).
  */
 export function splitPrompt(issueUrl: string, contextWindow: number) {
   return `/skill:${PIPELINE_SKILLS.tickets} Split the issue (${issueUrl}) into tickets: it is too big for one ticket.
@@ -358,11 +399,11 @@ function specSection(spec: string | null, specRef: string | null) {
   return `${specRef ? `(${specRef})\n\n` : ""}${spec}`;
 }
 
-export function implementPrompt(ticket: Ticket, spec: string | null, specRef: string | null, finished: Ticket[]) {
+export function implementPrompt(ticket: Ticket, spec: string | null, specRef: string | null, finished: Ticket[], skills?: RunSkills) {
   const notes = finished.length
     ? finished.map((t) => `- #${t.num} ${t.title}: ${t.note ?? "(no note)"}`).join("\n")
     : "- none yet";
-  return `/skill:${PIPELINE_SKILLS.implement} Ticket #${ticket.num}: ${ticket.title}${ticket.trackerRef ? ` (${ticket.trackerRef})` : ""}
+  return withSkills(`/skill:${PIPELINE_SKILLS.implement} Ticket #${ticket.num}: ${ticket.title}${ticket.trackerRef ? ` (${ticket.trackerRef})` : ""}
 
 ${ticket.body}
 
@@ -375,11 +416,11 @@ ${notes}
 [pi-workbench pipeline: you are the implementer for this one ticket]
 Build it test-first. Work only on this ticket, in this worktree, and commit to the current branch. Do not push.
 When it is complete, call finish_ticket with status "done" and a short note: what changed, and anything the next tickets should know.
-If you cannot complete it, call finish_ticket with status "blocked" and explain why.`;
+If you cannot complete it, call finish_ticket with status "blocked" and explain why.`, skills);
 }
 
-export function reviewPrompt(base: string, spec: string | null, specRef: string | null, tickets: Ticket[]) {
-  return `/skill:${PIPELINE_SKILLS.review} Review every change on this branch since origin/${base}.
+export function reviewPrompt(base: string, spec: string | null, specRef: string | null, tickets: Ticket[], skills?: RunSkills) {
+  return withSkills(`/skill:${PIPELINE_SKILLS.review} Review every change on this branch since origin/${base}.
 
 ## Spec
 ${specSection(spec, specRef)}
@@ -389,20 +430,20 @@ ${tickets.map((t) => `- #${t.num} ${t.title}${t.trackerRef ? ` (${t.trackerRef})
 
 [pi-workbench pipeline: final review of the whole branch]
 Fix every issue the review raises, run the tests, and commit the fixes to the current branch. Do not push.
-Then call finish_review with a short note of what you found and fixed.`;
+Then call finish_review with a short note of what you found and fixed.`, skills);
 }
 
 /** The grill again, after a card is moved back to To do: grill → spec → tickets rework what is already published. */
-export function reworkPrompt(specRef: string | null) {
+export function reworkPrompt(specRef: string | null, skills?: RunSkills) {
   const spec = specRef ? `the spec (${specRef})` : "the spec we wrote";
-  return `/skill:${PIPELINE_SKILLS.grill} Rework the spec${specRef ? ` (${specRef})` : ""} and its tickets: the user moved this feature back to plan it again.
+  return withSkills(`/skill:${PIPELINE_SKILLS.grill} Rework the spec${specRef ? ` (${specRef})` : ""} and its tickets: the user moved this feature back to plan it again.
 
 [pi-workbench pipeline: rework of grill-with-docs → to-spec → to-tickets]
 Ask the user with the ask_user tool what must change. Keep going until the user explicitly confirms, through ask_user, that we have reached a shared understanding.
 Commit any docs you changed (glossary, ADRs) to the current branch. Do not push.
 Then call save_grill_summary with a short summary of the new decisions, and stop.
 In the to-spec and to-tickets steps that follow, do not publish new issues for this feature: update the existing spec issue, ${spec}, in place, and update its ticket issues.
-Close every ticket issue that the new breakdown drops. record_tickets lists the full new breakdown.`;
+Close every ticket issue that the new breakdown drops. record_tickets lists the full new breakdown.`, skills);
 }
 
 /** The merge run: Approve found a conflict, and `git merge origin/<base>` stopped on these files. */
@@ -496,8 +537,8 @@ Then call finish_diagnosis: status "diagnosed" with one red-capable command and 
 }
 
 /** A fix run: the ticket's implement prompt, plus the rescue run's diagnosis. */
-export function fixPrompt(ticket: Ticket, spec: string | null, specRef: string | null, finished: Ticket[], d: Diagnosis) {
-  return `${implementPrompt(ticket, spec, specRef, finished)}
+export function fixPrompt(ticket: Ticket, spec: string | null, specRef: string | null, finished: Ticket[], d: Diagnosis, skills?: RunSkills) {
+  return `${implementPrompt(ticket, spec, specRef, finished, skills)}
 
 ## Diagnosis
 An earlier run on this ticket got stuck. A rescue run found the cause. Write the regression test first, with tdd: it must go red with this command, then fix the cause.

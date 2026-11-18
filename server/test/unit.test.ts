@@ -1661,3 +1661,83 @@ test("the attach table: one function maps a run to the pipeline place it serves"
   for (const place of p.ATTACH_POINTS) assert.ok(p.isAttachPoint(place), place);
   for (const place of ["done", "setup", "rescue", "", "TDD", null, undefined, 7]) assert.ok(!p.isAttachPoint(place), String(place));
 });
+
+test("an attached place's prompt names its skills by name and description and tells the agent to load them", async () => {
+  const p = await import("../src/pipeline.ts");
+  const prompt = p.grillPrompt("add a greeting", { advertised: [{ name: "design-rules", description: "The workbench UI design rules." }] });
+  assert.match(prompt, /^\/skill:grill-with-docs add a greeting/, "the phase's own skill call is still the first line");
+  assert.match(prompt, /## Skills attached to this pipeline place/);
+  assert.ok(prompt.includes("- design-rules: The workbench UI design rules."), "names the skill with its description");
+  assert.match(prompt, /load the ones that fit this work with the Skill tool/i, "the load instruction names the Skill tool");
+});
+
+const promptTicket: any = { num: 2, title: "Add a test", body: "Test that hello.txt says Hello.", blockedBy: [1], trackerRef: "8", status: "ready", note: null, runId: null, rescueState: null, rescueRunId: null, fixRunId: null };
+const attachedSkills = { advertised: [{ name: "design-rules", description: "The workbench UI design rules." }] };
+
+test("the grill, spec, tickets, implement and review prompts name the skills attached to their place, and keep their own skill call first", async () => {
+  const p = await import("../src/pipeline.ts");
+  const issue = { number: 4, title: "Fix the crash", body: "It crashes on load", htmlUrl: "https://github.com/a/b/issues/4", hasParent: false };
+  const cases: [string, string, string][] = [
+    ["grill", p.grillPrompt("add a greeting", attachedSkills), "grill-with-docs"],
+    // A held prompt (a plain issue card's grill, a Split) is built without skills: `withSkills` adds them
+    // when the server sends it, so the stored text never carries a stale list.
+    ["issue grill", p.withSkills(p.grillIssuePrompt(issue), attachedSkills), "grill-with-docs"],
+    ["rework", p.reworkPrompt("#4", attachedSkills), "grill-with-docs"],
+    ["spec", p.specPrompt(attachedSkills), "to-spec"],
+    ["tickets", p.ticketsPrompt("#4", 131072, attachedSkills), "to-tickets"],
+    ["split", p.withSkills(p.splitPrompt("https://github.com/a/b/issues/4", 131072), attachedSkills), "to-tickets"],
+    ["implement", p.implementPrompt(promptTicket, "hello.txt says Hello", "#4", [], attachedSkills), "tdd"],
+    ["review", p.reviewPrompt("main", "hello.txt says Hello", "#4", [promptTicket], attachedSkills), "code-review"],
+  ];
+  for (const [name, prompt, own] of cases) {
+    assert.ok(prompt.split("\n")[0].startsWith(`/skill:${own} `), `${name}: the phase's own /skill: call stays the first line`);
+    assert.match(prompt, /^## Skills attached to this pipeline place$/m, `${name}: one section names the place's skills`);
+    assert.ok(prompt.includes("- design-rules: The workbench UI design rules."), `${name}: the skill is named with its description`);
+    assert.match(prompt, /Load the ones that fit this work with the Skill tool:/, `${name}: the instruction names the Skill tool`);
+  }
+});
+
+test("the setup, rescue, retro and merge prompts name no attached skill, and a run with nothing attached keeps its prompt unchanged", async () => {
+  const p = await import("../src/pipeline.ts");
+  assert.equal(p.skillsSection(undefined), "", "nothing asked for: no section");
+  assert.equal(p.skillsSection({ advertised: [], required: [] }), "", "nothing attached: no section");
+  assert.equal(p.skillsSection(attachedSkills).split("\n").length, 3, "one header, one instruction line, one skill line");
+
+  const prompts = [
+    p.grillPrompt("the task"),
+    p.grillPrompt("the task", { advertised: [] }),
+    p.grillIssuePrompt({ number: 4, title: "i", body: null, htmlUrl: "u", hasParent: false }),
+    p.reworkPrompt("#4", { advertised: [] }),
+    p.specPrompt(),
+    p.specPrompt({ advertised: [] }),
+    p.ticketsPrompt("#4", 4096, { advertised: [] }),
+    p.withSkills(p.splitPrompt("https://x/1", 4096), { advertised: [] }),
+    p.implementPrompt(promptTicket, null, null, [], { advertised: [] }),
+    p.reviewPrompt("main", null, null, [promptTicket], { advertised: [] }),
+    p.rescuePrompt({ ticket: promptTicket, spec: null, specRef: null, stopReason: "s", startCommit: null, diff: "", toolErrors: [], sessionFile: null }),
+    p.fixPrompt(promptTicket, null, null, [], { status: "diagnosed", command: "npm test", chain: ["a.ts:1"], note: "" }),
+    p.mergePrompt("main", "git merge stopped", ["a.ts"]),
+    p.retroPrompt([], { pipeline: {}, model: {} }),
+  ];
+  for (const prompt of prompts) assert.ok(!prompt.includes("Skills attached"), `no section: ${prompt.split("\n")[0]}`);
+  assert.equal(p.withSkills("/skill:to-tickets Split the issue (https://x/1) into tickets."), "/skill:to-tickets Split the issue (https://x/1) into tickets.", "a held prompt with nothing attached is sent as it is");
+});
+
+test("a required skill is named as required, and the place's other skills as advertised", async () => {
+  const p = await import("../src/pipeline.ts");
+  const skills = {
+    required: [{ name: "design-rules", description: "The workbench UI design rules." }],
+    advertised: [{ name: "design-rules", description: "The workbench UI design rules." }, { name: "a11y-checks", description: "Accessibility rules for web UI." }],
+  };
+  const prompt = p.implementPrompt(promptTicket, "hello.txt says Hello", "#4", [], skills);
+  assert.match(prompt, /^Required\. Load each one with the Skill tool before you write any code:$/m, "the required list names the load-before-any-code instruction");
+  assert.match(prompt, /^Advertised\. Load the ones that fit this work with the Skill tool:$/m, "the other skills are stated apart, as a choice");
+  assert.ok(prompt.indexOf("- design-rules:") < prompt.indexOf("- a11y-checks:"), "required is named before advertised");
+  assert.equal(prompt.split("- design-rules:").length - 1, 1, "a skill in both lists is named once, as required");
+
+  // A fix run is the implement place too: it carries the same section, before its diagnosis.
+  const fix = p.fixPrompt(promptTicket, "hello.txt says Hello", "#4", [], { status: "diagnosed", command: "npm test", chain: ["a.ts:1"], note: "" }, skills);
+  assert.match(fix, /Required\. Load each one with the Skill tool/);
+  assert.ok(fix.indexOf("## Skills attached") < fix.indexOf("## Diagnosis"), "the skills are named before the diagnosis the run must follow");
+  assert.ok(p.implementPrompt(promptTicket, null, null, [], { advertised: [{ name: "x", description: "  " }] }).includes("- x: (no description)"), "a skill with no description is still named");
+});

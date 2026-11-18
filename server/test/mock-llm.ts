@@ -12,6 +12,7 @@ import type { AddressInfo } from "node:net";
  * - "ask" → ask_user with two options
  * - "list" → bash `ls`
  * - "load skill" / "load typesafe" → the extension's Skill tool for `tdd` / `typesafe-ai`
+ * - "LOADSKILL <name>" → the extension's Skill tool for that name
  * - "setup-matt-pocock-skills" → writes docs/agents/issue-tracker.md, then commits; a setup skill
  *   body that says SETUP_ASK asks the user a question first
  * - anything else → "Hello from the mock model."
@@ -341,6 +342,9 @@ function script(messages: { role: string; content: unknown }[]): Reply {
     return { tool: { name: "ask_user", args: { question: "Which database should I use?", options: ["SQLite (Recommended)", "Postgres"] } } };
   }
   if (/\bload typesafe\b/i.test(userText)) return { tool: { name: "Skill", args: { skill: "typesafe-ai" } } };
+  // "LOADSKILL <name>" loads that skill by name, whatever it is (issue #118): the name the prompt supplied.
+  const named = /\bLOADSKILL ([\w-]+)/.exec(userText);
+  if (named) return { tool: { name: "Skill", args: { skill: named[1] } } };
   if (/\bload skill\b/i.test(userText)) return { tool: { name: "Skill", args: { skill: "tdd" } } };
   if (/\blist\b/i.test(userText)) return { tool: { name: "bash", args: { command: "ls" } } };
   return { text: "Hello from the mock model. Everything looks fine." };

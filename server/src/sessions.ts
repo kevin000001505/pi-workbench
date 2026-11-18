@@ -46,6 +46,8 @@ import {
   ticketsPrompt,
   validateDiagnosis,
   validateTickets,
+  withSkills,
+  type RunSkills,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
 import { listAttachedSkills } from "./skill-library.ts";
@@ -700,10 +702,10 @@ export class SessionManager extends EventEmitter {
         // grill/spec/tickets are skipped: the first ticket run starts now.
         await this.runNext(id);
       } else if (plan?.held) {
-        await this.send(id, held!);
+        await this.send(id, withSkills(held!, this.promptSkills(id)));
       } else if (mode === "pipeline") {
         // A task that is already a skill call (the session form's ✦ Skills pick) goes out as it is.
-        await this.send(id, isSkillCall(input.prompt) ? input.prompt : grillPrompt(input.prompt));
+        await this.send(id, isSkillCall(input.prompt) ? withSkills(input.prompt, this.promptSkills(id)) : grillPrompt(input.prompt, this.promptSkills(id)));
       } else if (task) {
         await this.send(id, input.prompt);
       }
@@ -864,6 +866,19 @@ export class SessionManager extends EventEmitter {
   /** Every skill dir one run is spawned with: the session's extra skills, then its place's installed ones. */
   runSkillDirs(id: string, runId: string): string[] {
     return [...this.extraSkillDirs(id), ...this.installedSkillDirs(id, runId)];
+  }
+
+  /**
+   * The installed skills a run's prompt names (issue #118): the skills attached to the pipeline place it
+   * serves, advertised, so the agent loads the ones that fit. `required` is the run's own list, and only
+   * a ticket's skill tags fill it (#120). A direct session is the exception: the user writes its prompt,
+   * so its attached skills stay reachable skills and the prompt is never changed.
+   */
+  promptSkills(id: string, runId = this.runOf(this.row(id))): RunSkills {
+    const row = this.row(id);
+    const place = attachPointOf(this.runFacts(row, runId));
+    if (!place || place === "direct") return {};
+    return { advertised: listAttachedSkills(this.db, place).map(({ name, description }) => ({ name, description })) };
   }
 
   /**
@@ -1234,7 +1249,7 @@ export class SessionManager extends EventEmitter {
       // A held prompt is either a full skill call (a rework, a split, a plain issue card's grill)
       // or a bare task from the session form. Only the bare task needs the grill wrapper: wrapping
       // a call again would send pi the skill directive twice.
-      await this.send(id, isSkillCall(row.held_prompt) ? row.held_prompt : grillPrompt(row.held_prompt), "followUp");
+      await this.send(id, withSkills(isSkillCall(row.held_prompt) ? row.held_prompt : grillPrompt(row.held_prompt), this.promptSkills(id)), "followUp");
       return;
     }
     // A direct session that already has its PR recorded keeps phase `pr`: its card is in Review.
@@ -1272,10 +1287,10 @@ export class SessionManager extends EventEmitter {
       }
     } else if (row.phase === "grill" && row.grill_summary) {
       this.update(id, { phase: "spec" });
-      await this.send(id, specPrompt(), "followUp");
+      await this.send(id, specPrompt(this.promptSkills(id)), "followUp");
     } else if (row.phase === "spec" && row.spec) {
       this.update(id, { phase: "tickets" });
-      await this.send(id, ticketsPrompt(row.spec_ref, getModelSettings(this.db).contextWindow), "followUp");
+      await this.send(id, ticketsPrompt(row.spec_ref, getModelSettings(this.db).contextWindow, this.promptSkills(id)), "followUp");
     } else if (row.phase === "tickets" && !row.rework_tickets && this.tickets(id).length > 0) {
       // The tickets are on the tracker: the card waits in Issues until Solve all starts the runs.
       this.update(id, { phase: "ready" });
@@ -1387,7 +1402,7 @@ export class SessionManager extends EventEmitter {
     await this.switchRun(id, runId, true);
     this.watch(id);
     const finished = this.tickets(id).filter((x) => x.status === "done");
-    await this.send(id, fixPrompt(ticket, row.spec, row.spec_ref, finished, report));
+    await this.send(id, fixPrompt(ticket, row.spec, row.spec_ref, finished, report, this.promptSkills(id)));
   }
 
   /** The rescue did not work out: the ticket is blocked, and there is no second rescue for it. */
@@ -1501,7 +1516,7 @@ export class SessionManager extends EventEmitter {
     this.update(id, { phase: "review", review_run: runId, attention: null });
     await this.switchRun(id, runId, true);
     const row = this.row(id);
-    await this.send(id, reviewPrompt(row.base_branch, row.spec, row.spec_ref, this.tickets(id)));
+    await this.send(id, reviewPrompt(row.base_branch, row.spec, row.spec_ref, this.tickets(id), this.promptSkills(id)));
   }
 
   /**
@@ -1585,7 +1600,7 @@ export class SessionManager extends EventEmitter {
     const row = this.row(id);
     const finished = this.tickets(id).filter((x) => x.status === "done");
     this.watch(id);
-    await this.send(id, implementPrompt({ ...t, runId }, row.spec, row.spec_ref, finished));
+    await this.send(id, implementPrompt({ ...t, runId }, row.spec, row.spec_ref, finished, this.promptSkills(id)));
   }
 
   /**
@@ -1783,7 +1798,7 @@ export class SessionManager extends EventEmitter {
     for (const t of this.tickets(id)) if (t.status === "running") this.updateTicket(id, t.num, { status: "ready" });
     // The card left Doing for a new plan: the queue goes on to its next card (issue #104).
     await this.releaseQueueStep(id, "skipped");
-    await this.send(id, reworkPrompt(this.row(id).spec_ref));
+    await this.send(id, reworkPrompt(this.row(id).spec_ref, this.promptSkills(id)));
   }
 
   /** Solve all: the paused session implements its tickets, one fresh run each. */

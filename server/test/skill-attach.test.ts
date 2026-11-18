@@ -277,3 +277,125 @@ test("the session's own skill read names the installed skills its runs reach, be
   assert.ok(!byName.has("probe-off"), "and a switched-off skill is not listed at all");
   await mgr.stop(s.id);
 });
+
+/** The user-message texts the mock model was sent, from request index `from` on. */
+function userTexts(from: number): string[] {
+  const text = (m: any) => (typeof m?.content === "string" ? m.content : Array.isArray(m?.content) ? m.content.map((c: any) => c?.text ?? "").join("") : "");
+  return mock.requests.slice(from).flatMap((r: any) => (r.messages ?? []).filter((m: any) => m.role === "user").map(text));
+}
+
+/** The prompt the model received that matches `marker` — the workbench's own words, before the agent answers. */
+async function promptSeen(from: number, marker: RegExp): Promise<string> {
+  return await waitFor(() => userTexts(from).find((t) => marker.test(t)));
+}
+
+/** The skill names the prompt's attached-skills section lists. */
+function namedSkills(prompt: string): string[] {
+  const section = prompt.slice(prompt.indexOf("## Skills attached to this pipeline place"));
+  return [...section.matchAll(/^- ([\w-]+):/gm)].map((m) => m[1]).filter((n) => SKILL_NAMES.includes(n));
+}
+
+/** Send a prompt and resolve with the tool result of the call it makes, once the run settled. */
+async function toolResult(id: string, prompt: string, tool: string) {
+  const from = (await mgr.snapshot(id)).transcript.messages.length;
+  await mgr.send(id, prompt);
+  return await waitFor(async () => {
+    const t = (await mgr.snapshot(id)).transcript;
+    return !t.busy && t.messages.slice(from).find((m: any) => m.role === "toolResult" && m.toolName === tool);
+  });
+}
+
+test("each pipeline run's prompt names the skills attached to its place, and only skills that run can load", { skip }, async () => {
+  const from = mock.requests.length;
+  const s = await mgr.create({ repoId: "me/demo", title: "Named probes", prompt: "add a greeting" });
+  const ask = await waitFor(() => mgr.summary(s.id).pending[0]);
+  assert.match(ask.title, /shared understanding/);
+
+  const grill = await promptSeen(from, /\[pi-workbench pipeline: grill-with-docs/);
+  assert.ok(grill.startsWith('<skill name="grill-with-docs" '), "pi expanded the phase's own skill first, so it still drives the run");
+  assert.match(grill, /## Skills attached to this pipeline place/);
+  assert.match(grill, /Load the ones that fit this work with the Skill tool:/);
+  assert.ok(grill.includes("- probe-plan: The probe-plan skill from the library."), "the grill-attached skill is named with its description");
+  assert.deepEqual(namedSkills(grill), ["probe-all", "probe-plan"]);
+  assert.deepEqual(namedSkills(grill), libraryOnly(await agentSkills(s.id)), "every named skill is one this run can load");
+  await answerNext(s.id, /shared understanding/);
+
+  const spec = await promptSeen(from, /Check the testing seams/);
+  assert.ok(spec.startsWith('<skill name="to-spec" '), "the spec step keeps its own skill call");
+  assert.deepEqual(namedSkills(spec), ["probe-all"], "the spec place names only what is attached to spec");
+  await answerNext(s.id, /seam/);
+
+  const tickets = await promptSeen(from, /\[pi-workbench pipeline\]\nTicket size/);
+  assert.ok(tickets.startsWith('<skill name="to-tickets" '), "the tickets step keeps its own skill call");
+  assert.deepEqual(namedSkills(tickets), ["probe-all", "probe-plan"], "the tickets place names its attached skills again");
+  await mgr.stop(s.id);
+});
+
+test("a ticket run names the implement place's skills and the review run names the review place's", { skip }, async () => {
+  ghMock.seedSubIssues(
+    "me",
+    "demo",
+    { number: 21, title: "Named ticket suite", body: "## Solution\nwork.txt carries the ticket lines. REVIEWASK" },
+    [
+      { number: 22, title: "Write the line", body: "Append a line to work.txt. ASKME" },
+      { number: 23, title: "Check the line", body: "Check work.txt carries it.", blockedBy: [22] },
+    ],
+  );
+  const from = mock.requests.length;
+  const s = await mgr.create({ repoId: "me/demo", title: "Named ticket probes", issueRef: "me/demo#21", mode: "pipeline", startFrom: "tickets" });
+  const ask = await waitFor(() => mgr.summary(s.id).pending[0]);
+  assert.match(ask.title, /Which file does this ticket change/);
+
+  const implement = await promptSeen(from, /you are the implementer for this one ticket/);
+  assert.ok(implement.startsWith('<skill name="tdd" '), "the ticket run keeps its own skill call");
+  assert.ok(implement.includes("Ticket #1: Write the line (22)"), "and its ticket");
+  assert.match(implement, /Load the ones that fit this work with the Skill tool:/);
+  assert.deepEqual(namedSkills(implement), ["probe-all", "probe-impl"], "the implement place names its attached skills");
+  await answerNext(s.id, /Which file does this ticket change/, "work.txt");
+
+  const review = await promptSeen(from, /final review of the whole branch/);
+  assert.ok(review.startsWith('<skill name="code-review" '), "the review run keeps its own skill call");
+  assert.deepEqual(namedSkills(review), ["probe-all", "probe-review"], "the review place names its attached skills, not the implement ones");
+  await mgr.stop(s.id);
+});
+
+test("a direct session's own prompt is never changed, and its place's skills reach it through the Skill tool", { skip }, async () => {
+  const from = mock.requests.length;
+  const s = await mgr.create({ repoId: "me/demo", title: "Direct words", prompt: "add a greeting", mode: "direct" });
+  await waitFor(() => mgr.summary(s.id).status === "idle");
+
+  const own = await promptSeen(from, /add a greeting/);
+  assert.ok(own.includes("add a greeting"), "the user's own prompt is sent");
+  assert.ok(!own.includes("Skills attached to this pipeline place"), "the workbench adds nothing to the user's prompt");
+  assert.ok(!/with the Skill tool:/.test(own), "and no load instruction");
+
+  // Its attached skills are still reachable: the agent can load one by the name it was given.
+  assert.ok(libraryOnly(await agentSkills(s.id)).includes("probe-direct"), "the direct place carries the skill");
+  const r = await toolResult(s.id, "LOADSKILL probe-direct please", "Skill");
+  assert.equal(r.isError, false, "the Skill tool finds the installed skill of the direct place");
+  assert.match(JSON.stringify(r.content), /probe-direct body/);
+  await mgr.stop(s.id);
+});
+
+test("a Split card's held prompt and a task held for setup both carry the skills of the place they release into", { skip }, async () => {
+  ghMock.seedIssue("me", "demo", { number: 30, title: "A UI that needs a breakdown", body: "The Board needs a column header line." });
+  const fromSplit = mock.requests.length;
+  const split = await mgr.create({ repoId: "me/demo", title: "Split probes", issueRef: "me/demo#30", mode: "pipeline", startFrom: "split" });
+  await waitFor(() => mgr.summary(split.id).phase === "tickets");
+  const splitPromptText = await promptSeen(fromSplit, /Split the issue \(/);
+  assert.ok(splitPromptText.startsWith('<skill name="to-tickets" '), "Split keeps its own skill call");
+  assert.deepEqual(namedSkills(splitPromptText), ["probe-all", "probe-plan"], "the tickets place's skills are named in the held prompt too");
+  await mgr.stop(split.id);
+
+  // A task held for the agent-skills setup run: the setup run names nothing, and the grill that
+  // releases after it names the grill place's skills.
+  const fromSetup = mock.requests.length;
+  const s = await mgr.create({ repoId: "me/plain", title: "Setup then grill", prompt: "add a greeting", mode: "pipeline" });
+  assert.equal(mgr.summary(s.id).phase, "setup", "an un-set-up repo starts with setup");
+  const setupText = await promptSeen(fromSetup, /setup-matt-pocock-skills/);
+  assert.ok(!setupText.includes("Skills attached to this pipeline place"), "the setup run is told no attached skill");
+  await waitFor(() => mgr.summary(s.id).phase === "grill");
+  const grill = await promptSeen(fromSetup, /\[pi-workbench pipeline: grill-with-docs/);
+  assert.deepEqual(namedSkills(grill), ["probe-all", "probe-plan"], "the released task carries the grill place's skills");
+  await mgr.stop(s.id);
+});
