@@ -160,3 +160,49 @@ test("a ref resolves to one pinned commit — a branch, a tag or a commit — an
   assert.equal(bad.status, 400);
   assert.match(bad.json.error, /no-such-thing/, "the refusal names the ref it could not resolve");
 });
+
+test("a subpath installs the skills found under it, deeper nesting included, and refuses a path that is not a URL", async () => {
+  await waitReady();
+  const files = {
+    "README.md": "# collection\n",
+    "root-skill/SKILL.md": skillDoc("outside-skill", "A skill outside the subpath."),
+    "packages/ui/SKILL.md": skillDoc("ui-style", "How this collection writes UI."),
+    "packages/ui/references/tokens.md": "colour tokens\n",
+    "packages/db/migrations/helper/SKILL.md": skillDoc("helper-style", "A skill nested deeper than the subpath."),
+  };
+  seedBareRepo(gitRoot, "acme", "collection", files);
+  const url = gitSourceUrl("acme", "collection");
+  const before = (await api("GET", "/api/skill-sources")).json.length;
+
+  const sub = await api("POST", "/api/skill-sources", { url, subpath: "packages" });
+  assert.equal(sub.status, 200);
+  assert.equal(sub.json.subpath, "packages");
+  assert.deepEqual(skillNames(sub.json), ["helper-style", "ui-style"], "the skills under the subpath install; the ones outside it do not");
+  const ui = sub.json.skills.find((s: any) => s.name === "ui-style");
+  assert.deepEqual(ui.files, ["SKILL.md", "references/tokens.md"], "each installed skill comes with its file names");
+  // The size is the tree the install keeps: what the subpath holds, nothing outside it.
+  const under = (prefix: string) =>
+    Object.entries(files).reduce((n, [rel, c]) => (rel.startsWith(`${prefix}/`) ? n + Buffer.byteLength(c) : n), 0);
+  assert.equal(sub.json.sizeBytes, under("packages"));
+
+  const { config } = await import("../src/config.ts");
+  const installed = path.join(config.installedSkillsDir, sub.json.id);
+  assert.ok(fs.existsSync(path.join(installed, "ui", "SKILL.md")), "the install keeps the tree under the subpath");
+  assert.ok(fs.existsSync(path.join(installed, "db", "migrations", "helper", "SKILL.md")));
+  assert.ok(!fs.existsSync(path.join(installed, "root-skill")), "what the subpath leaves out is not installed");
+
+  // The same source with no subpath takes every skill it carries.
+  const whole = await api("POST", "/api/skill-sources", { url });
+  assert.equal(whole.status, 200);
+  assert.deepEqual(skillNames(whole.json), ["helper-style", "outside-skill", "ui-style"]);
+
+  // An absolute local path is refused, with the file:// form named as the way in.
+  const local = await api("POST", "/api/skill-sources", { url: barePath("acme", "collection") });
+  assert.equal(local.status, 400);
+  assert.match(local.json.error, /file:\/\//, "the refusal states the URL form it wants");
+  // A subpath outside the source is refused too.
+  const escape = await api("POST", "/api/skill-sources", { url, subpath: "../outside" });
+  assert.equal(escape.status, 400);
+  assert.match(escape.json.error, /outside/);
+  assert.equal((await api("GET", "/api/skill-sources")).json.length, before + 2, "a refusal installs nothing");
+});

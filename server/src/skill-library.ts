@@ -83,10 +83,14 @@ export function listSkillSources(db: Db): SkillSource[] {
  * carries, and install them. The answer is the source, or a refusal that names the problem; nothing
  * half-installed survives either way.
  */
-export async function addSkillSource(db: Db, input: { url: unknown; ref?: unknown }, env: GitEnv): Promise<SkillSource> {
-  const url = typeof input.url === "string" ? input.url.trim() : "";
-  if (!url) throw refuse("Add skill needs the source's git URL");
-  const ref = typeof input.ref === "string" && input.ref.trim() ? input.ref.trim() : null;
+export async function addSkillSource(
+  db: Db,
+  input: { url: unknown; ref?: unknown; subpath?: unknown },
+  env: GitEnv,
+): Promise<SkillSource> {
+  const url = sourceUrl(input.url);
+  const ref = namedRef(input.ref);
+  const subpath = sourceSubpath(input.subpath);
 
   const id = crypto.randomUUID();
   const temp = path.join(config.installedSkillsDir, `.tmp-${id}`);
@@ -95,19 +99,20 @@ export async function addSkillSource(db: Db, input: { url: unknown; ref?: unknow
     const commit = await cloneAt(temp, url, ref, env);
     // Validation reads the clone where it lies. The recorded directories are the same paths under
     // the install directory, which is where the tree lands once everything checks out.
-    const found = readSkills(temp, id);
-    const sizeBytes = treeBytes(temp);
+    const root = installRoot(temp, url, subpath);
+    const found = readSkills(root, id);
+    const sizeBytes = treeBytes(root);
 
     // The clone's git objects are not part of the install: only the tree of skills moves into place.
     fs.rmSync(path.join(temp, ".git"), { recursive: true, force: true });
     const dir = skillInstallDir(id);
-    fs.renameSync(temp, dir);
-    const skills = found.map((s) => ({ ...s, dir: path.join(dir, path.relative(temp, s.dir)) }));
+    fs.renameSync(root, dir);
+    const skills = found.map((s) => ({ ...s, dir: path.join(dir, path.relative(root, s.dir)) }));
     const now = Date.now();
     try {
       recordSkillSource(
         db,
-        { id, url, ref, subpath: null, commit_sha: commit, size_bytes: sizeBytes, created_at: now, updated_at: now },
+        { id, url, ref, subpath, commit_sha: commit, size_bytes: sizeBytes, created_at: now, updated_at: now },
         skills.map((s) => ({ id: s.id, source_id: id, name: s.name, description: s.description, dir: s.dir, files: JSON.stringify(s.files) })),
       );
     } catch (err) {
@@ -115,10 +120,47 @@ export async function addSkillSource(db: Db, input: { url: unknown; ref?: unknow
       fs.rmSync(dir, { recursive: true, force: true });
       throw err;
     }
-    return { id, url, ref, subpath: null, commit, sizeBytes, createdAt: now, updatedAt: now, skills };
+    return { id, url, ref, subpath, commit, sizeBytes, createdAt: now, updatedAt: now, skills };
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
+}
+
+/** Something the clone can take: a git URL, `file://` included. An absolute local path is refused. */
+const LOCAL_PATH = /^(\.{0,2}[\\/]|[A-Za-z]:[\\/]|~[\\/])/;
+
+function sourceUrl(value: unknown): string {
+  const url = typeof value === "string" ? value.trim() : "";
+  if (!url) throw refuse("Add skill needs the source's git URL");
+  if (LOCAL_PATH.test(url)) {
+    throw refuse(`Add skill needs a git URL; "${url}" is a local path — name it as file://${url}`);
+  }
+  return url;
+}
+
+/** The source's ref as the user named it: a branch, a tag or a commit. Null takes the default head. */
+function namedRef(value: unknown): string | null {
+  const ref = typeof value === "string" ? value.trim() : "";
+  return ref || null;
+}
+
+/** The directory inside the source whose tree installs, as a relative path. It cannot leave the source. */
+function sourceSubpath(value: unknown): string | null {
+  const sub = typeof value === "string" ? value.trim().replace(/^\/+|\/+$/g, "") : "";
+  if (!sub) return null;
+  if (sub.startsWith("~") || /^[A-Za-z]:[\\/]/.test(sub) || sub.split(/[\\/]/).some((p) => p === "..")) {
+    throw refuse(`The subpath must be a directory inside the source; "${value}" is outside it`);
+  }
+  return sub;
+}
+
+/** The cloned tree the install keeps: the whole clone, or the clone's `subpath`. */
+function installRoot(temp: string, url: string, subpath: string | null): string {
+  const root = subpath ? path.join(temp, subpath) : temp;
+  if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+    throw refuse(`${url} has no directory "${subpath}" to install`);
+  }
+  return root;
 }
 
 /** A full commit hash. `git ls-remote` lists refs, so a commit named as the ref never appears in it. */
