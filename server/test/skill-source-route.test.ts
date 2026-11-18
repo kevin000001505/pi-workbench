@@ -262,6 +262,12 @@ test("a source that carries a pipeline skill name is refused whole, and the reas
   const part = await api("POST", "/api/skill-sources", { url, subpath: "frontend" });
   assert.equal(part.status, 200);
   assert.deepEqual(skillNames(part.json), ["code-review-style", "frontend-design"], "a name close to a pipeline name is no collision");
+
+  // The shared list covers the setup run's skill too: a source that carries it is refused whole.
+  seedBareRepo(gitRoot, "acme", "setupname", { "setup/SKILL.md": skillDoc("setup-matt-pocock-skills", "A copy of the workbench's own setup skill.") });
+  const setupName = await api("POST", "/api/skill-sources", { url: gitSourceUrl("acme", "setupname") });
+  assert.equal(setupName.status, 400);
+  assert.match(setupName.json.error, /"setup-matt-pocock-skills"/);
 });
 
 test("the library listing answers with every source and its skills, survives a restart, and stays out of the skills dir every run scans", async () => {
@@ -326,4 +332,15 @@ test("a refusal never echoes the credentials a source URL carries", async () => 
   assert.equal(res.status, 400, "the source cannot be reached, so the add is refused");
   assert.ok(!res.json.error.includes("ghp_abcdefghijklmnopqrst0123456789"), "the reason carries no token");
   assert.match(res.json.error, /github\.invalid/, "and it still names the source the user has to fix");
+});
+
+test("a body that is not a source is refused with a reason, not a crash", async () => {
+  await waitReady();
+  const before = (await api("GET", "/api/skill-sources")).json.length;
+  for (const body of [null, "a url please", 7, {}, { url: "   " }]) {
+    const res = await api("POST", "/api/skill-sources", body);
+    assert.equal(res.status, 400, JSON.stringify(body));
+    assert.match(res.json.error, /git URL/, `the refusal says what Add skill needs (${JSON.stringify(body)})`);
+  }
+  assert.equal((await api("GET", "/api/skill-sources")).json.length, before, "a refused body installs nothing");
 });

@@ -15,13 +15,16 @@
  * - retro: when a ticket had a rescue, one fresh /skill:retro run on the Reviewer's model that only
  *   proposes changes; ends with finish_retro. It never blocks the PR.
  */
+import { SETUP_SKILL } from "./config.ts";
 
 /**
- * The skills the pipeline prompts call, one per run kind. The skill library's install check refuses a
- * Skill source that carries one of these names (issue #114), and the prompt builders below write
- * their `/skill:` call from this list, so the two read one source of truth.
+ * The skills the pipeline prompts call, one per run kind: every phase, the setup run, and the special
+ * runs (rescue, review-fix, merge, retro). The skill library's install check refuses a Skill source
+ * that carries one of these names (issue #114), and the prompt builders write their `/skill:` call
+ * from this list, so the two read one source of truth.
  */
 export const PIPELINE_SKILLS = {
+  setup: SETUP_SKILL,
   grill: "grill-with-docs",
   spec: "to-spec",
   tickets: "to-tickets",

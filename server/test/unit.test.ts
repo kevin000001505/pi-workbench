@@ -1549,8 +1549,10 @@ test("validateDiagnosis: a diagnosis needs a command and a file:line causal chai
 
 test("the pipeline skill names are one list: every prompt calls exactly the names the install check refuses", async () => {
   const p = await import("../src/pipeline.ts");
+  const { SETUP_PROMPT } = await import("../src/sessions.ts");
   const ticket: any = { num: 1, title: "t", body: "b", blockedBy: [], trackerRef: null, status: "ready", note: null, runId: null, rescueState: null, rescueRunId: null, fixRunId: null };
   const prompts = [
+    SETUP_PROMPT,
     p.grillPrompt("the task"),
     p.grillIssuePrompt({ number: 1, title: "i", body: null, htmlUrl: "u", hasParent: false }),
     p.specPrompt(),

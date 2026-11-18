@@ -176,7 +176,7 @@ function sourceSubpath(value: unknown): string | null {
 function installRoot(temp: string, url: string, subpath: string | null): string {
   const root = subpath ? path.join(temp, subpath) : temp;
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
-    throw refuse(`${url} has no directory "${subpath}" to install`);
+    throw refuse(`${where(url, subpath)} has no directory "${subpath}" to install`);
   }
   return root;
 }
