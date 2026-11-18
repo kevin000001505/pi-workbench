@@ -35,6 +35,8 @@ import {
   START_PLANS,
   type StartFrom,
   type Phase,
+  type RunFacts,
+  attachPointOf,
   PIPELINE_TOOLS,
   reviewPrompt,
   specPrompt,
@@ -46,6 +48,7 @@ import {
   validateTickets,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
+import { listAttachedSkills } from "./skill-library.ts";
 import { claimRefs, type Column, COLUMNS, holdsQueue, issueNumberOf, type IssueQueueState, issueQueueState, liveQueueSteps, type PrState, resolvedNote, sessionColumn, type SessionLiveStatus } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
@@ -206,6 +209,8 @@ type Live = {
   watch?: { rule: StopRule; timer: NodeJS.Timeout };
   /** The missing-TypeSafe-skill toast went out; the summary keeps showing the state after it. */
   warnedMissingSkill?: boolean;
+  /** The skill dirs the live process was spawned with (issue #117): the run's place decided them. */
+  skillDirs?: string[];
 };
 
 /**
@@ -747,7 +752,11 @@ export class SessionManager extends EventEmitter {
     }
     const m = getModelSettings(this.db);
     fs.mkdirSync(config.piSessionsDir, { recursive: true });
-    const extraSkills = this.extraSkillDirs(id);
+    const runId = this.runOf(row);
+    // The skill dirs are read here, for this run only (issue #117): the session's own extra skills,
+    // plus the installed skills attached to the place this run serves.
+    const extraSkills = this.runSkillDirs(id, runId);
+    s.skillDirs = extraSkills;
     // pi starts without a --skill dir it cannot find, and says nothing: say it here (the summary shows it too).
     if (this.typesafeSkillMissing(row) && !s.warnedMissingSkill) {
       s.warnedMissingSkill = true;
@@ -757,7 +766,6 @@ export class SessionManager extends EventEmitter {
     const env = await this.processEnv(row.repo_id);
     // The extension's Skill tool looks there too, so only these sessions can load them.
     if (extraSkills.length) env.PI_WORKBENCH_EXTRA_SKILLS = extraSkills.join(path.delimiter);
-    const runId = this.runOf(row);
     // Rescue and retro runs call the Reviewer model through the rescue proxy: the run gets a
     // per-run token in its environment only, and the Reviewer key stays in the server (ADR 0003).
     const rescuey = !!this.rescueProxy && isRescueyRun(runId);
@@ -830,6 +838,49 @@ export class SessionManager extends EventEmitter {
   /** Skill dirs only this session loads, next to the global ones: the TypeSafe skill, when picked. */
   extraSkillDirs(id: string): string[] {
     return this.row(id).typesafe_skill === 1 ? [typesafeSkillDir()] : [];
+  }
+
+  /**
+   * What a run is: the session's phase, and which run of it this is (one ticket's, its fix or rescue,
+   * or the session's review, retro or merge). `attachPointOf` turns it into the pipeline place (issue #117).
+   */
+  private runFacts(row: SessionRow, runId: string): RunFacts {
+    const ticket = this.tickets(row.id).find((t) => [t.runId, t.rescueRunId, t.fixRunId].includes(runId));
+    const ticketRun = ticket ? (ticket.rescueRunId === runId ? "rescue" : ticket.fixRunId === runId ? "fix" : "ticket") : null;
+    const specialRun = runId === row.review_run ? "review" : runId === row.retro_run ? "retro" : runId === row.merge_run ? "merge" : null;
+    return { mode: row.mode, phase: row.phase, ticketRun, specialRun };
+  }
+
+  /**
+   * The installed skills this run reaches: the library's skills attached to its place and switched on
+   * (issue #117). The skill library's own directory stays out of what pi scans, so this is the only
+   * way an installed skill reaches an agent. The setup, rescue, retro and merge runs reach none.
+   */
+  installedSkillDirs(id: string, runId = this.runOf(this.row(id))): string[] {
+    const place = attachPointOf(this.runFacts(this.row(id), runId));
+    return place ? listAttachedSkills(this.db, place).map((s) => s.dir) : [];
+  }
+
+  /** Every skill dir one run is spawned with: the session's extra skills, then its place's installed ones. */
+  runSkillDirs(id: string, runId: string): string[] {
+    return [...this.extraSkillDirs(id), ...this.installedSkillDirs(id, runId)];
+  }
+
+  /**
+   * The attach points are read at spawn, so a conversation that moves to another pipeline place gets
+   * a run of that place before its next prompt (issue #117): the same pi conversation, restarted, its
+   * history loaded back. A change the user made while a run worked never reaches that run: the live
+   * process keeps the dirs its spawn carried until the place it serves changes or the run ends.
+   */
+  private async realignRun(id: string) {
+    const s = this.state(id);
+    if (!s.proc || s.proc.exited || s.transcript.busy) return;
+    const row = this.row(id);
+    const runId = this.runOf(row);
+    if (runId !== (row.active_run ?? row.id)) return;
+    const wanted = this.runSkillDirs(id, runId);
+    if (wanted.join(path.delimiter) === (s.skillDirs ?? []).join(path.delimiter)) return;
+    await this.switchRun(id, runId, false);
   }
 
   private async processEnv(repoId: string): Promise<NodeJS.ProcessEnv> {
@@ -1128,6 +1179,8 @@ export class SessionManager extends EventEmitter {
 
   /** Send user text. While the agent runs it steers (or follows up) instead of starting a new run. */
   async send(id: string, message: string, mode: "steer" | "followUp" = "steer") {
+    // The prompt that starts a step of another pipeline place starts a run of that place (issue #117).
+    await this.realignRun(id);
     await this.start(id);
     const s = this.state(id);
     const cmd: RpcRecord = { type: "prompt", message };

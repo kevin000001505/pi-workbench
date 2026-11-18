@@ -167,6 +167,11 @@ function pipelineScript(userText: string, step: number, lastResult: string, conv
     return { text: "Published 3 tickets." };
   }
   if (userText.includes('<skill name="code-review"')) {
+    // REVIEWASK in the spec: the review asks the user one thing before it works, so its run waits on
+    // that answer and can be read while it is live.
+    if (userText.includes("REVIEWASK") && step === 0) return { tool: { name: "ask_user", args: { question: "Review the whole branch, or only the ticket commits?", options: ["The whole branch", "Only the ticket commits"] } } };
+    if (userText.includes("REVIEWASK") && step === 1) return { tool: { name: "bash", args: { command: 'echo reviewed >> work.txt && git add -A && git commit -qm "Fix review findings" && git push -q origin HEAD && echo fixed' } } };
+    if (userText.includes("REVIEWASK") && step === 2) return { tool: { name: "finish_review", args: { note: "Asked first, then fixed one naming issue" } } };
     // LONGREVIEW in the spec: three checks between the commit and finish_review.
     if (userText.includes("LONGREVIEW") && step >= 1 && step <= 3) return { tool: { name: "bash", args: { command: `echo check ${step}` } } };
     if (userText.includes("LONGREVIEW") && step === 4) return { tool: { name: "finish_review", args: { note: "Checked three times" } } };

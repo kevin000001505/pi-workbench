@@ -416,7 +416,9 @@ const router = new Router()
     const cwd = id ? sessions.repoOf(id).row.worktree : undefined;
     // `typesafe=1`: the New session form, with the TypeSafe box ticked, before the session exists.
     const extra = id ? sessions.extraSkillDirs(id) : query.get("typesafe") === "1" ? [path.join(config.optionalSkillsDir, TYPESAFE_SKILL)] : [];
-    return listSkills(config.skillsDir, cwd, extra).map(({ path: _p, ...s }) => s);
+    // The installed skills are stated for the place this session's runs serve (issue #117).
+    const installed = id ? sessions.installedSkillDirs(id) : [];
+    return listSkills(config.skillsDir, cwd, extra, installed).map(({ path: _p, ...s }) => s);
   })
 
   // --- skill library -----------------------------------------------------------------------
