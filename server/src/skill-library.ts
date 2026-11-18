@@ -17,7 +17,7 @@ import {
   skillSourceRows,
   type Db,
 } from "./db.ts";
-import { git, type GitEnv } from "./git.ts";
+import { git, redact, type GitEnv } from "./git.ts";
 import { PIPELINE_SKILL_NAMES } from "./pipeline.ts";
 import { scanSkills } from "./skills.ts";
 
@@ -184,8 +184,8 @@ function installRoot(temp: string, url: string, subpath: string | null): string 
 /** A full commit hash. `git ls-remote` lists refs, so a commit named as the ref never appears in it. */
 const FULL_SHA = /^[0-9a-f]{40}$/i;
 
-/** The source, as a refusal names it. */
-const where = (url: string, subpath: string | null) => (subpath ? `${url} (${subpath})` : url);
+/** The source, as a refusal names it: never the credentials its URL may carry. */
+const where = (url: string, subpath: string | null) => (subpath ? `${redact(url)} (${subpath})` : redact(url));
 
 const megabytes = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 
@@ -199,7 +199,7 @@ async function resolveCommit(url: string, ref: string | null, env: GitEnv): Prom
   try {
     listed = await git(config.dataDir, ["ls-remote", url, ref ?? "HEAD"], env);
   } catch (err) {
-    throw refuse(`Add skill could not read ${url}: ${(err as Error).message}`);
+    throw refuse(`Add skill could not read ${where(url, null)}: ${(err as Error).message}`);
   }
   const sha = listed
     .split("\n")
@@ -208,8 +208,8 @@ async function resolveCommit(url: string, ref: string | null, env: GitEnv): Prom
     ?.split("\t")[0];
   if (sha) return sha;
   if (ref && FULL_SHA.test(ref)) return ref;
-  if (ref) throw refuse(`${url} has no branch or tag named "${ref}"`);
-  throw refuse(`${url} has no commits to install`);
+  if (ref) throw refuse(`${where(url, null)} has no branch or tag named "${ref}"`);
+  throw refuse(`${where(url, null)} has no commits to install`);
 }
 
 /**
@@ -224,7 +224,7 @@ async function cloneAt(dir: string, url: string, ref: string | null, env: GitEnv
     await git(dir, ["fetch", "-q", "--depth", "1", "--no-tags", "origin", commit], env);
     await git(dir, ["checkout", "-q", "--detach", "FETCH_HEAD"], env);
   } catch (err) {
-    throw refuse(`Add skill could not clone ${url} at ${commit.slice(0, 12)}: ${(err as Error).message}`);
+    throw refuse(`Add skill could not clone ${where(url, null)} at ${commit.slice(0, 12)}: ${(err as Error).message}`);
   }
   return commit;
 }

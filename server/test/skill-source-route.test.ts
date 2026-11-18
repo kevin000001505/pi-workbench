@@ -319,3 +319,11 @@ test("the library listing answers with every source and its skills, survives a r
     await new Promise((r) => child.once("exit", r));
   }
 });
+
+test("a refusal never echoes the credentials a source URL carries", async () => {
+  await waitReady();
+  const res = await api("POST", "/api/skill-sources", { url: "https://ghp_abcdefghijklmnopqrst0123456789@github.invalid/acme/private-skills.git" });
+  assert.equal(res.status, 400, "the source cannot be reached, so the add is refused");
+  assert.ok(!res.json.error.includes("ghp_abcdefghijklmnopqrst0123456789"), "the reason carries no token");
+  assert.match(res.json.error, /github\.invalid/, "and it still names the source the user has to fix");
+});
