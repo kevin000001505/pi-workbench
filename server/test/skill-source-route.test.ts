@@ -344,3 +344,14 @@ test("a body that is not a source is refused with a reason, not a crash", async 
   }
   assert.equal((await api("GET", "/api/skill-sources")).json.length, before, "a refused body installs nothing");
 });
+
+test("a URL that reads as a git option is refused as a source, not run as one", async () => {
+  await waitReady();
+  const before = (await api("GET", "/api/skill-sources")).json.length;
+  for (const url of ["--help", "-v", "--ext::sh -c echo planted"]) {
+    const res = await api("POST", "/api/skill-sources", { url });
+    assert.equal(res.status, 400, url);
+    assert.match(res.json.error, /git URL/, url);
+  }
+  assert.equal((await api("GET", "/api/skill-sources")).json.length, before, "an option-shaped URL installs nothing");
+});
