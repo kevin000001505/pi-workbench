@@ -229,12 +229,14 @@ async function cloneAt(dir: string, url: string, ref: string | null, env: GitEnv
   return commit;
 }
 
-/** Every skill directory under `root`, with the file names each one carries. */
+/** Every skill directory under `root`, with the file names each one carries, by declared name. */
 function readSkills(root: string, sourceId: string): InstalledSkill[] {
-  return scanSkills(root, "installed").map((s) => {
-    const dir = path.dirname(s.path);
-    return { id: crypto.randomUUID(), sourceId, name: s.name, description: s.description, dir, files: fileNamesOf(dir) };
-  });
+  return scanSkills(root, "installed")
+    .map((s) => {
+      const dir = path.dirname(s.path);
+      return { id: crypto.randomUUID(), sourceId, name: s.name, description: s.description, dir, files: fileNamesOf(dir) };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name) || a.dir.localeCompare(b.dir));
 }
 
 /** The bytes of a tree's files, the git objects aside. */

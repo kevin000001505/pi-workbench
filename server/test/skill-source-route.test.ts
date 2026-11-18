@@ -6,7 +6,7 @@
  * ephemeral port, in the shape of the settings route test.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -26,14 +26,18 @@ process.env.PI_EXTENSION = path.resolve(path.dirname(fileURLToPath(import.meta.u
 fs.mkdirSync(path.join(process.env.SKILLS_DIR, "image-skill"), { recursive: true });
 fs.writeFileSync(path.join(process.env.SKILLS_DIR, "image-skill", "SKILL.md"), "---\nname: image-skill\ndescription: an image skill every run scans\n---\nimage body\n");
 
-const freePort = await new Promise<number>((res, rej) => {
-  const srv = http.createServer();
-  srv.listen(0, "127.0.0.1", () => {
-    const p = (srv.address() as { port: number }).port;
-    srv.close(() => res(p));
+/** A port nothing listens on, so a test can start its own server on it. */
+const findFreePort = () =>
+  new Promise<number>((res, rej) => {
+    const srv = http.createServer();
+    srv.listen(0, "127.0.0.1", () => {
+      const p = (srv.address() as { port: number }).port;
+      srv.close(() => res(p));
+    });
+    srv.on("error", rej);
   });
-  srv.on("error", rej);
-});
+
+const freePort = await findFreePort();
 process.env.PORT = String(freePort);
 process.env.HOST = "127.0.0.1";
 const base = `http://127.0.0.1:${freePort}`;
@@ -258,4 +262,60 @@ test("a source that carries a pipeline skill name is refused whole, and the reas
   const part = await api("POST", "/api/skill-sources", { url, subpath: "frontend" });
   assert.equal(part.status, 200);
   assert.deepEqual(skillNames(part.json), ["code-review-style", "frontend-design"], "a name close to a pipeline name is no collision");
+});
+
+test("the library listing answers with every source and its skills, survives a restart, and stays out of the skills dir every run scans", async () => {
+  await waitReady();
+  const { config } = await import("../src/config.ts");
+  seedBareRepo(gitRoot, "acme", "keep", { "keep/SKILL.md": skillDoc("kept-skill", "A skill the library has to keep.") });
+  const before = (await api("GET", "/api/skill-sources")).json.length;
+  const added = await api("POST", "/api/skill-sources", { url: gitSourceUrl("acme", "keep") });
+  assert.equal(added.status, 200);
+
+  const listed = await api("GET", "/api/skill-sources");
+  assert.equal(listed.status, 200);
+  // Every source the library holds, each with the skills it installed.
+  assert.equal(listed.json.length, before + 1, "the listing answers with every source, not only the last add");
+  assert.deepEqual(skillNames(listed.json.find((s: any) => s.url === gitSourceUrl("acme", "keep"))), ["kept-skill"]);
+  assert.deepEqual(skillNames(listed.json.find((s: any) => s.url === gitSourceUrl("acme", "shadow"))), ["code-review-style", "frontend-design"]);
+
+  // An installed skill is not in the directory every run scans: the session's skill list does not name it.
+  const scanned = (await api("GET", "/api/skills")).json.map((s: any) => s.name);
+  assert.ok(scanned.includes("image-skill"), "the fixture's image skill is scanned, as the test set it up");
+  assert.ok(!scanned.includes("kept-skill"), "the installed skill is not scanned, so an unrelated run never pays for it");
+
+  // A restart is a fresh process on the same data volume: the rows and the installed tree both answer.
+  const port = await findFreePort();
+  const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "src/main.ts"], {
+    env: { ...process.env, PORT: String(port) },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  child.stderr.on("data", () => {});
+  const restartBase = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    try {
+      if ((await fetch(`${restartBase}/api/health`)).ok) break;
+    } catch {}
+    if (Date.now() > deadline) {
+      child.kill("SIGKILL");
+      throw new Error("the restarted server did not come up");
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  try {
+    const after = await (await fetch(`${restartBase}/api/skill-sources`)).json();
+    assert.deepEqual(after.map((s: any) => s.id).sort(), listed.json.map((s: any) => s.id).sort(), "the source rows survive the restart");
+    const kept = after.find((s: any) => s.url === gitSourceUrl("acme", "keep"));
+    assert.equal(kept.commit, added.json.commit);
+    assert.equal(kept.sizeBytes, added.json.sizeBytes);
+    assert.equal(kept.ref, null);
+    assert.deepEqual(skillNames(kept), ["kept-skill"]);
+    const skill = kept.skills[0];
+    assert.ok(skill.dir.startsWith(config.installedSkillsDir) && !skill.dir.startsWith(config.skillsDir), "the install lives in the data volume, outside the scanned skills dir");
+    assert.ok(fs.existsSync(path.join(skill.dir, "SKILL.md")), "the installed directory survives the restart too");
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((r) => child.once("exit", r));
+  }
 });
