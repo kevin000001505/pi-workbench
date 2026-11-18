@@ -5,6 +5,7 @@ import { Repos } from "./pages/Repos.tsx";
 import { Secrets } from "./pages/Secrets.tsx";
 import { Sessions } from "./pages/Sessions.tsx";
 import { Settings } from "./pages/Settings.tsx";
+import { Skills } from "./pages/Skills.tsx";
 import { Ssh } from "./pages/Ssh.tsx";
 import { SessionView } from "./session/SessionView.tsx";
 import { Sidebar } from "./Sidebar.tsx";
@@ -24,6 +25,7 @@ export type Route =
       prefillBase?: string;
     }
   | { page: "repos" }
+  | { page: "skills" }
   | { page: "secrets" }
   | { page: "ssh" }
   | { page: "settings" };
@@ -49,6 +51,7 @@ function parse(hash: string): Route {
       };
     case "sessions":
     case "repos":
+    case "skills":
     case "secrets":
     case "ssh":
     case "settings":
@@ -101,6 +104,7 @@ export function App() {
           />
         )}
         {route.page === "repos" && <Repos />}
+        {route.page === "skills" && <Skills />}
         {route.page === "secrets" && <Secrets />}
         {route.page === "ssh" && <Ssh />}
         {route.page === "settings" && <Settings />}
