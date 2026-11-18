@@ -208,7 +208,19 @@ test("a subpath installs the skills found under it, deeper nesting included, and
   const escape = await api("POST", "/api/skill-sources", { url, subpath: "../outside" });
   assert.equal(escape.status, 400);
   assert.match(escape.json.error, /outside/);
-  assert.equal((await api("GET", "/api/skill-sources")).json.length, before + 2, "a refusal installs nothing");
+  // A leading slash names an absolute path, not a directory inside the source: it is refused for what it is.
+  const absolute = await api("POST", "/api/skill-sources", { url, subpath: "/packages" });
+  assert.equal(absolute.status, 400);
+  assert.match(absolute.json.error, /absolute/);
+  // A trailing slash is the same directory named untidily: it installs the same skills.
+  const untidy = await api("POST", "/api/skill-sources", { url, subpath: "packages/" });
+  assert.equal(untidy.status, 200);
+  assert.deepEqual(skillNames(untidy.json), ["helper-style", "ui-style"]);
+  // A subpath the source does not carry is a refusal that names it.
+  const missing = await api("POST", "/api/skill-sources", { url, subpath: "does-not-exist" });
+  assert.equal(missing.status, 400);
+  assert.match(missing.json.error, /no directory "does-not-exist"/);
+  assert.equal((await api("GET", "/api/skill-sources")).json.length, before + 3, "a refusal installs nothing");
 });
 
 test("an add is all-or-nothing: a refused clone, a source with no valid skill, and a source over the cap install nothing", async () => {

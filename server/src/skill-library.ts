@@ -164,11 +164,15 @@ function namedRef(value: unknown): string | null {
   return ref || null;
 }
 
-/** The directory inside the source whose tree installs, as a relative path. It cannot leave the source. */
+/** The directory inside the source whose tree installs, as a path from the source's root. */
 function sourceSubpath(value: unknown): string | null {
-  const sub = typeof value === "string" ? value.trim().replace(/^\/+|\/+$/g, "") : "";
+  const sub = typeof value === "string" ? value.trim().replace(/\/+$/, "") : "";
   if (!sub) return null;
-  if (sub.startsWith("~") || /^[A-Za-z]:[\\/]/.test(sub) || sub.split(/[\\/]/).some((p) => p === "..")) {
+  // A leading slash, `~`, or a drive letter names a path on the machine, not one inside the clone.
+  if (sub.startsWith("/") || sub.startsWith("~") || /^[A-Za-z]:[\\/]/.test(sub)) {
+    throw refuse(`The subpath must be a directory inside the source; "${value}" is an absolute path — name it from the source's root`);
+  }
+  if (sub.split(/[\\/]/).some((p) => p === "..")) {
     throw refuse(`The subpath must be a directory inside the source; "${value}" is outside it`);
   }
   return sub;
