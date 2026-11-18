@@ -111,6 +111,8 @@ export type Ticket = {
   rescueState: "diagnosing" | "fixing" | "rescued" | "failed" | null;
   rescueRunId: string | null;
   fixRunId: string | null;
+  /** The library ids of the skills this ticket's runs must load (its Ticket skill tags); empty when it carries none. */
+  skills: string[];
 };
 
 export type RepoSetupState = "set_up" | "not_set_up" | "in_progress";

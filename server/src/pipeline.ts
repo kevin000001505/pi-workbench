@@ -119,6 +119,8 @@ export type Ticket = {
   rescueState: RescueState | null;
   rescueRunId: string | null;
   fixRunId: string | null;
+  /** The library ids of the skills this ticket's runs load (its Ticket skill tags); empty when it carries none (issue #119). */
+  skills: string[];
 };
 
 export type RescueState = "diagnosing" | "fixing" | "rescued" | "failed";
@@ -126,7 +128,46 @@ export type RescueState = "diagnosing" | "fixing" | "rescued" | "failed";
 /** A spec gets at most this many rescues; each ticket gets one. */
 export const RESCUES_PER_SPEC = 3;
 
-export type TicketInput = { number: number; title: string; body: string; blockedBy?: number[]; trackerRef?: string };
+/**
+ * A ticket as the tickets step records it. `skills` is its Ticket skill tags: the *names* the agent
+ * kept, which the recording site stores as the library's identifiers (issue #119). A card that never
+ * ran the tickets step (Solve, a Solve on a sub-issue) records no tags, so it carries none.
+ */
+export type TicketInput = { number: number; title: string; body: string; blockedBy?: number[]; trackerRef?: string; skills?: string[] };
+
+/** One ticket loads at most this many tagged skills: a run buried in instruction sets stops working. */
+export const TICKET_SKILL_TAG_LIMIT = 3;
+
+/**
+ * A ticket's Ticket skill tags, as the agent passed them (issue #119). The names it may tag with are
+ * the installed skills attached to the tickets place. A name outside that set is dropped and reported
+ * in `dropped`, so the tool result can name it and the agent can retry; more than the limit is a
+ * validation error. The extension applies the same rules, as `checkDiagnosis` mirrors `validateDiagnosis`.
+ */
+export function validateSkillTags(tags: unknown, attached: readonly string[]): { skills: string[]; dropped: string[] } {
+  if (tags === undefined || tags === null) return { skills: [], dropped: [] };
+  if (!Array.isArray(tags)) throw new Error(`a ticket's skills must be a list of skill names (got ${JSON.stringify(tags)})`);
+  const names: string[] = [];
+  for (const t of tags) {
+    const name = typeof t === "string" ? t.trim() : "";
+    if (!name) throw new Error(`a ticket's skills are skill names (got ${JSON.stringify(t)})`);
+    if (!names.includes(name)) names.push(name);
+  }
+  if (names.length > TICKET_SKILL_TAG_LIMIT) throw new Error(`a ticket carries at most ${TICKET_SKILL_TAG_LIMIT} skill tags (it names ${names.length})`);
+  const skills = names.filter((n) => attached.includes(n));
+  return { skills, dropped: names.filter((n) => !skills.includes(n)) };
+}
+
+/**
+ * The library identifiers a ticket's tag names stand for, in the order the agent named them. Stored as
+ * identifiers, so a renamed skill keeps its tags and removing a source clears exactly its own tags.
+ * A name the library does not hold is dropped.
+ */
+export function skillTagIds(names: readonly string[], skills: { id: string; name: string }[]): string[] {
+  const byName = new Map<string, string>();
+  for (const s of skills) if (!byName.has(s.name)) byName.set(s.name, s.id);
+  return [...new Set(names.map((n) => byName.get(n)).filter((id): id is string => !!id))];
+}
 
 /** An open sub-issue of a spec, as GitHub returns it: its own blockers' issue numbers. */
 export type SubIssueSeed = { number: number; title: string; body: string | null; url: string; blockedBy: number[] };
@@ -163,8 +204,12 @@ export const PIPELINE_TOOLS = ["save_grill_summary", "save_spec", "record_ticket
 /** Specs longer than this go to ticket runs as a pointer only (implement-spec: "communicate through context pointers"). */
 const SPEC_INLINE_LIMIT = 40_000;
 
-/** Check what the agent passed to record_tickets: unique numbers, known blockers, no cycles. */
-export function validateTickets(input: unknown): TicketInput[] {
+/**
+ * Check what the agent passed to record_tickets: unique numbers, known blockers, no cycles. With the
+ * tickets place's attached names, each ticket's tags go through `validateSkillTags`: a name outside
+ * that set is dropped, and the kept names come back on the ticket (issue #119).
+ */
+export function validateTickets(input: unknown, attachedSkillNames?: readonly string[]): TicketInput[] {
   if (!Array.isArray(input) || input.length === 0) throw new Error("tickets must be a non-empty array");
   const tickets = input.map((t: any, i) => {
     const number = Number(t?.number);
@@ -172,7 +217,15 @@ export function validateTickets(input: unknown): TicketInput[] {
     if (typeof t.title !== "string" || !t.title.trim()) throw new Error(`ticket ${number}: title is required`);
     if (typeof t.body !== "string" || !t.body.trim()) throw new Error(`ticket ${number}: body is required`);
     const blockedBy = Array.isArray(t.blockedBy) ? t.blockedBy.map(Number) : [];
-    return { number, title: t.title.trim(), body: t.body.trim(), blockedBy, trackerRef: typeof t.trackerRef === "string" ? t.trackerRef : undefined };
+    const tags = attachedSkillNames ? validateSkillTags(t.skills, attachedSkillNames).skills : undefined;
+    return {
+      number,
+      title: t.title.trim(),
+      body: t.body.trim(),
+      blockedBy,
+      trackerRef: typeof t.trackerRef === "string" ? t.trackerRef : undefined,
+      ...(tags ? { skills: tags } : {}),
+    };
   });
   const nums = new Set(tickets.map((t) => t.number));
   if (nums.size !== tickets.length) throw new Error("ticket numbers must be unique");
@@ -230,15 +283,29 @@ const skillLine = (s: PromptSkill) => `- ${s.name}: ${s.description.replace(/\s+
  * is attached to it, so a run with nothing attached keeps its prompt exactly as it is today. A
  * required skill is named with the instruction to load it before any code; an advertised one with the
  * instruction to load it when it fits the work.
+ * `place` names the place this prompt serves: only the tickets place records Ticket skill tags, so only
+ * there does the section ask for a tag list per ticket (issue #119).
  */
-export function skillsSection(skills?: RunSkills): string {
+export function skillsSection(skills?: RunSkills, place?: AttachPoint): string {
   const required = [...new Map((skills?.required ?? []).map((s) => [s.name, s])).values()];
   const advertised = (skills?.advertised ?? []).filter((s) => !required.some((r) => r.name === s.name));
   if (!required.length && !advertised.length) return "";
   const parts = ["## Skills attached to this pipeline place"];
   if (required.length) parts.push("Required. Load each one with the Skill tool before you write any code:", ...required.map(skillLine));
   if (advertised.length) parts.push("Advertised. Load the ones that fit this work with the Skill tool:", ...advertised.map(skillLine));
+  // The tickets step does the matching (issue #119): it proposes each ticket's tags from the list above,
+  // and the user approves them with the breakdown they already answer. Another place asks for none.
+  if (place === "tickets") parts.push(tagInstruction());
   return parts.join("\n");
+}
+
+/** The tickets step's tag instruction: the names above are what a ticket may be tagged with. */
+function tagInstruction(): string {
+  return (
+    `Ticket skill tags: give every ticket a \`skills\` list of at most ${TICKET_SKILL_TAG_LIMIT} of the names above, each name exactly as written. ` +
+    "State every ticket's tags in the breakdown question you ask with ask_user, so the user approves or corrects them before any ticket runs. " +
+    "Call record_tickets with each ticket's `skills` list."
+  );
 }
 
 /**
@@ -246,8 +313,8 @@ export function skillsSection(skills?: RunSkills): string {
  * issue card's grill, a rework) go through this at the moment they are sent or released, never when
  * they are stored: a card that waits for a setup run releases with the skills attached then.
  */
-export function withSkills(prompt: string, skills?: RunSkills): string {
-  const section = skillsSection(skills);
+export function withSkills(prompt: string, skills?: RunSkills, place?: AttachPoint): string {
+  const section = skillsSection(skills, place);
   return section ? `${prompt}\n\n${section}` : prompt;
 }
 
@@ -302,7 +369,7 @@ export function ticketsPrompt(specRef: string | null, contextWindow: number, ski
 ${ticketSizeRule(contextWindow)}
 Present the breakdown and ask the user to approve it with ask_user before publishing. After you publish the approved tickets to the tracker,
 call record_tickets with every ticket: its number, title, full body (what to build and acceptance criteria), blockedBy (ticket numbers) and trackerRef (the file path or issue number/URL).
-Then stop. Do not start implementing.`, skills);
+Then stop. Do not start implementing.`, skills, "tickets");
 }
 
 /**

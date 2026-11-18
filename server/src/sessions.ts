@@ -39,6 +39,7 @@ import {
   attachPointOf,
   PIPELINE_TOOLS,
   reviewPrompt,
+  skillTagIds,
   specPrompt,
   type Ticket,
   type TicketInput,
@@ -253,6 +254,7 @@ const toTicket = (r: TicketRow): Ticket => ({
   rescueState: (r.rescue_state as Ticket["rescueState"]) ?? null,
   rescueRunId: r.rescue_run_id,
   fixRunId: r.fix_run_id,
+  skills: JSON.parse(r.skills || "[]") as string[],
 });
 
 /** The worktree as git sees it: HEAD and the porcelain status. A rescue run must leave it unchanged. */
@@ -702,10 +704,10 @@ export class SessionManager extends EventEmitter {
         // grill/spec/tickets are skipped: the first ticket run starts now.
         await this.runNext(id);
       } else if (plan?.held) {
-        await this.send(id, withSkills(held!, this.promptSkills(id)));
+        await this.send(id, withSkills(held!, this.promptSkills(id), plan.phase));
       } else if (mode === "pipeline") {
         // A task that is already a skill call (the session form's ✦ Skills pick) goes out as it is.
-        await this.send(id, isSkillCall(input.prompt) ? withSkills(input.prompt, this.promptSkills(id)) : grillPrompt(input.prompt, this.promptSkills(id)));
+        await this.send(id, isSkillCall(input.prompt) ? withSkills(input.prompt, this.promptSkills(id), "grill") : grillPrompt(input.prompt, this.promptSkills(id)));
       } else if (task) {
         await this.send(id, input.prompt);
       }
@@ -722,12 +724,14 @@ export class SessionManager extends EventEmitter {
     return this.summary(id);
   }
 
-  /** Record the session's tickets, fresh and ready. */
+  /** Record the session's tickets, fresh and ready. A tag names an installed skill of the tickets place, and the row holds that skill's identifier. */
   private insertTickets(id: string, inputs: TicketInput[]) {
     const insert = this.db.prepare(
-      "INSERT INTO tickets (session_id, num, title, body, blocked_by, tracker_ref, status) VALUES (?, ?, ?, ?, ?, ?, 'ready')",
+      "INSERT INTO tickets (session_id, num, title, body, blocked_by, tracker_ref, status, skills) VALUES (?, ?, ?, ?, ?, ?, 'ready', ?)",
     );
-    for (const t of inputs) insert.run(id, t.number, t.title, t.body, JSON.stringify(t.blockedBy), t.trackerRef ?? null);
+    // A seed (Solve, a Solve on a sub-issue) names no tags, so it needs no read of the library.
+    const library = inputs.some((t) => t.skills?.length) ? listAttachedSkills(this.db, "tickets") : [];
+    for (const t of inputs) insert.run(id, t.number, t.title, t.body, JSON.stringify(t.blockedBy), t.trackerRef ?? null, JSON.stringify(skillTagIds(t.skills ?? [], library)));
   }
 
   /** Spawn pi for the session's active run if it isn't running; resumes its saved conversation. */
@@ -768,6 +772,10 @@ export class SessionManager extends EventEmitter {
     const env = await this.processEnv(row.repo_id);
     // The extension's Skill tool looks there too, so only these sessions can load them.
     if (extraSkills.length) env.PI_WORKBENCH_EXTRA_SKILLS = extraSkills.join(path.delimiter);
+    // The tickets step names the tags it may give a ticket, so its record_tickets call is checked
+    // against the same names its prompt listed (issue #119).
+    const taggable = this.tagSkills(id, runId).map((s) => s.name);
+    if (taggable.length) env.PI_WORKBENCH_TICKET_SKILLS = JSON.stringify(taggable);
     // Rescue and retro runs call the Reviewer model through the rescue proxy: the run gets a
     // per-run token in its environment only, and the Reviewer key stays in the server (ADR 0003).
     const rescuey = !!this.rescueProxy && isRescueyRun(runId);
@@ -866,6 +874,16 @@ export class SessionManager extends EventEmitter {
   /** Every skill dir one run is spawned with: the session's extra skills, then its place's installed ones. */
   runSkillDirs(id: string, runId: string): string[] {
     return [...this.extraSkillDirs(id), ...this.installedSkillDirs(id, runId)];
+  }
+
+  /**
+   * The installed skills a ticket's tags may name for this run (issue #119): only the tickets step records
+   * tags, and the names it may use are the skills attached to that place and switched on. Every other
+   * run records none, so it is handed no name.
+   */
+  private tagSkills(id: string, runId: string) {
+    const row = this.row(id);
+    return attachPointOf(this.runFacts(row, runId)) === "tickets" ? listAttachedSkills(this.db, "tickets") : [];
   }
 
   /**
@@ -968,7 +986,10 @@ export class SessionManager extends EventEmitter {
     } else if (name === "save_spec" && row.phase === "spec" && typeof args.spec === "string" && args.spec.trim()) {
       this.update(id, { spec: args.spec.trim(), spec_ref: typeof args.trackerRef === "string" ? args.trackerRef : null });
     } else if (name === "record_tickets" && row.phase === "tickets") {
-      const tickets = validateTickets(args.tickets);
+      // Each ticket's Ticket skill tags are checked against the skills attached to the tickets step — the
+      // same names its prompt listed. The extension drops a name outside that set and names it back; the
+      // server drops them too, so a stale process never stores one (issue #119).
+      const tickets = validateTickets(args.tickets, this.tagSkills(id, this.runOf(row)).map((sk) => sk.name));
       this.db.prepare("DELETE FROM tickets WHERE session_id = ?").run(id);
       this.insertTickets(id, tickets);
       this.update(id, { rework_tickets: 0 });
@@ -1249,7 +1270,7 @@ export class SessionManager extends EventEmitter {
       // A held prompt is either a full skill call (a rework, a split, a plain issue card's grill)
       // or a bare task from the session form. Only the bare task needs the grill wrapper: wrapping
       // a call again would send pi the skill directive twice.
-      await this.send(id, withSkills(isSkillCall(row.held_prompt) ? row.held_prompt : grillPrompt(row.held_prompt), this.promptSkills(id)), "followUp");
+      await this.send(id, withSkills(isSkillCall(row.held_prompt) ? row.held_prompt : grillPrompt(row.held_prompt), this.promptSkills(id), row.held_phase ?? "grill"), "followUp");
       return;
     }
     // A direct session that already has its PR recorded keeps phase `pr`: its card is in Review.

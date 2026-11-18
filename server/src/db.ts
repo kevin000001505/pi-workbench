@@ -90,6 +90,8 @@ export type TicketRow = {
   rescue_run_id: string | null;
   /** JSON of the finish_diagnosis arguments the rescue run reported, when it did. */
   diagnosis: string | null;
+  /** JSON list of installed_skills ids: this ticket's Ticket skill tags (issue #119). */
+  skills: string;
   /** pi session id of the fix run, when one started. */
   fix_run_id: string | null;
   /** null | diagnosing | fixing | rescued | failed */
@@ -148,6 +150,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS tickets (
   session_id TEXT NOT NULL, num INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
   blocked_by TEXT NOT NULL DEFAULT '[]', tracker_ref TEXT, status TEXT NOT NULL DEFAULT 'ready',
+  skills TEXT NOT NULL DEFAULT '[]',
   note TEXT, run_id TEXT, started_at INTEGER, finished_at INTEGER, PRIMARY KEY (session_id, num)
 );
 -- Auto-approve's audit trail: pi's messages hold no automatic answers, so each is kept here and
@@ -242,6 +245,9 @@ const ADDED_COLUMNS: [string, string, string][] = [
   // a JSON list of the names pipeline.ts names, in that order.
   ["installed_skills", "enabled", "INTEGER NOT NULL DEFAULT 1"],
   ["installed_skills", "attach", "TEXT NOT NULL DEFAULT '[]'"],
+  // A ticket's Ticket skill tags (issue #119): a JSON list of installed_skills ids — the library skills
+  // its runs must load.
+  ["tickets", "skills", "TEXT NOT NULL DEFAULT '[]'"],
 ];
 
 function migrate(db: DatabaseSync) {

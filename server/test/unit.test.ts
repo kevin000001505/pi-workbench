@@ -1741,3 +1741,78 @@ test("a required skill is named as required, and the place's other skills as adv
   assert.ok(fix.indexOf("## Skills attached") < fix.indexOf("## Diagnosis"), "the skills are named before the diagnosis the run must follow");
   assert.ok(p.implementPrompt(promptTicket, null, null, [], { advertised: [{ name: "x", description: "  " }] }).includes("- x: (no description)"), "a skill with no description is still named");
 });
+
+test("a ticket's skill tags keep the names attached to the tickets step, drop the rest, and refuse a fourth", async () => {
+  const p = await import("../src/pipeline.ts");
+  const attached = ["design-rules", "a11y-checks"];
+
+  assert.deepEqual(p.validateSkillTags(["design-rules"], attached), { skills: ["design-rules"], dropped: [] }, "a plain list of attached names is accepted");
+  assert.deepEqual(p.validateSkillTags(undefined, attached), { skills: [], dropped: [] }, "a ticket with no tags needs no skills field");
+  assert.deepEqual(p.validateSkillTags(["frontend-design", "design-rules"], attached), { skills: ["design-rules"], dropped: ["frontend-design"] }, "a name outside the attached set is dropped, and the dropped name is reported");
+  assert.deepEqual(p.validateSkillTags([], ["design-rules"]).skills, [], "nothing is attached to the tickets step: no tag survives");
+  assert.deepEqual(p.validateSkillTags(["design-rules", "a11y-checks", "design-rules"], attached).skills, ["design-rules", "a11y-checks"], "a name named twice is one tag");
+  assert.throws(() => p.validateSkillTags(["design-rules", "a11y-checks", "other", "x"], attached), /at most 3/, "a fourth tag name is a validation error");
+  assert.throws(() => p.validateSkillTags("design-rules", attached), /list of skill names/);
+  assert.throws(() => p.validateSkillTags([7], attached), /skill names/);
+  assert.equal(p.TICKET_SKILL_TAG_LIMIT, 3, "the cap the prompt names and the validator enforce are one number");
+
+  // record_tickets keeps the tags it validated; the dropped ones never reach storage.
+  const recorded = p.validateTickets(
+    [
+      { number: 1, title: "Header", body: "b", skills: ["design-rules", "frontend-design"] },
+      { number: 2, title: "Query", body: "b", blockedBy: [1] },
+    ],
+    attached,
+  );
+  assert.deepEqual(recorded.map((t) => t.skills), [["design-rules"], []], "the kept tags come back on each ticket, and a ticket with none is empty");
+  assert.throws(() => p.validateTickets([{ number: 1, title: "Header", body: "b", skills: ["design-rules", "a11y-checks", "other", "x"] }], attached), /at most 3/, "a fourth tag fails the whole record_tickets call");
+
+  // A card that never ran the tickets step records no tags: Solve, and a Solve on a sub-issue.
+  const plain = p.validateTickets([{ number: 1, title: "Fix", body: "b", trackerRef: "5" }]);
+  assert.equal(plain[0].skills, undefined, "no attached list was given, so no tag rule was applied");
+  const fromSubs = p.ticketsFromSubIssues([{ number: 5, title: "A ticket", body: "b", url: "u", blockedBy: [] }]);
+  assert.equal(fromSubs[0].skills, undefined, "a sub-issue ticket carries no tags");
+});
+
+test("a ticket's tag names become the library's identifiers, in the order the agent named them", async () => {
+  const p = await import("../src/pipeline.ts");
+  const library = [
+    { id: "sk-a11y", name: "a11y-checks" },
+    { id: "sk-design", name: "design-rules" },
+  ];
+  assert.deepEqual(p.skillTagIds(["design-rules", "a11y-checks"], library), ["sk-design", "sk-a11y"], "the tags are stored as identifiers, not names");
+  assert.deepEqual(p.skillTagIds(["design-rules", "design-rules"], library), ["sk-design"], "each identifier once");
+  assert.deepEqual(p.skillTagIds(["design-rules", "gone-skill"], library), ["sk-design"], "a name the library does not hold is dropped");
+  assert.deepEqual(p.skillTagIds([], library), [], "no tags");
+});
+
+test("the tickets step asks for a tag list per ticket when its place has an attached skill, and asks for none when it has nothing", async () => {
+  const p = await import("../src/pipeline.ts");
+  const attached = { advertised: [{ name: "design-rules", description: "The workbench UI design rules." }] };
+  const prompt = p.ticketsPrompt("#4", 131072, attached);
+  assert.match(prompt, /^Ticket skill tags:.*`skills` list/m, "the tickets step is told to give each ticket a skills list");
+  assert.match(prompt, new RegExp(`at most ${p.TICKET_SKILL_TAG_LIMIT}`), "the prompt names the cap the validator enforces");
+  assert.match(prompt, /State every ticket's tags in the breakdown/, "the user approves the tags with the breakdown they already answer");
+  assert.ok(prompt.includes("- design-rules: The workbench UI design rules."), "the taggable names are the ones the section lists");
+  assert.ok(prompt.indexOf("- design-rules:") < prompt.indexOf("Ticket skill tags:"), "the names come before the instruction that points at them");
+
+  // A Split held prompt releases into the tickets place, so it asks for tags too.
+  const split = p.withSkills(p.splitPrompt("https://github.com/a/b/issues/5", 131072), attached, "tickets");
+  assert.match(split, /^Ticket skill tags:/m, "a split records its sub-issues with tags too");
+  // Nothing attached to the tickets place: no tag instruction at all, and the prompt is unchanged.
+  assert.equal(
+    p.withSkills(p.splitPrompt("https://github.com/a/b/issues/5", 4096), { advertised: [] }, "tickets"),
+    p.splitPrompt("https://github.com/a/b/issues/5", 4096),
+    "a split on a library with nothing attached is the prompt it always was",
+  );
+  for (const [name, prompt] of [
+    ["tickets with nothing attached", p.ticketsPrompt("#4", 4096, { advertised: [] })],
+    ["tickets with no skills argument", p.ticketsPrompt("#4", 4096)],
+    ["grill", p.grillPrompt("the task", attached)],
+    ["spec", p.specPrompt(attached)],
+    ["implement", p.implementPrompt(promptTicket, null, null, [], attached)],
+    ["review", p.reviewPrompt("main", "the spec", "#4", [promptTicket], attached)],
+    ["a rework", p.reworkPrompt("https://github.com/a/b/issues/4", attached)],
+  ])
+    assert.ok(!prompt.includes("Ticket skill tags"), `${name} asks for no tags`);
+});

@@ -13,6 +13,10 @@
  *   probe-direct  → direct
  *   probe-all     → every pipeline place, so setup is the place that must show nothing
  *   probe-off     → every pipeline place, but switched off, so it reaches no run at all
+ *
+ * The last three tests are the tickets step's Ticket skill tags (issue #119): the tags the breakdown
+ * proposes, the tags the card records, and the two refusals — a name outside the attached set is
+ * dropped and named, a fourth tag on one ticket is a validation error.
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -108,7 +112,7 @@ before(async () => {
   const { GitHub } = await import("../src/github.ts");
   const { githubDelivery } = await import("../src/delivery.ts");
   const { getModelSettings } = await import("../src/settings.ts");
-  const { addSkillSource, setSkillSettings } = await import("../src/skill-library.ts");
+  const { addSkillSource, installedSkill, setSkillSettings } = await import("../src/skill-library.ts");
   db = openDb(config.dbFile);
   saveModelSettings(db, { baseUrl: mock.url });
   writePiConfig(db);
@@ -397,5 +401,91 @@ test("a Split card's held prompt and a task held for setup both carry the skills
   await waitFor(() => mgr.summary(s.id).phase === "grill");
   const grill = await promptSeen(fromSetup, /\[pi-workbench pipeline: grill-with-docs/);
   assert.deepEqual(namedSkills(grill), ["probe-all", "probe-plan"], "the released task carries the grill place's skills");
+  await mgr.stop(s.id);
+});
+
+test("the tickets step proposes each ticket's tags, the user approves them with the breakdown, and the card's tickets carry them", { skip }, async () => {
+  const from = mock.requests.length;
+  const s = await mgr.create({ repoId: "me/demo", title: "Tag the tickets", prompt: "add a greeting" });
+  await waitFor(() => mgr.summary(s.id).phase === "grill");
+  await answerNext(s.id, /shared understanding/);
+  await waitFor(() => mgr.summary(s.id).phase === "spec");
+  await answerNext(s.id, /seam/);
+
+  // The tickets prompt names its place's skills and asks for a tag list per ticket.
+  const tickets = await promptSeen(from, /\[pi-workbench pipeline\]\nTicket size/);
+  assert.deepEqual(namedSkills(tickets), ["probe-all", "probe-plan"], "the taggable names are the tickets place's attached skills");
+  assert.match(tickets, /^Ticket skill tags:.*`skills` list/m, "the tickets step is told to give each ticket a skills list");
+
+  // The breakdown the user answers states every ticket's tags, so they approve or correct them.
+  const ask = await waitFor(() => (mgr.summary(s.id).phase === "tickets" ? mgr.summary(s.id).pending[0] : undefined));
+  assert.match(ask.title, /Approve/);
+  assert.deepEqual(ask.title.match(/\((?:tags: [^)]*|no tags)\)/g), ["(tags: probe-all)", "(tags: probe-plan)", "(no tags)"], "each ticket's tags are on the card the user reads");
+  await answerNext(s.id, /Approve/);
+
+  // What the outside can see: the session's tickets carry their tags, as the library's identifiers.
+  await waitFor(() => mgr.summary(s.id).phase === "ready" && mgr.summary(s.id).status === "idle");
+  const stored = mgr.summary(s.id).tickets;
+  const tagName = (id: string) => Object.entries(library.skills).find(([, skillId]) => skillId === id)?.[0] ?? `unknown:${id}`;
+  assert.equal(stored.length, 3);
+  assert.deepEqual(
+    stored.map((t: any) => t.skills.map(tagName)),
+    [["probe-all"], ["probe-plan"], []],
+    "each ticket carries its tags; the stored tags are identifiers, and a ticket with none carries an empty list",
+  );
+  await mgr.stop(s.id);
+});
+
+test("a tag the tickets step is not attached to is dropped and named back, with the names a ticket may use", { skip }, async () => {
+  const from = mock.requests.length;
+  const s = await mgr.create({ repoId: "me/demo", title: "A wrong tag", prompt: "add a greeting BADTAG" });
+  await waitFor(() => mgr.summary(s.id).phase === "grill");
+  await answerNext(s.id, /shared understanding/);
+  await waitFor(() => mgr.summary(s.id).phase === "spec");
+  await answerNext(s.id, /seam/);
+  await waitFor(() => mgr.summary(s.id).phase === "tickets");
+  await answerNext(s.id, /Approve/);
+
+  // The agent is answered with the dropped name and the names it may tag with.
+  const dropped = await waitFor(() => {
+    const texts = mock.requests.slice(from).flatMap((r: any) => (r.messages ?? []).filter((m: any) => m.role === "tool" || m.role === "toolResult").map((m: any) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))));
+    return texts.find((t) => t.includes("Dropped the ticket skill tags"));
+  });
+  assert.match(dropped, /skill-the-library-does-not-hold/, "the dropped name is named");
+  assert.match(dropped, /You can tag a ticket with: probe-all, probe-plan/, "and the names a ticket may use with it");
+  assert.deepEqual(
+    mgr.summary(s.id).tickets.map((t: any) => t.skills.map((id: string) => Object.entries(library.skills).find(([, skillId]) => skillId === id)?.[0] ?? `unknown:${id}`)),
+    [["probe-all"], ["probe-plan"], []],
+    "the card records only the tags attached to the tickets step",
+  );
+  await mgr.stop(s.id);
+});
+
+test("a ticket carries at most 3 tags: a fourth is a validation error the agent must fix before the card is recorded", { skip }, async () => {
+  const from = mock.requests.length;
+  const s = await mgr.create({ repoId: "me/demo", title: "Four tags", prompt: "add a greeting MANYTAG" });
+  await waitFor(() => mgr.summary(s.id).phase === "grill");
+  await answerNext(s.id, /shared understanding/);
+  await waitFor(() => mgr.summary(s.id).phase === "spec");
+  await answerNext(s.id, /seam/);
+  await waitFor(() => mgr.summary(s.id).phase === "tickets");
+  await answerNext(s.id, /Approve/);
+
+  // The call with a fourth tag is refused, and the reason names the limit.
+  const refused = await waitFor(() => {
+    const texts = mock.requests.slice(from).flatMap((r: any) => (r.messages ?? []).filter((m: any) => m.role === "tool" || m.role === "toolResult").map((m: any) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))));
+    return texts.find((t) => t.includes("Not recorded"));
+  });
+  assert.match(refused, /ticket 1 carries 4 skill tags; a ticket carries at most 3/, "the refusal names the limit");
+
+  // The run calls record_tickets again with a list a ticket may carry, and the card records it: the
+  // refused call recorded nothing, so no tag of it is on the card.
+  await waitFor(() => mgr.summary(s.id).tickets.length === 3);
+  const tagName = (id: string) => Object.entries(library.skills).find(([, skillId]) => skillId === id)?.[0] ?? `unknown:${id}`;
+  assert.deepEqual(
+    mgr.summary(s.id).tickets.map((t: any) => t.skills.map(tagName)),
+    [["probe-all"], ["probe-plan"], []],
+    "the retry records the tags the tickets step is attached to",
+  );
   await mgr.stop(s.id);
 });

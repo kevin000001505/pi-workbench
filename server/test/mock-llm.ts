@@ -108,13 +108,24 @@ function textOf(content: unknown): string {
   return "";
 }
 
+/** The names the prompt's attached-skill section lists: the installed skills of the run's pipeline place. */
+function attachedSkillNames(text: string): string[] {
+  const at = text.lastIndexOf("## Skills attached to this pipeline place");
+  if (at < 0) return [];
+  return [...text.slice(at).matchAll(/^- ([A-Za-z0-9._-]+):/gm)].map((m) => m[1]);
+}
+
 /**
  * The pipeline's phases, scripted by step (assistant replies since the last user message):
  * - grill-with-docs: ask to confirm → save_grill_summary → done
  * - to-spec: ask about seams → write the spec file → save_spec → done (trackerRef: the task's
  *   `SPEC_REF=<ref>`, or the spec file)
- * - to-tickets: ask to approve → write .scratch files → record_tickets (3 tickets) → done; a
- *   "Change it" answer ends the run with a question instead
+ * - to-tickets: ask to approve (with each ticket's Ticket skill tags, when its place has an attached
+ *   skill) → write .scratch files → record_tickets (3 tickets, each with its tags) → done; a
+ *   "Change it" answer ends the run with a question instead; a task that says BADTAG names a tag the
+ *   tickets step is not attached to, which the workbench drops and names back; a task that says MANYTAG
+ *   gives one ticket a fourth tag, which the workbench refuses, and the call goes again with a list a
+ *   ticket may carry
  * - tdd (a ticket): commit a line for the ticket (and `git push`, a gated call, if the ticket says
  *   PUSHME) → finish_ticket (blocked if the ticket says BLOCKME) → done; a ticket that says ASKME
  *   (with SLOWME, or alone) asks the user a decision first and waits on that answer
@@ -148,23 +159,50 @@ function pipelineScript(userText: string, step: number, lastResult: string, conv
     return { text: "Spec published." };
   }
   if (userText.includes('<skill name="to-tickets"')) {
-    if (step === 0) return { tool: { name: "ask_user", args: { question: "Approve: 1. Write hello.txt; 2. Add a test (blocked by 1); 3. Add docs (blocked by 1)?", options: ["Approve", "Change it"] } } };
-    if (step === 1 && /Change it/.test(lastResult)) return { text: "What should change in the breakdown?" };
-    if (step === 1) return { tool: { name: "bash", args: { command: "mkdir -p .scratch/greeting/issues && for n in 01 02 03; do echo ticket > .scratch/greeting/issues/$n.md; done && echo published" } } };
-    if (step === 2) {
+    // The tickets step asks for Ticket skill tags when the tickets place has an attached skill (issue #119):
+    // the names it may tag with are the ones its prompt lists.
+    const taggable = userText.includes("Ticket skill tags");
+    const names = attachedSkillNames(userText);
+    // BADTAG in the task: the record_tickets call names a skill the tickets step is not attached to, so
+    // the workbench drops that tag, names it back, and records the ticket with the valid tags only.
+    const badTag = conversation.includes("BADTAG");
+    // MANYTAG in the task: the first call gives one ticket more tags than a ticket may carry, which the
+    // workbench refuses, so the run calls record_tickets again with a list a ticket may carry.
+    const manyTags = conversation.includes("MANYTAG");
+    const tagsFor = (num: number, first = true): string[] => {
+      if (!taggable || num === 3) return [];
+      const tags = [names[num - 1]].filter(Boolean);
+      if (num === 1 && badTag) tags.push("skill-the-library-does-not-hold");
+      if (num === 1 && manyTags && first) tags.push("one-more", "and-another", "skill-the-library-does-not-hold");
+      return tags;
+    };
+    // The breakdown states the tags the tickets step can actually honour, the ones the user approves.
+    const tagWords = (num: number) => {
+      if (!taggable) return "";
+      const tags = tagsFor(num, false).filter((n) => names.includes(n));
+      return tags.length ? ` (tags: ${tags.join(", ")})` : " (no tags)";
+    };
+    const recordArgs = (first: boolean) => ({
+      tickets: [
+        { number: 1, title: "Write hello.txt", body: "Create hello.txt containing Hello. Push it. PUSHME", trackerRef: ".scratch/greeting/issues/01.md", ...(tagsFor(1, first).length ? { skills: tagsFor(1, first) } : {}) },
+        { number: 2, title: "Add a test", body: "Test that hello.txt says Hello.", blockedBy: [1], trackerRef: ".scratch/greeting/issues/02.md", ...(tagsFor(2, first).length ? { skills: tagsFor(2, first) } : {}) },
+        { number: 3, title: "Add docs", body: "Document it. BLOCKME", blockedBy: [1], trackerRef: ".scratch/greeting/issues/03.md" },
+      ],
+    });
+    if (step === 0)
       return {
         tool: {
-          name: "record_tickets",
+          name: "ask_user",
           args: {
-            tickets: [
-              { number: 1, title: "Write hello.txt", body: "Create hello.txt containing Hello. Push it. PUSHME", trackerRef: ".scratch/greeting/issues/01.md" },
-              { number: 2, title: "Add a test", body: "Test that hello.txt says Hello.", blockedBy: [1], trackerRef: ".scratch/greeting/issues/02.md" },
-              { number: 3, title: "Add docs", body: "Document it. BLOCKME", blockedBy: [1], trackerRef: ".scratch/greeting/issues/03.md" },
-            ],
+            question: `Approve: 1. Write hello.txt${tagWords(1)}; 2. Add a test (blocked by 1)${tagWords(2)}; 3. Add docs (blocked by 1)${tagWords(3)}?`,
+            options: ["Approve", "Change it"],
           },
         },
       };
-    }
+    if (step === 1 && /Change it/.test(lastResult)) return { text: "What should change in the breakdown?" };
+    if (step === 1) return { tool: { name: "bash", args: { command: "mkdir -p .scratch/greeting/issues && for n in 01 02 03; do echo ticket > .scratch/greeting/issues/$n.md; done && echo published" } } };
+    if (step === 2) return { tool: { name: "record_tickets", args: recordArgs(true) } };
+    if (step === 3 && lastResult.includes("Not recorded")) return { tool: { name: "record_tickets", args: recordArgs(false) } };
     return { text: "Published 3 tickets." };
   }
   if (userText.includes('<skill name="code-review"')) {
