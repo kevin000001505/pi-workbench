@@ -436,6 +436,15 @@ const router = new Router()
   // The Skills page's on/off switch and attach checkboxes (issue #117): one installed skill of one
   // source. The change reaches the next run of the places it names, never a run going now.
   .on("PATCH", "/api/skill-sources/:sourceId/skills/:skillId", ({ params, body }) => setSkillSettings(db, params.sourceId, params.skillId, body ?? {}))
+  // Update (issue #122): the source's ref is re-resolved and the new version installs only after it
+  // validates, so a source that moved on takes its new head — and a source with no ref takes the new head
+  // of its default branch. A clone or validation failure changes nothing that works: the source keeps the
+  // version it has and answers with the reason, which the Skills page states.
+  .on("POST", "/api/skill-sources/:sourceId/update", async ({ params }) => sessions.updateSkillSource(params.sourceId))
+  // Remove (issue #122): the source's row, the rows of the skills it installed and the directory that
+  // holds them all go, and with them every ticket's Ticket skill tag that named one of them — so an
+  // installed skill reaches no run, no card and no ticket again.
+  .on("DELETE", "/api/skill-sources/:sourceId", ({ params }) => sessions.removeSkillSource(params.sourceId))
 
   // --- settings & secrets ---------------------------------------------------------------
   .on("GET", "/api/settings", () => ({ model: getModelSettings(db), approval: getApprovalSettings(db), autoApprove: autoApproveView(db, secrets), pipeline: getPipelineSettings(db) }))

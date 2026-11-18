@@ -291,3 +291,82 @@ test("the Board's card carries the tag names beside the ticket list that names t
 
   events.close();
 });
+
+/** A second Skill source, in its own git directory: Update and Remove of the first one do not touch it. */
+function otherSourceDir() {
+  const dir = path.join(tmp, "other-skill-source");
+  fs.mkdirSync(path.join(dir, "keep"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "keep", "SKILL.md"), "---\nname: keep-skill\ndescription: A skill of another Skill source.\n---\nkeep body\n");
+  sh(dir, "init", "-q", "-b", "main");
+  sh(dir, "add", ".");
+  sh(dir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "the other source's skills");
+  return dir;
+}
+
+const skillNamesOf = (source: any) => source.skills.map((s: any) => s.name).sort();
+
+test("Update takes a skill the new version no longer carries out of the tickets that named it, and leaves the tags that still name a skill", async () => {
+  const card = seedCard("update-tags", [{ num: 1, title: "Write the panel" }]);
+  const other = await api("POST", "/api/skill-sources", { url: `file://${otherSourceDir()}` });
+  assert.equal(other.status, 200, JSON.stringify(other.json));
+  const tagged = await setTags(card, 1, ["design-rules", "copy-desk", "keep-skill"]);
+  assert.equal(tagged.status, 200, JSON.stringify(tagged.json));
+
+  // The upstream drops one skill of the first source.
+  fs.rmSync(path.join(skillSource, "copy-desk"), { recursive: true, force: true });
+  sh(skillSource, "add", ".");
+  sh(skillSource, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "drop the copy-desk skill");
+
+  const updated = await api("POST", `/api/skill-sources/${lib.sourceId}/update`, {});
+  assert.equal(updated.status, 200, JSON.stringify(updated.json));
+  assert.deepEqual(skillNamesOf(updated.json), ["a11y-check", "design-rules", "switched-off"], "the installed skills are the new version's");
+
+  const ticket = (await api("GET", "/api/sessions")).json.find((s: any) => s.id === card).tickets[0];
+  assert.deepEqual(ticket.skillTags, ["design-rules", "keep-skill"], "the ticket loses the tag naming a skill the library no longer holds, and keeps the rest in order");
+  assert.deepEqual(ticket.skills, [lib.skills.get("design-rules"), other.json.skills.find((s: any) => s.name === "keep-skill").id], "and stores only identifiers of skills the library holds");
+});
+
+test("Remove clears the Ticket skill tags that named its skills from every ticket of every card, and the Board and the card detail state those tickets without them", async () => {
+  const cardA = seedCard("remove-a", [{ num: 1, title: "One tagged ticket" }, { num: 2, title: "Another tagged ticket" }]);
+  const cardB = seedCard("remove-b", [{ num: 1, title: "A tag of another source" }]);
+  const cardC = seedCard("remove-c", [{ num: 1, title: "A tagged ticket of a Done card" }], { phase: "done" });
+  assert.equal((await setTags(cardA, 1, ["design-rules", "copy-desk"])).status, 200);
+  assert.equal((await setTags(cardA, 2, ["copy-desk"])).status, 200);
+  const taggedB = await setTags(cardB, 1, ["keep-skill", "a11y-check"]);
+  assert.equal(taggedB.status, 200, JSON.stringify(taggedB.json));
+  const keepId = taggedB.json.ticket.skills[0];
+  // A Done card refuses a tag change through the route (issue #121), so its tag is a row the tickets step stored.
+  db.prepare("UPDATE tickets SET skills = ? WHERE session_id = ? AND num = 1").run(JSON.stringify([lib.skills.get("design-rules")]), cardC);
+
+  const events = await boardEvents();
+  const removed = await api("DELETE", `/api/skill-sources/${lib.sourceId}`);
+  assert.equal(removed.status, 200, JSON.stringify(removed.json));
+  // The cards whose tickets lost a tag are told to read again, as a tag change is.
+  await waitFor(() => events.seen.includes("me/app"));
+
+  const sessions = (await api("GET", "/api/sessions")).json as any[];
+  const a = sessions.find((s) => s.id === cardA);
+  assert.deepEqual(a.tickets.map((t: any) => t.skillTags), [[], []], "every ticket of the card is stated without them");
+  assert.deepEqual(a.tickets.map((t: any) => t.skills), [[], []], "and stores no identifier of a skill the library no longer holds");
+  const c = sessions.find((s) => s.id === cardC);
+  assert.deepEqual(c.tickets[0].skillTags, [], "a Done card's ticket goes without them too, because no read may state a skill that is gone");
+
+  // A tag naming a skill of a source Remove does not touch stays, in the order it was in.
+  const b = sessions.find((s) => s.id === cardB);
+  assert.deepEqual(b.tickets[0].skillTags, ["keep-skill"], "the surviving tag keeps its place in the ticket's order");
+  assert.deepEqual(b.tickets[0].skills, [keepId]);
+
+  // The Board's card states the same tickets: no tag entry for a ticket that carries none.
+  const cards = (await api("GET", "/api/board?repo=me/app")).json.cards as any[];
+  assert.deepEqual(cards.find((x) => x.id === cardA).ticketTags, [], "the Board's card names no tag for those tickets");
+  assert.deepEqual(cards.find((x) => x.id === cardC).ticketTags, [], "nor the Done card's ticket");
+  assert.deepEqual(cards.find((x) => x.id === cardB).ticketTags, [{ num: 1, names: ["keep-skill"] }], "and still names the tag that survives");
+
+  // The library states nothing of the removed source, so no run can be told to load its skills.
+  const listed = await api("GET", "/api/skill-sources");
+  assert.ok(!listed.json.some((s: any) => s.id === lib.sourceId));
+  assert.ok(!listed.json.some((s: any) => s.skills.some((k: any) => k.name === "design-rules" || k.name === "copy-desk")));
+  assert.deepEqual((await api("GET", `/api/skills?sessionId=${cardA}`)).json.filter((s: any) => s.source === "installed"), [], "and the session's own skill read states no installed skill of it");
+
+  events.close();
+});

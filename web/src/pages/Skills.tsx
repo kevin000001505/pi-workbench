@@ -4,9 +4,12 @@
  * Add skill takes a git URL, an optional ref and an optional subpath, and states the refusal inline.
  * Every Skill source is a row that states what it was cloned from, the commit it pinned and how big the
  * install is, with the installed skills listed under it. Each installed skill row carries its on/off
- * switch and its attach checkboxes: the pipeline places whose runs load it (issue #117). The read-only
- * rows state what a session can reach without the library: the built-in optional TypeSafe skill, and
- * the image skills.
+ * switch and its attach checkboxes: the pipeline places whose runs load it (issue #117). Each source row
+ * carries Update and Remove (issue #122): Update re-resolves the source's ref and installs the new version
+ * only after it validates, so a source whose new version cannot install states why and keeps the version
+ * that works; Remove, after a confirm, takes the source, its installed skills and their directory out of
+ * the library, and with them every ticket's skill tag that named one of them. The read-only rows state
+ * what a session can reach without the library: the built-in optional TypeSafe skill, and the image skills.
  */
 import { useCallback, useEffect, useState } from "react";
 import { ATTACH_LABELS, ATTACH_POINTS, type AttachPoint } from "../../../shared/attach.ts";
@@ -61,8 +64,26 @@ function SkillRow({ skill, saving, onSave }: { skill: InstalledSkill; saving: bo
   );
 }
 
-/** One Skill source, with the skills it installed under it. */
-function SourceRow({ source, saving, onSave }: { source: SkillSource; saving: string | null; onSave: (skillId: string, body: { enabled?: boolean; attach?: string[] }) => void }) {
+/** The confirm text for Remove, the same for every source. */
+const removeSourceQuestion = (source: SkillSource) =>
+  `Remove ${source.url}${source.subpath ? ` (${source.subpath})` : ""} from the library? It deletes ${source.skills.length} installed ${source.skills.length === 1 ? "skill" : "skills"}${source.skills.length ? ` (${source.skills.map((s) => s.name).join(", ")})` : ""} and the directory that holds them, and every ticket's skill tag that names one of them — on every card, the done cards included.`;
+
+/** One Skill source, with its Update and Remove and the skills it installed under it. */
+function SourceRow({
+  source,
+  saving,
+  busy,
+  onSave,
+  onUpdate,
+  onRemove,
+}: {
+  source: SkillSource;
+  saving: string | null;
+  busy: boolean;
+  onSave: (skillId: string, body: { enabled?: boolean; attach?: string[] }) => void;
+  onUpdate: () => void;
+  onRemove: () => void;
+}) {
   return (
     <article className="card-list-row">
       <div className="row gap">
@@ -72,6 +93,13 @@ function SourceRow({ source, saving, onSave }: { source: SkillSource; saving: st
         <span className="tag" title="The tree the install keeps">
           {sizeOf(source.sizeBytes)}
         </span>
+        {busy && <Spinner />}
+        <button className="btn btn-sm btn-ghost" disabled={busy} onClick={onUpdate} title="Re-read the ref and install the new version">
+          Update
+        </button>
+        <button className="btn btn-sm btn-ghost danger" disabled={busy} onClick={onRemove} title="Take the source and its installed skills out of the library">
+          Remove
+        </button>
       </div>
       <div className="skill-meta row gap wrap small muted">
         <span>Ref: {source.ref ?? "default head"}</span>
@@ -80,6 +108,12 @@ function SourceRow({ source, saving, onSave }: { source: SkillSource; saving: st
           Commit: {source.commit.slice(0, 12)}
         </span>
       </div>
+      {/* A failed Update states why, and what still works: the source keeps the version it pinned. */}
+      {source.lastError && (
+        <p className="alert alert-error" role="alert">
+          Update failed: {source.lastError} The source keeps the version that works, pinned at {source.commit.slice(0, 12)}.
+        </p>
+      )}
       <div className="skill-rows">
         {source.skills.map((s) => (
           <SkillRow key={s.id} skill={s} saving={saving === s.id} onSave={onSave} />
@@ -115,6 +149,8 @@ export function Skills() {
   const [adding, setAdding] = useState(false);
   /** The installed skill whose setting is on its way to the server. */
   const [saving, setSaving] = useState<string | null>(null);
+  /** The source whose Update or Remove is on its way to the server. */
+  const [busySource, setBusySource] = useState<string | null>(null);
 
   const load = useCallback(() => {
     api
@@ -143,6 +179,49 @@ export function Skills() {
       toast((e as Error).message, "error");
     } finally {
       setSaving(null);
+    }
+  };
+
+  /**
+   * Update one Skill source (issue #122): the workbench re-reads the source's ref — a branch that moved
+   * on, or the source's default head when it names no ref — and installs the new version only after it
+   * validates. A refusal leaves the source stating the version that still works, with the reason on its
+   * row, so the page reads the library again instead of showing an answer that installed nothing.
+   */
+  const updateSource = async (sourceId: string) => {
+    const source = sources.find((s) => s.id === sourceId);
+    if (!source) return;
+    setBusySource(sourceId);
+    try {
+      const updated = await api.post<SkillSource>(`/api/skill-sources/${sourceId}/update`);
+      setSources((list) => list.map((s) => (s.id === updated.id ? updated : s)));
+      toast(`Updated ${updated.url} to commit ${updated.commit.slice(0, 12)}`);
+    } catch (e) {
+      toast((e as Error).message, "error");
+      load();
+    } finally {
+      setBusySource(null);
+    }
+  };
+
+  /**
+   * Remove one Skill source, after the confirm (issue #122): the source, the rows of the skills it
+   * installed and the directory that holds them go, and with them every ticket's skill tag that named one
+   * of them. The answer counts the cards that lost a tag, because the Board and the card detail state
+   * those tickets without it.
+   */
+  const removeSource = async (source: SkillSource) => {
+    if (!confirm(removeSourceQuestion(source))) return;
+    setBusySource(source.id);
+    try {
+      const { source: removed, cards } = await api.del<{ source: SkillSource; cards: number }>(`/api/skill-sources/${source.id}`);
+      setSources((list) => list.filter((s) => s.id !== removed.id));
+      toast(`Removed ${removed.url}${cards ? ` — ${cards} ${cards === 1 ? "card" : "cards"} lost a ticket skill tag` : ""}`);
+    } catch (e) {
+      toast((e as Error).message, "error");
+      load();
+    } finally {
+      setBusySource(null);
     }
   };
 
@@ -228,14 +307,23 @@ export function Skills() {
         </h2>
         <p className="muted small">
           Tick the pipeline places an installed skill should serve: only the runs of a ticked place load it, and the next run of that place is
-          the one a change reaches. Switch it off to reach no run at all.
+          the one a change reaches. Switch it off to reach no run at all. Update re-reads a source and installs its new version in place; Remove
+          takes the source and its installed skills out of the library, and with them every ticket tag that names one of them.
         </p>
         {sources.length === 0 ? (
           <p className="muted">No Skill source yet. Add one above: the workbench clones it, records the commit, and lists its skills here.</p>
         ) : (
           <div className="card-list">
             {sources.map((s) => (
-              <SourceRow key={s.id} source={s} saving={saving} onSave={(skillId, body) => void saveSkill(skillId, body)} />
+              <SourceRow
+                key={s.id}
+                source={s}
+                saving={saving}
+                busy={busySource === s.id}
+                onSave={(skillId, body) => void saveSkill(skillId, body)}
+                onUpdate={() => void updateSource(s.id)}
+                onRemove={() => void removeSource(s)}
+              />
             ))}
           </div>
         )}

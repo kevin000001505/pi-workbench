@@ -13,7 +13,7 @@ import {
   withMessages,
 } from "../../shared/transcript.ts";
 import { config, PROVIDER_ID, SETUP_SKILL, TYPESAFE_SKILL } from "./config.ts";
-import { doneIssuesOf, issueQueueClear, issueQueueOf, issueQueueSave, issueQueueStep, recordIssueDone, specWatchOf, specWatchRemove, type Db, type IssueQueueStepState, type RepoRow, type SessionRow, type TicketRow } from "./db.ts";
+import { doneIssuesOf, issueQueueClear, issueQueueOf, issueQueueSave, issueQueueStep, recordIssueDone, specWatchOf, specWatchRemove, type Db, type IssueQueueStepState, type RepoRow, type SessionRow, type TicketRow, type TicketTagCard } from "./db.ts";
 import { git, type GitEnv, redact } from "./git.ts";
 import type { Delivery, MergeResult } from "./delivery.ts";
 import type { GhIssueState } from "./github.ts";
@@ -55,7 +55,7 @@ import {
   type RunSkills,
 } from "./pipeline.ts";
 import { waitsOnUser } from "../../shared/pending.ts";
-import { listAttachedSkills, installedSkill, listInstalledSkills, listTaggableSkills } from "./skill-library.ts";
+import { listAttachedSkills, installedSkill, listInstalledSkills, listTaggableSkills, removeSkillSource as libraryRemove, updateSkillSource as libraryUpdate, type SkillSource } from "./skill-library.ts";
 import { claimRefs, type Column, COLUMNS, holdsQueue, issueNumberOf, type IssueQueueState, issueQueueState, liveQueueSteps, type PrState, resolvedNote, sessionColumn, type SessionLiveStatus } from "../../shared/board.ts";
 import {
   type AutoApproveSettings,
@@ -1602,6 +1602,45 @@ export class SessionManager extends EventEmitter {
     // The Board states the tags on the card's ticket sub-card, so the repo's boards are told to read again.
     this.emit("board", row.repo_id);
     return { ticket: this.tickets(id).find((t) => t.num === num)!, dropped: kept.dropped };
+  }
+
+  /**
+   * Update a Skill source (issue #122): the library re-resolves the source's ref — a branch that moved
+   * on, or the source's default head when it names no ref — and installs the new version only after it
+   * validates. A ticket tag that named a skill the new version no longer carries goes with that skill, so
+   * no card is left stating a tag that names nothing. A clone or validation failure answers with the
+   * library's reason: the source keeps the version that works, and states the failure on the Skills page.
+   */
+  async updateSkillSource(sourceId: string): Promise<SkillSource> {
+    const { source, changed } = await libraryUpdate(this.db, sourceId, await this.gitEnv());
+    this.announceTagChange(changed);
+    return source;
+  }
+
+  /**
+   * Remove a Skill source (issue #122): the source, the rows of the skills it installed and the directory
+   * that holds them go, and with them every ticket's Ticket skill tag that named one of them — on every
+   * card, a Done card included. The answer names what the library dropped, and the cards that lost a tag
+   * read again.
+   */
+  removeSkillSource(sourceId: string): { source: SkillSource; cards: number } {
+    const { source, changed } = libraryRemove(this.db, sourceId);
+    this.announceTagChange(changed);
+    return { source, cards: changed.length };
+  }
+
+  /**
+   * A library change took Ticket skill tags away (issue #122): the card detail and the Board of every
+   * card that lost one read again, as a tag change does. No run going now is touched: `spawn` reads the
+   * skill directories when a run starts, so the change reaches the ticket's next run.
+   */
+  private announceTagChange(cards: TicketTagCard[]) {
+    const repos = new Set<string>();
+    for (const card of cards) {
+      this.emitSummary(card.session, true);
+      repos.add(card.repo);
+    }
+    for (const repoId of repos) this.emit("board", repoId);
   }
 
   /**

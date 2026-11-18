@@ -182,6 +182,8 @@ export type SkillSource = {
   sizeBytes: number;
   createdAt: number;
   updatedAt: number;
+  /** Why the last Update of this source failed, or null when nothing is failing (issue #122). */
+  lastError: string | null;
   skills: InstalledSkill[];
 };
 
