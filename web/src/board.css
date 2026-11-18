@@ -123,6 +123,12 @@
 .kz-substate.running { color: #3b82f6; }
 .kz-substate.blocked { color: var(--kz-danger); }
 .kz-substate.not-planned { color: var(--kz-faint); }
+/* A ticket sub-card's Ticket skill tags (issue #121): one pill per tag name, beside the ticket's buttons. */
+.kz-skilltags { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.kz-skilltag {
+  font-size: 12px; color: var(--kz-muted); background: var(--kz-hover);
+  border-radius: 99px; padding: 2px 9px;
+}
 .kz-tag {
   display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--kz-muted);
   background: var(--kz-hover); border-radius: 99px; padding: 1px 9px 1px 8px;
@@ -234,3 +240,6 @@
 .kz-search .result .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kz-search .result .meta { color: var(--kz-faint); font-size: 12px; }
 .kz-search .note { color: var(--kz-muted); padding: 8px 10px; }
+/* Ticket skills (issue #121): the checkbox list of the installed skills a ticket may be tagged with. */
+.kz-tag-list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.kz-modal .note { color: var(--kz-muted); font-size: 13px; }

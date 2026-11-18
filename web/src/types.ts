@@ -113,6 +113,8 @@ export type Ticket = {
   fixRunId: string | null;
   /** The library ids of the skills this ticket's runs must load (its Ticket skill tags); empty when it carries none. */
   skills: string[];
+  /** Those tags as the names the user reads, in the ticket's own order; empty with no tags. */
+  skillTags: string[];
 };
 
 export type RepoSetupState = "set_up" | "not_set_up" | "in_progress";
