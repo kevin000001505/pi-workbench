@@ -1546,3 +1546,28 @@ test("validateDiagnosis: a diagnosis needs a command and a file:line causal chai
   assert.throws(() => validateDiagnosis({ status: "diagnosed", command: "npm test", chain: ["a.ts:1 x", "somewhere in b.ts"], note: "" }), /file:line \(got "somewhere in b.ts"\)/);
   assert.equal(validateDiagnosis({ status: "diagnosed", command: "c", chain: ["a.ts:1"], harness: "file x", note: "" }).harness, "file x");
 });
+
+test("the pipeline skill names are one list: every prompt calls exactly the names the install check refuses", async () => {
+  const p = await import("../src/pipeline.ts");
+  const ticket: any = { num: 1, title: "t", body: "b", blockedBy: [], trackerRef: null, status: "ready", note: null, runId: null, rescueState: null, rescueRunId: null, fixRunId: null };
+  const prompts = [
+    p.grillPrompt("the task"),
+    p.grillIssuePrompt({ number: 1, title: "i", body: null, htmlUrl: "u", hasParent: false }),
+    p.specPrompt(),
+    p.ticketsPrompt(null, 4096),
+    p.splitPrompt("https://x/1", 4096),
+    p.implementPrompt(ticket, null, null, []),
+    p.reviewPrompt("main", null, null, [ticket]),
+    p.reworkPrompt(null),
+    p.mergePrompt("main", "git merge stopped", ["a.ts"]),
+    p.rescuePrompt({ ticket, spec: null, specRef: null, stopReason: "s", startCommit: null, diff: "", toolErrors: [], sessionFile: null }),
+    p.fixPrompt(ticket, null, null, [], { status: "diagnosed", command: "npm test", chain: ["a.ts:1"], note: "" }),
+    p.retroPrompt([], { pipeline: {}, model: {} }),
+  ];
+  const named = new Set(prompts.flatMap((text) => [...text.matchAll(/^\/skill:([\w-]+)/gm)].map((m) => m[1])));
+  assert.deepEqual(
+    [...named].sort(),
+    [...p.PIPELINE_SKILL_NAMES].sort(),
+    "a prompt that calls a skill outside PIPELINE_SKILL_NAMES, or a listed name no prompt uses, breaks the install check",
+  );
+});

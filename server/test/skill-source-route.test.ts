@@ -236,3 +236,26 @@ test("an add is all-or-nothing: a refused clone, a source with no valid skill, a
   const extra = fs.readdirSync(config.installedSkillsDir).filter((n) => !ids.has(n));
   assert.deepEqual(extra, [], "no temporary clone or half-install is left on disk");
 });
+
+test("a source that carries a pipeline skill name is refused whole, and the reason names the colliding skill", async () => {
+  await waitReady();
+  seedBareRepo(gitRoot, "acme", "shadow", {
+    "tdd/SKILL.md": skillDoc("tdd", "A shadow of the workbench's own tdd."),
+    "frontend/design/SKILL.md": skillDoc("frontend-design", "How this team writes frontend."),
+    "frontend/review/SKILL.md": skillDoc("code-review-style", "A near miss on a pipeline name."),
+  });
+  const url = gitSourceUrl("acme", "shadow");
+  const before = (await api("GET", "/api/skill-sources")).json.length;
+
+  const shadow = await api("POST", "/api/skill-sources", { url });
+  assert.equal(shadow.status, 400);
+  assert.match(shadow.json.error, /\btdd\b/, "the refusal names the colliding skill");
+  assert.match(shadow.json.error, /pipeline/i, "and says why a pipeline name is off limits");
+  assert.equal((await api("GET", "/api/skill-sources")).json.length, before, "the whole source is refused, not only its tdd");
+
+  // Under a subpath that leaves the colliding skill out, the install stands: a name that never
+  // installs cannot shadow a pipeline run, and a near miss on a pipeline name is no collision.
+  const part = await api("POST", "/api/skill-sources", { url, subpath: "frontend" });
+  assert.equal(part.status, 200);
+  assert.deepEqual(skillNames(part.json), ["code-review-style", "frontend-design"], "a name close to a pipeline name is no collision");
+});

@@ -16,6 +16,25 @@
  *   proposes changes; ends with finish_retro. It never blocks the PR.
  */
 
+/**
+ * The skills the pipeline prompts call, one per run kind. The skill library's install check refuses a
+ * Skill source that carries one of these names (issue #114), and the prompt builders below write
+ * their `/skill:` call from this list, so the two read one source of truth.
+ */
+export const PIPELINE_SKILLS = {
+  grill: "grill-with-docs",
+  spec: "to-spec",
+  tickets: "to-tickets",
+  implement: "tdd",
+  review: "code-review",
+  rescue: "diagnosing-bugs",
+  retro: "retro",
+  merge: "resolving-merge-conflicts",
+} as const;
+
+/** The names an installed skill may not take: a shadowed `tdd` silently changes every ticket run. */
+export const PIPELINE_SKILL_NAMES: readonly string[] = Object.values(PIPELINE_SKILLS);
+
 /** `ready`: the tickets are recorded and the session waits for Solve all. `pr`: reviewed, PR open. */
 export type Phase = "setup" | "grill" | "spec" | "tickets" | "ready" | "implement" | "review" | "retro" | "pr" | "done" | "direct";
 
@@ -126,7 +145,7 @@ export const allDone = (tickets: Ticket[]) => tickets.length > 0 && tickets.ever
 export const isSkillCall = (prompt: string) => /^\/skill:[\w-]+ \S/.test(prompt);
 
 export function grillPrompt(task: string) {
-  return `/skill:grill-with-docs ${task}
+  return `/skill:${PIPELINE_SKILLS.grill} ${task}
 
 [pi-workbench pipeline: grill-with-docs → to-spec → to-tickets → implement → review]
 Ask your questions with the ask_user tool. Keep going until the user explicitly confirms, through ask_user, that we have reached a shared understanding.
@@ -146,7 +165,7 @@ export function grillIssuePrompt(issue: TicketSeed["spec"]) {
 
 export function specPrompt() {
   // pi only expands "/skill:name" when an argument follows on the same line.
-  return `/skill:to-spec Write the spec from what we just agreed.
+  return `/skill:${PIPELINE_SKILLS.spec} Write the spec from what we just agreed.
 
 [pi-workbench pipeline]
 Check the testing seams with the user using ask_user. After you publish the spec to the tracker,
@@ -169,7 +188,7 @@ In the breakdown you present, give each ticket a size estimate in tokens against
 }
 
 export function ticketsPrompt(specRef: string | null, contextWindow: number) {
-  return `/skill:to-tickets ${specRef ? `Break the spec (${specRef}) into tickets.` : "Break the spec we just wrote into tickets."}
+  return `/skill:${PIPELINE_SKILLS.tickets} ${specRef ? `Break the spec (${specRef}) into tickets.` : "Break the spec we just wrote into tickets."}
 
 [pi-workbench pipeline]
 ${ticketSizeRule(contextWindow)}
@@ -184,7 +203,7 @@ Then stop. Do not start implementing.`;
  * Issues for Solve all. The issue itself is not changed or closed.
  */
 export function splitPrompt(issueUrl: string, contextWindow: number) {
-  return `/skill:to-tickets Split the issue (${issueUrl}) into tickets: it is too big for one ticket.
+  return `/skill:${PIPELINE_SKILLS.tickets} Split the issue (${issueUrl}) into tickets: it is too big for one ticket.
 
 [pi-workbench pipeline: split of a plain issue]
 ${ticketSizeRule(contextWindow)}
@@ -275,7 +294,7 @@ export function implementPrompt(ticket: Ticket, spec: string | null, specRef: st
   const notes = finished.length
     ? finished.map((t) => `- #${t.num} ${t.title}: ${t.note ?? "(no note)"}`).join("\n")
     : "- none yet";
-  return `/skill:tdd Ticket #${ticket.num}: ${ticket.title}${ticket.trackerRef ? ` (${ticket.trackerRef})` : ""}
+  return `/skill:${PIPELINE_SKILLS.implement} Ticket #${ticket.num}: ${ticket.title}${ticket.trackerRef ? ` (${ticket.trackerRef})` : ""}
 
 ${ticket.body}
 
@@ -292,7 +311,7 @@ If you cannot complete it, call finish_ticket with status "blocked" and explain 
 }
 
 export function reviewPrompt(base: string, spec: string | null, specRef: string | null, tickets: Ticket[]) {
-  return `/skill:code-review Review every change on this branch since origin/${base}.
+  return `/skill:${PIPELINE_SKILLS.review} Review every change on this branch since origin/${base}.
 
 ## Spec
 ${specSection(spec, specRef)}
@@ -308,7 +327,7 @@ Then call finish_review with a short note of what you found and fixed.`;
 /** The grill again, after a card is moved back to To do: grill → spec → tickets rework what is already published. */
 export function reworkPrompt(specRef: string | null) {
   const spec = specRef ? `the spec (${specRef})` : "the spec we wrote";
-  return `/skill:grill-with-docs Rework the spec${specRef ? ` (${specRef})` : ""} and its tickets: the user moved this feature back to plan it again.
+  return `/skill:${PIPELINE_SKILLS.grill} Rework the spec${specRef ? ` (${specRef})` : ""} and its tickets: the user moved this feature back to plan it again.
 
 [pi-workbench pipeline: rework of grill-with-docs → to-spec → to-tickets]
 Ask the user with the ask_user tool what must change. Keep going until the user explicitly confirms, through ask_user, that we have reached a shared understanding.
@@ -320,7 +339,7 @@ Close every ticket issue that the new breakdown drops. record_tickets lists the 
 
 /** The merge run: Approve found a conflict, and `git merge origin/<base>` stopped on these files. */
 export function mergePrompt(base: string, reason: string, files: string[]) {
-  return `/skill:resolving-merge-conflicts Finish the merge of origin/${base} into this branch: ${reason}.
+  return `/skill:${PIPELINE_SKILLS.merge} Finish the merge of origin/${base} into this branch: ${reason}.
 
 ## Conflicted files
 ${files.map((f) => `- ${f}`).join("\n")}
@@ -377,7 +396,7 @@ const DIFF_LIMIT = 20_000;
 
 export function rescuePrompt(h: RescueHandoff) {
   const diff = h.diff.length > DIFF_LIMIT ? `${h.diff.slice(0, DIFF_LIMIT)}\n… (cut; run the git diff yourself for the rest)` : h.diff;
-  return `/skill:diagnosing-bugs Ticket #${h.ticket.num}: ${h.ticket.title} is stuck: the local model hit the stop rule. Find the cause; do not fix it.
+  return `/skill:${PIPELINE_SKILLS.rescue} Ticket #${h.ticket.num}: ${h.ticket.title} is stuck: the local model hit the stop rule. Find the cause; do not fix it.
 
 ## Ticket${h.ticket.trackerRef ? ` (${h.ticket.trackerRef})` : ""}
 ${h.ticket.body}
@@ -447,7 +466,7 @@ ${t.body}
 - Session files: stuck run ${r.sessionFiles.stuck ?? "(not found)"}; rescue run ${r.sessionFiles.rescue ?? "(not found)"}; fix run ${r.sessionFiles.fix ?? "(none)"}`;
     })
     .join("\n\n");
-  return `/skill:retro Review the ${rescued.length} rescued ticket${rescued.length === 1 ? "" : "s"} of this spec: why the local model got stuck, and what would stop it next time.
+  return `/skill:${PIPELINE_SKILLS.retro} Review the ${rescued.length} rescued ticket${rescued.length === 1 ? "" : "s"} of this spec: why the local model got stuck, and what would stop it next time.
 
 ## Rescued tickets
 ${tickets}

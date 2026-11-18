@@ -18,6 +18,7 @@ import {
   type Db,
 } from "./db.ts";
 import { git, type GitEnv } from "./git.ts";
+import { PIPELINE_SKILL_NAMES } from "./pipeline.ts";
 import { scanSkills } from "./skills.ts";
 
 /** An installed skill: what the workbench knows about one SKILL.md the source carried. */
@@ -106,6 +107,14 @@ export async function addSkillSource(
     const found = readSkills(root, id);
     if (!found.length) {
       throw refuse(`${where(url, subpath)} carries no skill: no SKILL.md with a name and a description`);
+    }
+    // A skill named like a pipeline skill would shadow the workbench's own one silently (ADR 0004):
+    // the whole install is refused, and the reason names the colliding skill.
+    const shadowed = found.map((s) => s.name).filter((n) => PIPELINE_SKILL_NAMES.includes(n));
+    if (shadowed.length) {
+      throw refuse(
+        `${where(url, subpath)} carries the pipeline skill name ${shadowed.map((n) => `"${n}"`).join(", ")}: the pipeline's own skills are not installable`,
+      );
     }
     const sizeBytes = treeBytes(root);
     if (sizeBytes > SKILL_INSTALL_SIZE_LIMIT) {
