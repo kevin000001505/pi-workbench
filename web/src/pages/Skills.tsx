@@ -17,7 +17,7 @@ const sizeOf = (bytes: number) =>
   bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`;
 
 /** The file names under one skill, as the row states them. */
-const fileNames = (s: InstalledSkill) => (s.files.length ? s.files.join(", ") : "no files");
+const fileNames = (s: InstalledSkill) => s.files.join(", ");
 
 /** One installed skill: its declared name, its full description, and the files it carries. */
 function SkillRow({ skill }: { skill: InstalledSkill }) {
@@ -64,8 +64,8 @@ function BuiltInRow({ skill, kind }: { skill: Skill; kind: "optional" | "image" 
     <div className="skill-row">
       <div className="row gap">
         <span className="mono">{skill.name}</span>
-        <span className="tag">{kind === "optional" ? "Sessions that pick it" : "Every run"}</span>
-        {skill.manualOnly && <span className="tag">Load it by name</span>}
+        <span className="tag">{kind === "optional" ? "Only the sessions that pick it" : "Every run"}</span>
+        {skill.manualOnly && <span className="tag">Only when you type /skill:name</span>}
       </div>
       <p className="small">{skill.description}</p>
     </div>
