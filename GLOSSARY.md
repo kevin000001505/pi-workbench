@@ -118,6 +118,14 @@ _Avoid_: skill install (say **Add skill** for the action), skill repo
 Your action that brings a git source's skills into the workbench. The workbench clones it shallowly at the ref you named, records the commit, lists every skill it found, and refuses the whole add when one skill name collides with a pipeline skill name.
 _Avoid_: install (as a noun), import, upload
 
+**Update**:
+Your action that takes a **Skill source**'s new version. The workbench re-resolves the source's ref — its default head when the source names no ref — and installs the new version only after it validates. An installed skill the new version carries too keeps its identity, its switch and its **Attach** points; a skill the new version no longer carries goes, and with it every **Ticket skill tag** that named it. A source whose new version cannot install keeps the version that works and states the failure.
+_Avoid_: refresh, sync, reinstall, pull
+
+**Remove**:
+Your action that takes a **Skill source** out of the workbench, after the workbench asks you to confirm. Its installed skills, the directory that holds them, and every **Ticket skill tag** that named one of them go with it.
+_Avoid_: delete, uninstall, clear
+
 **Attach**:
 To wire an installed skill into one pipeline place: grill, spec, tickets, implement, review, or a direct session. The workbench gives the skill to the runs of the places you attached it to and names it in their prompts. An attached skill is available to those runs; a **ticket skill tag** makes it required for one ticket.
 _Avoid_: enable (enabling is per place, not global), bind, hook
@@ -215,3 +223,4 @@ _Avoid_: sync, poll, catch up
 - An **Installed skill** reaches a run only through **Attach**: an attached skill is available to that run, and a **Ticket skill tag** makes that run load it
 - The tickets step proposes each **Ticket**'s **Ticket skill tags** from the skills attached to the tickets place, and you approve the tags with the breakdown; a card that never ran the tickets step gets its attached skills advertised instead
 - A **Skill source** carries its installed skills, and removing it clears every **Ticket skill tag** that named one of them
+- **Update** installs a **Skill source**'s new version in place, so a **Ticket skill tag** survives it while its installed skill is carried forward, and a tag whose skill the new version dropped goes with that skill
