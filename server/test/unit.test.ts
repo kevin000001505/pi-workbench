@@ -710,6 +710,15 @@ test("skillTagNames states each stored tag once, and a tag whose skill is gone n
   assert.deepEqual(skillTagNames([], names), []);
 });
 
+test("a ticket's tags are editable on a pipeline card that is not Done, and on no other card (issue #121)", async () => {
+  const { canEditTicketTags } = await import("../../shared/board.ts");
+  assert.equal(canEditTicketTags({ mode: "pipeline", phase: "ready" }), true, "the card sits in Issues, before the run");
+  assert.equal(canEditTicketTags({ mode: "pipeline", phase: "implement" }), true, "the next ticket run reads the tags");
+  assert.equal(canEditTicketTags({ mode: "pipeline", phase: "pr" }), true, "the card waits in Review for Approve");
+  assert.equal(canEditTicketTags({ mode: "pipeline", phase: "done" }), false, "a Done card states its tags and sets no new one");
+  assert.equal(canEditTicketTags({ mode: "direct", phase: "direct" }), false, "a direct session has no ticket to tag");
+});
+
 test("a card's whole-card actions follow its session: Approve with the PR, Abandon until Done", async () => {
   const { boardCardActions } = await import("../../shared/board.ts");
   const card = (column: string) => ({ column }) as any;

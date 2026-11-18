@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { type Card, COLUMNS } from "../../../shared/board.ts";
+import { type Card, canEditTicketTags, COLUMNS } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import type { SessionSummary, SkillSource } from "../types.ts";
@@ -108,7 +108,7 @@ export function TicketTags({
   ticket: { num: number; title: string };
   carried: string[];
   onClose: () => void;
-  onSaved: (dropped: string[]) => void;
+  onSaved: () => void;
 }) {
   const { toast } = useStore();
   const [library, setLibrary] = useState<{ name: string; description: string; enabled: boolean }[] | null>(null);
@@ -142,7 +142,9 @@ export function TicketTags({
     setSaving(true);
     try {
       const r = await api.patch<{ dropped: string[] }>(`/api/sessions/${sessionId}/tickets/${ticket.num}/skills`, { skills: chosen });
-      onSaved(r.dropped);
+      // The route kept the names the library holds and named back the rest.
+      if (r.dropped.length > 0) toast(`Not tagged: ${r.dropped.join(", ")} — a ticket's tags are the skills installed and switched on.`, "warning");
+      onSaved();
     } catch (e) {
       toast((e as Error).message, "error");
       setSaving(false);
@@ -200,6 +202,39 @@ export function TicketTags({
         </div>
       </form>
     </>
+  );
+}
+
+/**
+ * A ticket's Ticket skill tags and the control that sets them (issue #121): one chip per tag name,
+ * then **Skills** while the card can edit its tags (shared/board.ts canEditTicketTags). The board's
+ * ticket sub-card and the card detail's ticket row both use it, so both state the tags the same way.
+ */
+export function TicketSkills({ tags, session, busy, onEdit }: { tags: string[]; session: { mode: string; phase: string }; busy: boolean; onEdit: () => void }) {
+  const editable = canEditTicketTags(session);
+  if (tags.length === 0 && !editable) return null;
+  return (
+    <span className="kz-skilltags">
+      {tags.map((n) => (
+        <span key={n} className="kz-skilltag" title="A skill this ticket's runs must load">
+          {n}
+        </span>
+      ))}
+      {editable && (
+        <button
+          className="kz-btn"
+          disabled={busy}
+          title="Choose the skills this ticket's runs must load"
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            onEdit();
+          }}
+        >
+          Skills
+        </button>
+      )}
+    </span>
   );
 }
 

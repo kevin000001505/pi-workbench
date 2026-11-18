@@ -1,10 +1,10 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type BoardAction, type Card, type CardStatus, type Column, type IssueQueueState, type SubCard, boardCardActions, COLUMNS, columnCounts, DONE_PAGE, isApproveMove, isPlainUnclaimedCard, issueNumberOf, unclaimedNumber } from "../../../shared/board.ts";
+import { type BoardAction, type Card, type CardStatus, type Column, type IssueQueueState, type SubCard, boardCardActions, canEditTicketTags, COLUMNS, columnCounts, DONE_PAGE, isApproveMove, isPlainUnclaimedCard, issueNumberOf, unclaimedNumber } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import { abandonQuestion, approveQuestion, issueParts, CardDetail, TICKET_STATE } from "./CardDetail.tsx";
 import { type CardAction, CardActions, SOLVE, SOLVE_ALL, SPLIT } from "./CardActions.tsx";
-import { matches, NewCard, Search, TicketTags, typingIn, wordsOf } from "./BoardDialogs.tsx";
+import { matches, NewCard, Search, TicketSkills, TicketTags, typingIn, wordsOf } from "./BoardDialogs.tsx";
 import { isResolvedNote, type Repo, type SessionSummary, type UnclaimedSpecTickets } from "../types.ts";
 import { Spinner } from "../ui.tsx";
 import "../board.css";
@@ -426,7 +426,7 @@ function TicketSubcards({
         // The ticket's Ticket skill tags, beside the ticket's own actions; a Done card states them and
         // sets no new one, as it sets no ticket state.
         const tags = namesOf(t.num);
-        const editable = s.mode === "pipeline" && s.phase !== "done";
+        const editable = canEditTicketTags(s);
         return (
           <a
             key={t.num}
@@ -445,15 +445,7 @@ function TicketSubcards({
             {waitingOn.length > 0 && <span className="desc">waits on {waitingOn.map((b) => `#${b}`).join(", ")}</span>}
             {(solveShown || blocked || tags.length > 0 || editable) && (
               <span className="kz-card-actions">
-                {tags.length > 0 && (
-                  <span className="kz-skilltags" title="The skills this ticket's runs must load">
-                    {tags.map((n) => (
-                      <span key={n} className="kz-skilltag">
-                        {n}
-                      </span>
-                    ))}
-                  </span>
-                )}
+                <TicketSkills tags={tags} session={s} busy={busy} onEdit={() => onEditTags({ num: t.num, title: t.title, tags })} />
                 {solveShown && (
                   <button
                     className="kz-btn"
@@ -495,20 +487,6 @@ function TicketSubcards({
                       {busy ? <Spinner small /> : "Mark done"}
                     </button>
                   </>
-                )}
-                {editable && (
-                  <button
-                    className="kz-btn"
-                    disabled={busy}
-                    title="Choose the skills this ticket's runs must load"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      e.preventDefault();
-                      onEditTags({ num: t.num, title: t.title, tags });
-                    }}
-                  >
-                    Skills
-                  </button>
                 )}
               </span>
             )}
@@ -934,11 +912,10 @@ export function Board({ repoId }: { repoId?: string }) {
           ticket={{ num: tagEdit.num, title: tagEdit.title }}
           carried={tagEdit.tags}
           onClose={() => setTagEdit(null)}
-          onSaved={(dropped) => {
+          onSaved={() => {
             setTagEdit(null);
-            // The route kept what the library holds and named back the rest; the board reads again
-            // so the card states the tags it now carries.
-            if (dropped.length > 0) toast(`Not tagged: ${dropped.join(", ")} — a ticket's tags are the skills installed and switched on.`, "warning");
+            // The dialog stated every name the route dropped. The server's board event makes this
+            // Board read again, so the card states the tags it now carries.
             setRefetch((n) => n + 1);
           }}
         />

@@ -1582,6 +1582,9 @@ export class SessionManager extends EventEmitter {
     const row = this.row(id);
     if (row.mode !== "pipeline") throw Object.assign(new Error("Not a pipeline session"), { status: 409 });
     if (row.phase === "done") throw Object.assign(new Error("The card is done"), { status: 409 });
+    // The list is the whole new set of tags. A body that names none is a mistake, not a clear: an
+    // empty list is what clears the ticket's tags.
+    if (body?.skills === undefined) throw Object.assign(new Error("The body names the ticket's skills (an empty list clears them)"), { status: 400 });
     const stored = this.tickets(id).find((t) => t.num === num);
     if (!stored) throw Object.assign(new Error(`No ticket #${num} on this card`), { status: 409 });
     // The names the user may choose are the library's switched-on skills, beside the names the ticket

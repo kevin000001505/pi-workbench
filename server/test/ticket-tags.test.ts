@@ -174,6 +174,12 @@ test("the route applies the tickets step's rules: a fourth tag is refused with t
   assert.deepEqual(cleared.json.ticket.skills, []);
   assert.equal((await setTags(card, 2, "design-rules")).status, 400, "a tag list is a list");
 
+  // A body that names no list at all is a mistake, not a clear: the route refuses it and stores nothing.
+  const noList = await api("PATCH", `/api/sessions/${card}/tickets/2/skills`, {});
+  assert.equal(noList.status, 400, JSON.stringify(noList.json));
+  assert.match(noList.json.error, /names the ticket's skills/, JSON.stringify(noList.json));
+  assert.deepEqual((await api("GET", "/api/sessions")).json.find((s: any) => s.id === card).tickets[1].skillTags, [], "the refused call stored nothing");
+
   // No such ticket, and no such card: refused, and the card keeps its tags.
   assert.equal((await setTags(card, 9, ["design-rules"])).status, 409);
   assert.equal((await setTags("no-such-card", 1, ["design-rules"])).status, 404);
@@ -218,6 +224,20 @@ test("a skill attached to no pipeline place is still a name a ticket can be tagg
   const again = await setTags(card, 1, ["design-rules"]);
   assert.deepEqual(again.json.dropped, []);
   assert.deepEqual(again.json.ticket.skillTags, ["design-rules"]);
+});
+
+test("a Done card and a direct session refuse a tag change (issue #121)", async () => {
+  // A Done card states the tags its tickets carried and sets no new one, as it sets no ticket state.
+  const done = seedCard("tag-done", [{ num: 1, title: "Write hello.txt" }], { phase: "done" });
+  const refused = await setTags(done, 1, ["design-rules"]);
+  assert.equal(refused.status, 409, JSON.stringify(refused.json));
+  assert.match(refused.json.error, /done/, "the refusal says the card is done");
+  assert.deepEqual((await api("GET", "/api/sessions")).json.find((s: any) => s.id === done).tickets[0].skillTags, [], "and nothing was stored");
+
+  // A direct session has no ticket to tag: the user writes its own prompt.
+  const direct = seedCard("tag-direct", [{ num: 1, title: "Write hello.txt" }], { mode: "direct", phase: "direct" });
+  const directRefused = await setTags(direct, 1, ["design-rules"]);
+  assert.equal(directRefused.status, 409, JSON.stringify(directRefused.json));
 });
 
 /** The board events a WebSocket client hears, from now on. */

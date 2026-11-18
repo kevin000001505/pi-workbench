@@ -230,6 +230,13 @@ export function boardCardActions(card: { column: Column }, s: SessionActionSourc
 }
 
 /**
+ * Whether a ticket of this card can get its Ticket skill tags set by hand (issue #121): a pipeline
+ * card that is not Done. A Done card states its tags and sets no new one, as it sets no ticket state;
+ * a direct session has no tickets to tag, because the user writes its own prompt.
+ */
+export const canEditTicketTags = (s: { mode: string; phase: string }) => s.mode === "pipeline" && s.phase !== "done";
+
+/**
  * Whether dragging this card into `column` is Approve — it merges the card's PR, so the board asks
  * for a confirmation first. Only Review to Done is Approve, for a direct card as for a spec card.
  */

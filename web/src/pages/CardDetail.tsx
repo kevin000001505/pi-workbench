@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Card } from "../../../shared/board.ts";
-import { boardCardActions, COLUMNS, isPlainUnclaimedCard, issueNumberOf, parseIssueRef, refLabel, unclaimedNumber } from "../../../shared/board.ts";
+import { boardCardActions, canEditTicketTags, COLUMNS, isPlainUnclaimedCard, issueNumberOf, parseIssueRef, refLabel, unclaimedNumber } from "../../../shared/board.ts";
 import { api } from "../api.ts";
 import { PendingCard } from "../session/PendingCard.tsx";
 import { phaseLabel } from "../session/PipelinePanel.tsx";
@@ -8,7 +8,7 @@ import { useStore } from "../store.tsx";
 import { isResolvedNote, type SessionSummary, type Ticket, type UnclaimedSpecTickets } from "../types.ts";
 import { Markdown, Spinner } from "../ui.tsx";
 import { CardActions, SOLVE, SPLIT } from "./CardActions.tsx";
-import { TicketTags } from "./BoardDialogs.tsx";
+import { TicketSkills, TicketTags } from "./BoardDialogs.tsx";
 
 /** The TICKET_STATE labels for a card's tickets; the board's ticket sub-cards use the same map. */
 export const TICKET_STATE: Record<Ticket["status"], string> = { ready: "Ready", running: "Running", done: "Done", blocked: "Blocked" };
@@ -73,23 +73,9 @@ function TicketRow({ s, t, tags, busy, onSolve, onEditTags }: { s: SessionSummar
           </button>
         )}
       </div>
-      {(tags.length > 0 || (s.mode === "pipeline" && s.phase !== "done")) && (
+      {(tags.length > 0 || canEditTicketTags(s)) && (
         <div className="row gap wrap kz-detail-tags">
-          {tags.map((n) => (
-            <span key={n} className="kz-skilltag" title="A skill this ticket's runs must load">
-              {n}
-            </span>
-          ))}
-          {s.mode === "pipeline" && s.phase !== "done" && (
-            <button
-              className="kz-btn"
-              disabled={busy}
-              title="Choose the skills this ticket's runs must load"
-              onClick={() => onEditTags({ num: t.num, title: t.title, tags })}
-            >
-              Skills
-            </button>
-          )}
+          <TicketSkills tags={tags} session={s} busy={busy} onEdit={() => onEditTags({ num: t.num, title: t.title, tags })} />
         </div>
       )}
       {t.note && <p className="note">{t.note}</p>}
@@ -475,11 +461,10 @@ export function CardDetail({ card, onClose }: { card: Card; onClose: () => void 
             ticket={{ num: tagEdit.num, title: tagEdit.title }}
             carried={tagEdit.tags}
             onClose={() => setTagEdit(null)}
-            onSaved={(dropped) => {
+            onSaved={() => {
               setTagEdit(null);
-              // The route kept what the library holds and named back the rest. The server's summary
-              // and board events carry the new tags to this detail and to the Board.
-              if (dropped.length > 0) toast(`Not tagged: ${dropped.join(", ")} — a ticket's tags are the skills installed and switched on.`, "warning");
+              // The dialog stated every name the route dropped. The server's summary event carries the
+              // saved ticket to this detail, and its board event to the Board behind it.
             }}
           />
         )}
