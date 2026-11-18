@@ -5,8 +5,10 @@ export type Skill = {
   name: string;
   description: string;
   /** "global" for the image's skills, "repo" for the repo's own .agents/skills or .pi/skills,
-   * "installed" for a skill the skill library took from a git source (never a scanned dir). */
-  source: "global" | "repo" | "installed";
+   * "installed" for a skill the skill library took from a git source (never a scanned dir),
+   * "optional" for a skill baked into the image that only the sessions picking it load (the TypeSafe
+   * skill), so a read can name which kind each one is. */
+  source: "global" | "repo" | "installed" | "optional";
   /** Hidden from the model; only runs when the user types /skill:name. */
   manualOnly: boolean;
   path: string;
@@ -69,7 +71,8 @@ export function scanSkills(root: string, source: Skill["source"]): Skill[] {
 
 /**
  * The skills a session in `cwd` can use: the repo's own first (pi keeps the first on a name clash),
- * then the global ones, then `extraDirs` (single skill dirs only this session loads).
+ * then the global ones, then `extraDirs` (single skill dirs only this session loads), stated as the
+ * optional skills they are.
  */
 export function listSkills(globalDir: string, cwd?: string, extraDirs: string[] = []): Skill[] {
   const repo = cwd
@@ -77,7 +80,7 @@ export function listSkills(globalDir: string, cwd?: string, extraDirs: string[] 
     : [];
   const seen = new Set<string>();
   const out: Skill[] = [];
-  for (const s of [...repo, ...scanSkills(globalDir, "global"), ...extraDirs.flatMap((d) => scanSkills(d, "global"))]) {
+  for (const s of [...repo, ...scanSkills(globalDir, "global"), ...extraDirs.flatMap((d) => scanSkills(d, "optional"))]) {
     if (seen.has(s.name)) continue;
     seen.add(s.name);
     out.push(s);

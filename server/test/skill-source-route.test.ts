@@ -1,9 +1,10 @@
 /**
- * The skill library over HTTP (issue #115): Add skill takes a git URL, an optional ref and an optional
- * subpath, pins the commit it cloned, and answers with the Skill source and the installed skills it
- * found; GET /api/skill-sources lists the library. The source is a local bare git repo cloned through a
- * `file://` URL, in the shape of the repo tests' remotes. Drives the real server (main.ts) on an
- * ephemeral port, in the shape of the settings route test.
+ * The skill library over HTTP (issues #115 and #116): Add skill takes a git URL, an optional ref and an
+ * optional subpath, pins the commit it cloned, and answers with the Skill source and the installed skills
+ * it found; GET /api/skill-sources lists the library, and the skills reads tell the Skills page the image
+ * skills, the installed ones, and the built-in optional skill apart. The source is a local bare git repo
+ * cloned through a `file://` URL, in the shape of the repo tests' remotes. Drives the real server (main.ts)
+ * on an ephemeral port, in the shape of the settings route test.
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
@@ -19,12 +20,19 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wb-skill-source-"));
 process.env.DATA_DIR = path.join(tmp, "data");
 process.env.WORKBENCH_MASTER_KEY = "skill-source-master-key-0123456789";
 process.env.SKILLS_DIR = path.join(tmp, "skills");
+// The image bakes the TypeSafe skill into the optional skills dir; pi never scans it (ADR 0004).
+process.env.OPTIONAL_SKILLS_DIR = path.join(tmp, "optional-skills");
 process.env.HOME = path.join(tmp, "agent-home");
 process.env.PI_EXTENSION = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "pi-extension", "workbench.ts");
 
 // An image skill, so the scanned skills directory has something to tell apart from an installed one.
 fs.mkdirSync(path.join(process.env.SKILLS_DIR, "image-skill"), { recursive: true });
 fs.writeFileSync(path.join(process.env.SKILLS_DIR, "image-skill", "SKILL.md"), "---\nname: image-skill\ndescription: an image skill every run scans\n---\nimage body\n");
+fs.mkdirSync(path.join(process.env.OPTIONAL_SKILLS_DIR, "typesafe-ai"), { recursive: true });
+fs.writeFileSync(
+  path.join(process.env.OPTIONAL_SKILLS_DIR, "typesafe-ai", "SKILL.md"),
+  "---\nname: typesafe-ai\ndescription: Guidance for code that calls TypeSafe System One.\n---\ntypesafe body\n",
+);
 
 /** A port nothing listens on, so a test can start its own server on it. */
 const findFreePort = () =>
@@ -355,6 +363,29 @@ test("a body that is not a source is refused with a reason, not a crash", async 
     assert.match(res.json.error, /git URL/, `the refusal says what Add skill needs (${JSON.stringify(body)})`);
   }
   assert.equal((await api("GET", "/api/skill-sources")).json.length, before, "a refused body installs nothing");
+});
+
+test("the skills reads tell the image skills and the built-in optional skill apart, so the Skills page can state both", async () => {
+  await waitReady();
+  // Without a session and without the optional skill asked for: the image skills only, as the Skills page
+  // lists them read-only.
+  const scanned = (await api("GET", "/api/skills")).json;
+  assert.ok(scanned.some((s: any) => s.name === "image-skill" && s.source === "global"), "the image skill is stated as an image skill");
+  assert.ok(!scanned.some((s: any) => s.name === "typesafe-ai"), "a run that did not pick the optional skill does not get it");
+
+  // `typesafe=1`: the same read with the built-in optional skill, so one page states everything a session
+  // can reach. The read names which one it is: the page never has to guess a name.
+  const withOptional = (await api("GET", "/api/skills?typesafe=1")).json;
+  const optional = withOptional.filter((s: any) => s.source === "optional");
+  assert.deepEqual(
+    optional.map(({ name, description }: any) => ({ name, description })),
+    [{ name: "typesafe-ai", description: "Guidance for code that calls TypeSafe System One." }],
+    "the built-in optional skill is stated as optional, with its description",
+  );
+  assert.ok(
+    withOptional.some((s: any) => s.name === "image-skill" && s.source === "global"),
+    "the image skills stay beside it in the same read",
+  );
 });
 
 test("a URL that reads as a git option is refused as a source, not run as one", async () => {
