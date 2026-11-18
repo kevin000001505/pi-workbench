@@ -150,6 +150,8 @@ const LOCAL_PATH = /^(\.{0,2}[\\/]|[A-Za-z]:[\\/]|~[\\/])/;
 function sourceUrl(value: unknown): string {
   const url = typeof value === "string" ? value.trim() : "";
   if (!url) throw refuse("Add skill needs the source's git URL");
+  // A leading dash would reach git as an option, not as a source (`--ext::sh -c …` included).
+  if (url.startsWith("-")) throw refuse(`Add skill needs the source's git URL; "${url}" is not one`);
   if (LOCAL_PATH.test(url)) {
     throw refuse(`Add skill needs a git URL; "${url}" is a local path — name it as file://${url}`);
   }
@@ -197,7 +199,7 @@ const megabytes = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 async function resolveCommit(url: string, ref: string | null, env: GitEnv): Promise<string> {
   let listed: string;
   try {
-    listed = await git(config.dataDir, ["ls-remote", url, ref ?? "HEAD"], env);
+    listed = await git(config.dataDir, ["ls-remote", "--", url, ref ?? "HEAD"], env);
   } catch (err) {
     throw refuse(`Add skill could not read ${where(url, null)}: ${(err as Error).message}`);
   }
@@ -220,7 +222,7 @@ async function cloneAt(dir: string, url: string, ref: string | null, env: GitEnv
   fs.mkdirSync(dir, { recursive: true });
   try {
     await git(dir, ["init", "-q"], env);
-    await git(dir, ["remote", "add", "origin", url], env);
+    await git(dir, ["remote", "add", "--", "origin", url], env);
     await git(dir, ["fetch", "-q", "--depth", "1", "--no-tags", "origin", commit], env);
     await git(dir, ["checkout", "-q", "--detach", "FETCH_HEAD"], env);
   } catch (err) {
