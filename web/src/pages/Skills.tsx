@@ -3,10 +3,13 @@
  *
  * Add skill takes a git URL, an optional ref and an optional subpath, and states the refusal inline.
  * Every Skill source is a row that states what it was cloned from, the commit it pinned and how big the
- * install is, with the installed skills listed under it. The read-only rows state what a session can
- * reach without the library: the built-in optional TypeSafe skill, and the image skills.
+ * install is, with the installed skills listed under it. Each installed skill row carries its on/off
+ * switch and its attach checkboxes: the pipeline places whose runs load it (issue #117). The read-only
+ * rows state what a session can reach without the library: the built-in optional TypeSafe skill, and
+ * the image skills.
  */
 import { useCallback, useEffect, useState } from "react";
+import { ATTACH_LABELS, ATTACH_POINTS, type AttachPoint } from "../../../shared/attach.ts";
 import { api } from "../api.ts";
 import { useStore } from "../store.tsx";
 import type { InstalledSkill, Skill, SkillSource } from "../types.ts";
@@ -19,19 +22,47 @@ const sizeOf = (bytes: number) =>
 /** The file names under one skill, as the row states them. */
 const fileNames = (s: InstalledSkill) => s.files.join(", ");
 
-/** One installed skill: its declared name, its full description, and the files it carries. */
-function SkillRow({ skill }: { skill: InstalledSkill }) {
+/**
+ * One installed skill: its declared name, its full description, the files it carries, its on/off
+ * switch and its attach checkboxes. Attaching is the only way an installed skill reaches a run, so
+ * the row states what the setting means: which runs load it.
+ */
+function SkillRow({ skill, saving, onSave }: { skill: InstalledSkill; saving: boolean; onSave: (skillId: string, body: { enabled?: boolean; attach?: string[] }) => void }) {
+  const off = !skill.enabled;
+  const attachOf = (point: AttachPoint, checked: boolean) => ATTACH_POINTS.filter((p) => (p === point ? checked : skill.attach.includes(p)));
   return (
-    <div className="skill-row">
-      <span className="mono">{skill.name}</span>
+    <div className={`skill-row${off ? " skill-row-off" : ""}`}>
+      <div className="row gap wrap">
+        <span className="mono">{skill.name}</span>
+        <label className="row gap small">
+          <input type="checkbox" checked={skill.enabled} disabled={saving} onChange={(e) => onSave(skill.id, { enabled: e.target.checked })} />
+          On
+        </label>
+      </div>
       <p className="small">{skill.description}</p>
+      <div className="row gap wrap small skill-attach">
+        {ATTACH_POINTS.map((p) => (
+          <label key={p} className="row gap">
+            <input
+              type="checkbox"
+              checked={skill.attach.includes(p)}
+              disabled={saving}
+              onChange={(e) => onSave(skill.id, { attach: attachOf(p, e.target.checked) })}
+            />
+            {ATTACH_LABELS[p]}
+          </label>
+        ))}
+      </div>
+      <span className="muted small">
+        {off ? "Switched off: no run loads it, and its attach points stay." : skill.attach.length === 0 ? "Attached to no place: no run loads it." : `Attached to: ${skill.attach.map((p) => ATTACH_LABELS[p]).join(", ")}. Its next run of those places loads it.`}
+      </span>
       <span className="muted small">Files: {fileNames(skill)}</span>
     </div>
   );
 }
 
 /** One Skill source, with the skills it installed under it. */
-function SourceRow({ source }: { source: SkillSource }) {
+function SourceRow({ source, saving, onSave }: { source: SkillSource; saving: string | null; onSave: (skillId: string, body: { enabled?: boolean; attach?: string[] }) => void }) {
   return (
     <article className="card-list-row">
       <div className="row gap">
@@ -51,7 +82,7 @@ function SourceRow({ source }: { source: SkillSource }) {
       </div>
       <div className="skill-rows">
         {source.skills.map((s) => (
-          <SkillRow key={s.id} skill={s} />
+          <SkillRow key={s.id} skill={s} saving={saving === s.id} onSave={onSave} />
         ))}
       </div>
     </article>
@@ -82,6 +113,8 @@ export function Skills() {
   const [subpath, setSubpath] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  /** The installed skill whose setting is on its way to the server. */
+  const [saving, setSaving] = useState<string | null>(null);
 
   const load = useCallback(() => {
     api
@@ -94,6 +127,24 @@ export function Skills() {
       .catch(() => setReachable(null));
   }, [toast]);
   useEffect(load, [load]);
+
+  /**
+   * Store one skill's switch or attach points, and show what the server stored. The change reaches the
+   * next run of the place it names: a run going now keeps the skills it started with.
+   */
+  const saveSkill = async (skillId: string, body: { enabled?: boolean; attach?: string[] }) => {
+    const source = sources.find((s) => s.skills.some((k) => k.id === skillId));
+    if (!source) return;
+    setSaving(skillId);
+    try {
+      const saved = await api.patch<InstalledSkill>(`/api/skill-sources/${source.id}/skills/${skillId}`, body);
+      setSources((list) => list.map((s) => (s.id === source.id ? { ...s, skills: s.skills.map((k) => (k.id === saved.id ? saved : k)) } : s)));
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setSaving(null);
+    }
+  };
 
   const add = async () => {
     setAdding(true);
@@ -175,12 +226,16 @@ export function Skills() {
         <h2>
           Skill library <span className="muted small">({sources.length} {sources.length === 1 ? "source" : "sources"}, {skillCount} installed)</span>
         </h2>
+        <p className="muted small">
+          Tick the pipeline places an installed skill should serve: only the runs of a ticked place load it, and the next run of that place is
+          the one a change reaches. Switch it off to reach no run at all.
+        </p>
         {sources.length === 0 ? (
           <p className="muted">No Skill source yet. Add one above: the workbench clones it, records the commit, and lists its skills here.</p>
         ) : (
           <div className="card-list">
             {sources.map((s) => (
-              <SourceRow key={s.id} source={s} />
+              <SourceRow key={s.id} source={s} saving={saving} onSave={(skillId, body) => void saveSkill(skillId, body)} />
             ))}
           </div>
         )}

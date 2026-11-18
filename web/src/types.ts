@@ -1,4 +1,5 @@
 import { waitsOnUser } from "../../shared/pending.ts";
+import type { AttachPoint } from "../../shared/attach.ts";
 
 export type SessionStatus = "stopped" | "starting" | "running" | "waiting" | "idle" | "error";
 
@@ -160,6 +161,10 @@ export type InstalledSkill = {
   /** The server's directory for it; the page never shows it. */
   dir: string;
   files: string[];
+  /** The on/off switch: an off skill reaches no run, and its attach points stay as they are. */
+  enabled: boolean;
+  /** The pipeline places it is attached to, in the pipeline's order (shared/attach.ts). */
+  attach: AttachPoint[];
 };
 
 /** A Skill source the user added with Add skill: what it was cloned from, and what it installed. */

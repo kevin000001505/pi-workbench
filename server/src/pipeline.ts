@@ -16,6 +16,7 @@
  *   proposes changes; ends with finish_retro. It never blocks the PR.
  */
 import { SETUP_SKILL } from "./config.ts";
+import { ATTACH_POINTS, isAttachPoint, type AttachPoint } from "../../shared/attach.ts";
 
 /**
  * The skills the pipeline prompts call, one per run kind: every phase, the setup run, and the special
@@ -43,13 +44,11 @@ export type Phase = "setup" | "grill" | "spec" | "tickets" | "ready" | "implemen
 
 /**
  * The pipeline places an installed skill can attach to (issue #117, ADR 0004). The library stores
- * these names, so a setting outside them is refused rather than quietly ignored.
+ * these names, so a setting outside them is refused rather than quietly ignored. They live in
+ * shared/attach.ts, so the page that sets them and the server that reads them name them the same way.
  */
-export const ATTACH_POINTS = ["grill", "spec", "tickets", "implement", "review", "direct"] as const;
-export type AttachPoint = (typeof ATTACH_POINTS)[number];
-
-/** Whether an unchecked value names one attach point. */
-export const isAttachPoint = (v: unknown): v is AttachPoint => typeof v === "string" && (ATTACH_POINTS as readonly string[]).includes(v);
+export { ATTACH_POINTS, isAttachPoint } from "../../shared/attach.ts";
+export type { AttachPoint } from "../../shared/attach.ts";
 
 /** What a run is, as the attach table reads it. `ticketRun` and `specialRun` name a run with its own
  * pi session id; the session's own conversation run is named by its `mode` and `phase`. */
