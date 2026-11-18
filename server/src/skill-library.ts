@@ -50,6 +50,9 @@ export type SkillSource = {
 /** The directory one install keeps. It lives in the data volume, so a restart keeps it. */
 export const skillInstallDir = (sourceId: string) => path.join(config.installedSkillsDir, sourceId);
 
+/** How much one install may bring: the tree the chosen subpath holds, git's own objects aside. */
+export const SKILL_INSTALL_SIZE_LIMIT = 10 * 1024 * 1024;
+
 /** The library: every Skill source with the skills it installed. */
 export function listSkillSources(db: Db): SkillSource[] {
   const bySource = new Map<string, InstalledSkill[]>();
@@ -101,7 +104,13 @@ export async function addSkillSource(
     // the install directory, which is where the tree lands once everything checks out.
     const root = installRoot(temp, url, subpath);
     const found = readSkills(root, id);
+    if (!found.length) {
+      throw refuse(`${where(url, subpath)} carries no skill: no SKILL.md with a name and a description`);
+    }
     const sizeBytes = treeBytes(root);
+    if (sizeBytes > SKILL_INSTALL_SIZE_LIMIT) {
+      throw refuse(`${where(url, subpath)} brings ${megabytes(sizeBytes)}, over the 10 MB install cap`);
+    }
 
     // The clone's git objects are not part of the install: only the tree of skills moves into place.
     fs.rmSync(path.join(temp, ".git"), { recursive: true, force: true });
@@ -166,16 +175,28 @@ function installRoot(temp: string, url: string, subpath: string | null): string 
 /** A full commit hash. `git ls-remote` lists refs, so a commit named as the ref never appears in it. */
 const FULL_SHA = /^[0-9a-f]{40}$/i;
 
+/** The source, as a refusal names it. */
+const where = (url: string, subpath: string | null) => (subpath ? `${url} (${subpath})` : url);
+
+const megabytes = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+
 /**
  * The one commit the source pins: `ref` (a branch, a tag or a full commit hash) resolved through
- * `git ls-remote`, or the source's default head when no ref is named.
+ * `git ls-remote`, or the source's default head when no ref is named. A source git cannot reach is a
+ * refusal that carries git's own reason.
  */
 async function resolveCommit(url: string, ref: string | null, env: GitEnv): Promise<string> {
-  const listed = (await git(config.dataDir, ["ls-remote", url, ref ?? "HEAD"], env))
+  let listed: string;
+  try {
+    listed = await git(config.dataDir, ["ls-remote", url, ref ?? "HEAD"], env);
+  } catch (err) {
+    throw refuse(`Add skill could not read ${url}: ${(err as Error).message}`);
+  }
+  const sha = listed
     .split("\n")
     .map((l) => l.trim())
-    .filter(Boolean);
-  const sha = listed[0]?.split("\t")[0];
+    .filter(Boolean)[0]
+    ?.split("\t")[0];
   if (sha) return sha;
   if (ref && FULL_SHA.test(ref)) return ref;
   if (ref) throw refuse(`${url} has no branch or tag named "${ref}"`);
@@ -184,15 +205,18 @@ async function resolveCommit(url: string, ref: string | null, env: GitEnv): Prom
 
 /**
  * Clone `url` shallowly into `dir` at the commit `ref` resolves to, and answer with that commit.
- * A URL git cannot reach comes back as git's own reason.
  */
 async function cloneAt(dir: string, url: string, ref: string | null, env: GitEnv): Promise<string> {
   const commit = await resolveCommit(url, ref, env);
   fs.mkdirSync(dir, { recursive: true });
-  await git(dir, ["init", "-q"], env);
-  await git(dir, ["remote", "add", "origin", url], env);
-  await git(dir, ["fetch", "-q", "--depth", "1", "--no-tags", "origin", commit], env);
-  await git(dir, ["checkout", "-q", "--detach", "FETCH_HEAD"], env);
+  try {
+    await git(dir, ["init", "-q"], env);
+    await git(dir, ["remote", "add", "origin", url], env);
+    await git(dir, ["fetch", "-q", "--depth", "1", "--no-tags", "origin", commit], env);
+    await git(dir, ["checkout", "-q", "--detach", "FETCH_HEAD"], env);
+  } catch (err) {
+    throw refuse(`Add skill could not clone ${url} at ${commit.slice(0, 12)}: ${(err as Error).message}`);
+  }
   return commit;
 }
 

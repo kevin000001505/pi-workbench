@@ -206,3 +206,33 @@ test("a subpath installs the skills found under it, deeper nesting included, and
   assert.match(escape.json.error, /outside/);
   assert.equal((await api("GET", "/api/skill-sources")).json.length, before + 2, "a refusal installs nothing");
 });
+
+test("an add is all-or-nothing: a refused clone, a source with no valid skill, and a source over the cap install nothing", async () => {
+  await waitReady();
+  const { config } = await import("../src/config.ts");
+  const library = async () => (await api("GET", "/api/skill-sources")).json;
+  seedBareRepo(gitRoot, "acme", "empty", { "README.md": "# nothing here\n", "notes.txt": "no skill in this source\n" });
+  seedBareRepo(gitRoot, "acme", "huge", {
+    "big/SKILL.md": skillDoc("big-skill", "A skill in a source over the cap."),
+    "big/blob.txt": "x".repeat(11 * 1024 * 1024),
+  });
+  const before = await library();
+
+  const unreachable = await api("POST", "/api/skill-sources", { url: gitSourceUrl("acme", "gone") });
+  assert.equal(unreachable.status, 400);
+  assert.match(unreachable.json.error, /acme\/gone/, "a refused clone answers with the source it could not reach");
+
+  const noSkill = await api("POST", "/api/skill-sources", { url: gitSourceUrl("acme", "empty") });
+  assert.equal(noSkill.status, 400);
+  assert.match(noSkill.json.error, /SKILL\.md/, "the refusal says what the source was missing");
+
+  const overCap = await api("POST", "/api/skill-sources", { url: gitSourceUrl("acme", "huge") });
+  assert.equal(overCap.status, 400);
+  assert.match(overCap.json.error, /10 MB/, "the refusal states the cap it hit");
+
+  assert.deepEqual(await library(), before, "a refused add leaves nothing in the library");
+  // Nothing half-installed survives: the install directory holds only what the library lists.
+  const ids = new Set(before.map((s: any) => s.id));
+  const extra = fs.readdirSync(config.installedSkillsDir).filter((n) => !ids.has(n));
+  assert.deepEqual(extra, [], "no temporary clone or half-install is left on disk");
+});
